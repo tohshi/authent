@@ -156,7 +156,7 @@ Legend:
 | Replay protection | ✅ | `Store.AdvanceCounter` is a compare-and-set on the last used step |
 | Pluggable store | ✅ | `Store` interface |
 | Recovery codes | ⬜ | |
-| HOTP counter-based authentication | ⬜ | Only the HOTP function is used, for TOTP |
+| HOTP counter-based authentication | ✅ | `HOTPAuthenticator`: look-ahead window, resynchronization with two consecutive codes (RFC 4226 §7.4), atomic counter advance; `Key.HOTPURI` |
 | Parsing `otpauth://` URIs | ⬜ | |
 | Encrypting secrets at rest | ➖ | Depends on the deployment's key management; belongs in the store |
 | Rate limiting | ➖ | Depends on deployment; belongs in the caller |

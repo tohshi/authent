@@ -247,6 +247,21 @@ p, err := auth.Authenticate(ctx, "u1", code)
 - Secrets are at least 128 bits. They must be stored readable, so encrypt
   them at rest. Rate limiting failed attempts is up to the caller.
 
+Counter-based tokens (HOTP, RFC 4226) use a `HOTPAuthenticator`:
+```go
+uri, _ := key.HOTPURI("Example", "alice@example.com", 0)
+hotp, _ := totp.NewHOTPAuthenticator(hstore) // hstore implements totp.HOTPStore
+p, err := hotp.Authenticate(ctx, "u1", code)
+p, err = hotp.Resync(ctx, "u1", code1, code2) // after the token ran ahead
+```
+- `Authenticate` accepts the next 10 counter values (`WithLookAhead`, at
+  most 50) and moves the stored counter past the match, so earlier codes
+  stop working.
+- `Resync` needs two consecutive codes within the next 1000 values
+  (`WithResyncWindow`), as RFC 4226 §7.4 describes.
+- `HOTPStore.AdvanceHOTPCounter` must be an atomic compare-and-set, like
+  `AdvanceCounter`.
+
 ### WebAuthn
 ```go
 rp, _ := webauthn.New(webauthn.Config{

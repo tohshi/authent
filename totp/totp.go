@@ -111,8 +111,18 @@ func GenerateKey(opts ...KeyOption) (Key, error) {
 	return k, nil
 }
 
-// Validate reports whether the key can be used.
+// Validate reports whether the key can be used for TOTP.
 func (k Key) Validate() error {
+	if err := k.validateHOTP(); err != nil {
+		return err
+	}
+	if k.Period < time.Second || k.Period%time.Second != 0 {
+		return fmt.Errorf("totp: period must be a positive whole number of seconds, got %v", k.Period)
+	}
+	return nil
+}
+
+func (k Key) validateHOTP() error {
 	if _, _, ok := k.Algorithm.hash(); !ok {
 		return fmt.Errorf("totp: unsupported algorithm %q", k.Algorithm)
 	}
@@ -122,15 +132,20 @@ func (k Key) Validate() error {
 	if k.Digits < 6 || k.Digits > 8 {
 		return fmt.Errorf("totp: digits must be between 6 and 8, got %d", k.Digits)
 	}
-	if k.Period < time.Second || k.Period%time.Second != 0 {
-		return fmt.Errorf("totp: period must be a positive whole number of seconds, got %v", k.Period)
-	}
 	return nil
 }
 
 // EncodedSecret returns the secret in unpadded base32, for users who type
 // it into their app instead of scanning the QR code.
 func (k Key) EncodedSecret() string { return b32.EncodeToString(k.Secret) }
+
+// URIType is the OTP type of an otpauth:// URI.
+type URIType string
+
+const (
+	TypeTOTP URIType = "totp"
+	TypeHOTP URIType = "hotp"
+)
 
 // URI returns the otpauth:// URI that authenticator apps read from a QR
 // code. issuer names the service and account names the user within it;
@@ -139,6 +154,19 @@ func (k Key) URI(issuer, account string) (string, error) {
 	if err := k.Validate(); err != nil {
 		return "", err
 	}
+	return k.uri(TypeTOTP, issuer, account, "period="+strconv.Itoa(int(k.Period/time.Second)))
+}
+
+// HOTPURI returns the otpauth://hotp URI for a counter-based key whose
+// next code is for counter. The Period is not used.
+func (k Key) HOTPURI(issuer, account string, counter uint64) (string, error) {
+	if err := k.validateHOTP(); err != nil {
+		return "", err
+	}
+	return k.uri(TypeHOTP, issuer, account, "counter="+strconv.FormatUint(counter, 10))
+}
+
+func (k Key) uri(typ URIType, issuer, account, last string) (string, error) {
 	if account == "" {
 		return "", errors.New("totp: account is required")
 	}
@@ -156,9 +184,9 @@ func (k Key) URI(issuer, account string) (string, error) {
 	q = append(q,
 		"algorithm="+string(k.Algorithm),
 		"digits="+strconv.Itoa(k.Digits),
-		"period="+strconv.Itoa(int(k.Period/time.Second)),
+		last,
 	)
-	return "otpauth://totp/" + label + "?" + strings.Join(q, "&"), nil
+	return "otpauth://" + string(typ) + "/" + label + "?" + strings.Join(q, "&"), nil
 }
 
 // queryEscape escapes spaces as %20, because some apps display "+" as is.

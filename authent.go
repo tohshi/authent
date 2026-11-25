@@ -28,6 +28,7 @@ const (
 	MethodSession  Method = "session"
 	MethodOIDC     Method = "oidc"
 	MethodTOTP     Method = "totp"
+	MethodHOTP     Method = "hotp"
 	MethodWebAuthn Method = "webauthn"
 	MethodDPoP     Method = "dpop"
 	MethodAPIKey   Method = "apikey"
