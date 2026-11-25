@@ -44,6 +44,12 @@ type fakeProvider struct {
 	mutate      func(c *jwt.Claims)
 	omitIDToken bool
 	issuer      string // advertised issuer; defaults to the server URL
+	// userinfoEndpoint overrides the advertised userinfo_endpoint; "-"
+	// omits it.
+	userinfoEndpoint string
+	accessTokens     map[string]bool // issued access tokens
+	// userinfo overrides the UserInfo response for a valid access token.
+	userinfo func(w http.ResponseWriter, r *http.Request)
 }
 
 func newFakeProvider(t *testing.T) *fakeProvider {
@@ -53,18 +59,26 @@ func newFakeProvider(t *testing.T) *fakeProvider {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &fakeProvider{signer: signer, grants: map[string]grant{}}
+	p := &fakeProvider{signer: signer, grants: map[string]grant{}, accessTokens: map[string]bool{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		iss := p.issuer
 		if iss == "" {
 			iss = p.URL
 		}
+		userinfo := p.userinfoEndpoint
+		switch userinfo {
+		case "":
+			userinfo = p.URL + "/userinfo"
+		case "-":
+			userinfo = ""
+		}
 		_ = json.MarshalWrite(w, Provider{
 			Issuer:                           iss,
 			AuthorizationEndpoint:            p.URL + "/authorize",
 			TokenEndpoint:                    p.URL + "/token",
 			JWKSURI:                          p.URL + "/jwks",
+			UserinfoEndpoint:                 userinfo,
 			IDTokenSigningAlgValuesSupported: []string{"ES256", "HS256"},
 		})
 	})
@@ -72,6 +86,7 @@ func newFakeProvider(t *testing.T) *fakeProvider {
 		_ = json.MarshalWrite(w, jwt.JWKSet{Keys: []jwt.JWK{p.signer.VerificationKey()}})
 	})
 	mux.HandleFunc("POST /token", p.token)
+	mux.HandleFunc("GET /userinfo", p.userinfoHandler)
 	p.Server = httptest.NewTLSServer(mux)
 	t.Cleanup(p.Close)
 	return p
@@ -129,6 +144,9 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 	}
 
 	accessToken := "access-" + r.PostForm.Get("code")
+	p.mu.Lock()
+	p.accessTokens[accessToken] = true
+	p.mu.Unlock()
 	atSum := sha256.Sum256([]byte(accessToken))
 	claims := jwt.Claims{
 		Issuer:    p.URL,
