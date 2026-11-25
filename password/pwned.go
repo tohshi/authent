@@ -38,7 +38,6 @@ func NewPwnedPasswordsChecker(client *http.Client) *PwnedPasswordsChecker {
 func (c *PwnedPasswordsChecker) Breached(ctx context.Context, password string) (bool, error) {
 	// The Pwned Passwords range API requires SHA-1 for its lookup key.
 	// Password storage uses Argon2id; this digest is never stored.
-	// codeql[go/weak-sensitive-data-hashing]
 	digest := sha1.Sum([]byte(password))
 	hash := make([]byte, hex.EncodedLen(len(digest)))
 	hex.Encode(hash, digest[:])
