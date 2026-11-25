@@ -71,7 +71,7 @@ Legend:
 | Redis or SQL stores | ⬜ | |
 | Revoking all sessions of a subject ("log out everywhere") | ⬜ | Needs a subject index in the store |
 | Listing a subject's active sessions | ⬜ | |
-| Conflict detection on concurrent saves | ⬜ | Currently last write wins |
+| Conflict detection on concurrent saves | ✅ | Versioned records with compare-and-swap in every store; `ErrConflict` on a lost race |
 | Structured session values | ⬜ | Currently `map[string]string` |
 | Cookie helpers | ➖ | The core does not depend on HTTP; planned for an adapter package |
 

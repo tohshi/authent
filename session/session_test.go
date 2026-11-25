@@ -28,20 +28,40 @@ func (c *clock) advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// countingStore records calls to the wrapped store.
+// countingStore records calls to the wrapped store. Its hooks, if set,
+// run before the matching call and simulate concurrent requests.
 type countingStore struct {
 	*MemoryStore
 	mu    sync.Mutex
 	saves int
 	keys  []string
+
+	beforeSave   func(key string, r Record)
+	beforeDelete func(key string, version uint64)
 }
 
-func (c *countingStore) Save(ctx context.Context, key string, s Session, exp time.Time) error {
+func (c *countingStore) Save(ctx context.Context, key string, r Record) error {
 	c.mu.Lock()
 	c.saves++
 	c.keys = append(c.keys, key)
+	hook := c.beforeSave
+	c.beforeSave = nil
 	c.mu.Unlock()
-	return c.MemoryStore.Save(ctx, key, s, exp)
+	if hook != nil {
+		hook(key, r)
+	}
+	return c.MemoryStore.Save(ctx, key, r)
+}
+
+func (c *countingStore) Delete(ctx context.Context, key string, version uint64) error {
+	c.mu.Lock()
+	hook := c.beforeDelete
+	c.beforeDelete = nil
+	c.mu.Unlock()
+	if hook != nil {
+		hook(key, version)
+	}
+	return c.MemoryStore.Delete(ctx, key, version)
 }
 
 func setup(t *testing.T, opts ...Option) (*Manager, *countingStore, *clock) {
@@ -250,9 +270,9 @@ func TestStoreErrorIsNotUnauthenticated(t *testing.T) {
 
 type failingStore struct{ err error }
 
-func (f failingStore) Load(context.Context, string) (Session, error)          { return Session{}, f.err }
-func (f failingStore) Save(context.Context, string, Session, time.Time) error { return f.err }
-func (f failingStore) Delete(context.Context, string) error                   { return f.err }
+func (f failingStore) Load(context.Context, string) (Record, error) { return Record{}, f.err }
+func (f failingStore) Save(context.Context, string, Record) error   { return f.err }
+func (f failingStore) Delete(context.Context, string, uint64) error { return f.err }
 
 func TestNewManagerValidates(t *testing.T) {
 	for _, opts := range [][]Option{
@@ -279,5 +299,117 @@ func TestMemoryStoreDeleteExpired(t *testing.T) {
 	store.DeleteExpired()
 	if store.Len() != 0 {
 		t.Fatalf("Len = %d", store.Len())
+	}
+}
+
+func TestSaveConflict(t *testing.T) {
+	m, _, _ := setup(t)
+	ctx := context.Background()
+	token, _, _ := m.Create(ctx, alice)
+	a, _ := m.Get(ctx, token)
+	b, _ := m.Get(ctx, token)
+	a.Values["k"] = "a"
+	if err := m.Save(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	b.Values["k"] = "b"
+	if err := m.Save(ctx, b); !errors.Is(err, ErrConflict) || errors.Is(err, authent.ErrUnauthenticated) {
+		t.Fatalf("Save of a stale copy: err = %v, want ErrConflict", err)
+	}
+	got, _ := m.Get(ctx, token)
+	if got.Values["k"] != "a" {
+		t.Fatalf("Values = %v, want the first save", got.Values)
+	}
+	got.Values["k"] = "c"
+	if err := m.Save(ctx, got); err != nil {
+		t.Fatalf("Save after reloading: %v", err)
+	}
+}
+
+func TestSaveExpired(t *testing.T) {
+	m, _, c := setup(t)
+	ctx := context.Background()
+	_, s, _ := m.Create(ctx, alice)
+	c.advance(31 * time.Minute)
+	s.Values["k"] = "v"
+	if err := m.Save(ctx, s); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("Save of an idle-expired session: err = %v, want ErrInvalidSession", err)
+	}
+}
+
+func TestGetTouchConflictUsesNewerCopy(t *testing.T) {
+	m, store, c := setup(t)
+	ctx := context.Background()
+	token, _, _ := m.Create(ctx, alice)
+	other, _ := m.Get(ctx, token)
+	c.advance(2 * time.Minute)
+	store.beforeSave = func(string, Record) {
+		other.Values["k"] = "concurrent"
+		if err := m.Save(ctx, other); err != nil {
+			t.Error(err)
+		}
+	}
+	got, err := m.Get(ctx, token)
+	if err != nil {
+		t.Fatalf("Get with a conflicting touch: %v", err)
+	}
+	if got.Values["k"] != "concurrent" {
+		t.Fatalf("Values = %v, want the concurrent save", got.Values)
+	}
+	got.Values["k"] = "next"
+	if err := m.Save(ctx, got); err != nil {
+		t.Fatalf("Save of the returned copy: %v", err)
+	}
+}
+
+func TestRotateConflict(t *testing.T) {
+	m, store, _ := setup(t)
+	ctx := context.Background()
+	token, _, _ := m.Create(ctx, alice)
+	other, _ := m.Get(ctx, token)
+	store.beforeDelete = func(string, uint64) {
+		other.Values["k"] = "concurrent"
+		if err := m.Save(ctx, other); err != nil {
+			t.Error(err)
+		}
+	}
+	if _, _, err := m.Rotate(ctx, token); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Rotate racing a save: err = %v, want ErrConflict", err)
+	}
+	got, err := m.Get(ctx, token)
+	if err != nil || got.Values["k"] != "concurrent" {
+		t.Fatalf("old session after a failed Rotate = %+v, %v", got, err)
+	}
+	if store.Len() != 1 {
+		t.Fatalf("store holds %d sessions, want only the original", store.Len())
+	}
+}
+
+func TestRotateRacingDestroy(t *testing.T) {
+	m, store, _ := setup(t)
+	ctx := context.Background()
+	token, _, _ := m.Create(ctx, alice)
+	store.beforeDelete = func(string, uint64) {
+		if err := m.Destroy(ctx, token); err != nil {
+			t.Error(err)
+		}
+	}
+	if _, _, err := m.Rotate(ctx, token); err == nil {
+		t.Fatal("Rotate of a session destroyed meanwhile succeeded")
+	}
+	if store.Len() != 0 {
+		t.Fatalf("store holds %d sessions; the rotated copy outlived Destroy", store.Len())
+	}
+}
+
+func TestCorruptRecordIsNotUnauthenticated(t *testing.T) {
+	store := NewMemoryStore()
+	m, _ := NewManager(store)
+	tok, _ := newToken()
+	key, _ := storeKey(tok)
+	_ = store.Save(context.Background(), key, Record{Version: 1, ExpiresAt: time.Now().Add(time.Hour), Data: []byte("{")})
+	_, err := m.Get(context.Background(), tok)
+	if err == nil || errors.Is(err, authent.ErrUnauthenticated) {
+		t.Fatalf("Get of a corrupt record: err = %v, want an infrastructure error", err)
 	}
 }

@@ -14,21 +14,17 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"maps"
 	"time"
 
 	"github.com/tohshi/authent"
 )
 
-var (
-	// ErrInvalidSession is returned when a token is malformed, unknown or
-	// expired. It wraps authent.ErrUnauthenticated.
-	ErrInvalidSession = fmt.Errorf("session: invalid session: %w", authent.ErrUnauthenticated)
-	// ErrNotFound must be returned by Store.Load for unknown or expired keys.
-	ErrNotFound = errors.New("session: not found")
-)
+// ErrInvalidSession is returned when a token is malformed, unknown or
+// expired. It wraps authent.ErrUnauthenticated.
+var ErrInvalidSession = fmt.Errorf("session: invalid session: %w", authent.ErrUnauthenticated)
 
 // Session is the state stored for a session.
 type Session struct {
@@ -44,7 +40,8 @@ type Session struct {
 	CreatedAt  time.Time
 	LastSeenAt time.Time
 
-	key string // store key of the session; set by the Manager
+	key     string // store key of the session; set by the Manager
+	version uint64 // version of the stored record s was loaded from
 }
 
 // Principal returns the authenticated subject of the session.
@@ -64,21 +61,51 @@ func (s *Session) VerifyCSRF(token string) bool {
 	return token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.CSRFToken)) == 1
 }
 
-func (s Session) clone() Session {
-	s.Values = maps.Clone(s.Values)
-	return s
+// storedSession is the encoding of a session in Record.Data.
+type storedSession struct {
+	Subject    string            `json:"sub"`
+	Issuer     string            `json:"iss,omitempty"`
+	AuthMethod authent.Method    `json:"method"`
+	AuthTime   time.Time         `json:"auth_time"`
+	Values     map[string]string `json:"values,omitempty"`
+	CSRFToken  string            `json:"csrf"`
+	CreatedAt  time.Time         `json:"created"`
+	LastSeenAt time.Time         `json:"last_seen"`
 }
 
-// Store persists sessions. Keys are opaque, already-hashed identifiers.
-// Implementations must be safe for concurrent use.
-type Store interface {
-	// Load returns ErrNotFound if key is unknown or has expired.
-	Load(ctx context.Context, key string) (Session, error)
-	// Save creates or replaces the session. The store may discard it after
-	// expiresAt.
-	Save(ctx context.Context, key string, s Session, expiresAt time.Time) error
-	// Delete removes the session. Deleting an unknown key is not an error.
-	Delete(ctx context.Context, key string) error
+func (s *Session) encode() ([]byte, error) {
+	return json.Marshal(storedSession{
+		Subject:    s.Subject,
+		Issuer:     s.Issuer,
+		AuthMethod: s.AuthMethod,
+		AuthTime:   s.AuthTime,
+		Values:     s.Values,
+		CSRFToken:  s.CSRFToken,
+		CreatedAt:  s.CreatedAt,
+		LastSeenAt: s.LastSeenAt,
+	})
+}
+
+func decode(key string, r Record) (*Session, error) {
+	var d storedSession
+	if err := json.Unmarshal(r.Data, &d); err != nil {
+		return nil, fmt.Errorf("session: decoding stored session: %w", err)
+	}
+	if d.Values == nil {
+		d.Values = map[string]string{}
+	}
+	return &Session{
+		Subject:    d.Subject,
+		Issuer:     d.Issuer,
+		AuthMethod: d.AuthMethod,
+		AuthTime:   d.AuthTime,
+		Values:     d.Values,
+		CSRFToken:  d.CSRFToken,
+		CreatedAt:  d.CreatedAt,
+		LastSeenAt: d.LastSeenAt,
+		key:        key,
+		version:    r.Version,
+	}, nil
 }
 
 // Manager creates, validates, rotates and destroys sessions.
@@ -205,34 +232,54 @@ func (m *Manager) Get(ctx context.Context, token string) (*Session, error) {
 	if !ok {
 		return nil, ErrInvalidSession
 	}
-	stored, err := m.store.Load(ctx, key)
+	s, err := m.load(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	now := m.now()
+	if now.Sub(s.LastSeenAt) < m.touchInterval {
+		return s, nil
+	}
+	s.LastSeenAt = now
+	err = m.save(ctx, s)
+	if errors.Is(err, ErrConflict) {
+		// A concurrent request saved the session first. Its copy is at
+		// least as recent as this one, so use it instead of failing.
+		return m.load(ctx, key)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// load returns the unexpired session stored under key.
+func (m *Manager) load(ctx context.Context, key string) (*Session, error) {
+	r, err := m.store.Load(ctx, key)
 	if errors.Is(err, ErrNotFound) {
 		return nil, ErrInvalidSession
 	}
 	if err != nil {
 		return nil, fmt.Errorf("session: loading: %w", err)
 	}
-	s := &stored
-	s.key = key
-
-	now := m.now()
-	if !now.Before(m.expiresAt(s)) {
-		if err := m.store.Delete(ctx, key); err != nil {
+	s, err := decode(key, r)
+	if err != nil {
+		return nil, err
+	}
+	if !m.now().Before(m.expiresAt(s)) {
+		if err := m.store.Delete(ctx, key, 0); err != nil {
 			return nil, fmt.Errorf("session: deleting expired session: %w", err)
 		}
 		return nil, ErrInvalidSession
-	}
-	if now.Sub(s.LastSeenAt) >= m.touchInterval {
-		s.LastSeenAt = now
-		if err := m.save(ctx, s); err != nil {
-			return nil, err
-		}
 	}
 	return s, nil
 }
 
 // Save persists changes to s, which must come from Create, Get or Rotate.
-// Concurrent saves of the same session are last-write-wins.
+// If the session was saved, rotated or destroyed since s was obtained, Save
+// returns an error wrapping ErrConflict and stores nothing; get the session
+// again and reapply the change. A session past its timeout returns
+// ErrInvalidSession.
 func (m *Manager) Save(ctx context.Context, s *Session) error {
 	if s.key == "" {
 		return errors.New("session: Save of a session not obtained from the Manager")
@@ -240,10 +287,21 @@ func (m *Manager) Save(ctx context.Context, s *Session) error {
 	return m.save(ctx, s)
 }
 
+// save writes s as the next version of its record.
 func (m *Manager) save(ctx context.Context, s *Session) error {
-	if err := m.store.Save(ctx, s.key, s.clone(), m.expiresAt(s)); err != nil {
+	expiresAt := m.expiresAt(s)
+	if !m.now().Before(expiresAt) {
+		return ErrInvalidSession
+	}
+	data, err := s.encode()
+	if err != nil {
+		return fmt.Errorf("session: encoding: %w", err)
+	}
+	r := Record{Version: s.version + 1, ExpiresAt: expiresAt, Data: data}
+	if err := m.store.Save(ctx, s.key, r); err != nil {
 		return fmt.Errorf("session: saving: %w", err)
 	}
+	s.version = r.Version
 	return nil
 }
 
@@ -264,19 +322,30 @@ func (m *Manager) Rotate(ctx context.Context, token string) (string, *Session, e
 	if err != nil {
 		return "", nil, err
 	}
-	oldKey := s.key
-	newTok, err := m.assignToken(s)
+	return m.rotate(ctx, s)
+}
+
+// rotate moves s to a new token. The new record is written before the old
+// one is deleted, and the old one is deleted only if it is unchanged, so
+// that neither a concurrent save nor a concurrent destroy is lost.
+func (m *Manager) rotate(ctx context.Context, s *Session) (string, *Session, error) {
+	oldKey, oldVersion := s.key, s.version
+	token, err := m.assignToken(s)
 	if err != nil {
 		return "", nil, err
 	}
+	s.version = 0
 	s.LastSeenAt = m.now()
 	if err := m.save(ctx, s); err != nil {
 		return "", nil, err
 	}
-	if err := m.store.Delete(ctx, oldKey); err != nil {
+	if err := m.store.Delete(ctx, oldKey, oldVersion); err != nil {
+		if delErr := m.store.Delete(ctx, s.key, 0); delErr != nil {
+			err = errors.Join(err, delErr)
+		}
 		return "", nil, fmt.Errorf("session: deleting rotated session: %w", err)
 	}
-	return newTok, s, nil
+	return token, s, nil
 }
 
 // Destroy ends the session for token (logout). Destroying an invalid or
@@ -286,7 +355,7 @@ func (m *Manager) Destroy(ctx context.Context, token string) error {
 	if !ok {
 		return nil
 	}
-	if err := m.store.Delete(ctx, key); err != nil {
+	if err := m.store.Delete(ctx, key, 0); err != nil {
 		return fmt.Errorf("session: deleting: %w", err)
 	}
 	return nil

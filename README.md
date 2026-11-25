@@ -188,6 +188,13 @@ The store is keyed by the SHA-256 hash of the token, so raw tokens are never
 stored. Setting cookie attributes (`Secure`, `HttpOnly`, `SameSite`) is up to
 the caller.
 
+Every stored session has a version, and stores save it with a
+compare-and-swap. `Save` returns an error wrapping `session.ErrConflict`
+when another request saved, rotated or destroyed the session after it was
+loaded; get it again and reapply the change. `ErrConflict` does not wrap
+`authent.ErrUnauthenticated`. `sessiontest.TestStore` is a conformance
+suite for `Store` implementations.
+
 ### API keys
 ```go
 keys, _ := apikey.NewManager("myapp", store) // store implements apikey.Store; or apikey.NewMemoryStore()
