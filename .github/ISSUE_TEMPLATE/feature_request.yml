@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest a new feature or an improvement.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check [FEATURES.md](https://github.com/tohshi/authent/blob/main/FEATURES.md)
+        first. Features listed as out of scope are unlikely to be accepted.
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options: [authent, jwt, oidc, password, rebac, session, new package]
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and why is it hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: The API or behavior you have in mind. Relevant RFCs or specs are welcome.
+    validations:
+      required: true

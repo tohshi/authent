@@ -1,0 +1,10 @@
+# <prefix>: <summary, lowercase, no trailing period, under ~72 chars>
+#
+# Why is this change needed? What are the trade-offs?
+# Wrap at 72 columns.
+#
+# Fixes #
+#
+# Prefix: jwt, oidc, password, rebac, session, authent, all,
+# or a file/directory such as README or .github.
+# See CONTRIBUTING.md.

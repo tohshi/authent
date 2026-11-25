@@ -1,5 +1,9 @@
 # authent
 
+[![CI](https://github.com/tohshi/authent/actions/workflows/ci.yml/badge.svg)](https://github.com/tohshi/authent/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/tohshi/authent.svg)](https://pkg.go.dev/github.com/tohshi/authent)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Authentication (authn) and authorization (authz) building blocks for Go,
 independent of any HTTP framework. The only dependencies are the Go standard
 library, `golang.org/x/crypto` and `golang.org/x/oauth2`.
@@ -149,6 +153,15 @@ go test ./jwt -run '^$' -fuzz FuzzVerify -fuzztime 30s
 `jwt/testdata/gen_openssl_vectors.py` generates `jwt/testdata/openssl_vectors.json`
 with OpenSSL. These vectors come from an implementation independent of this
 library.
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+development workflow and commit message conventions.
+
+## Security
+
+Please report vulnerabilities privately. See [SECURITY.md](SECURITY.md).
 
 ## License
 
