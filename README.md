@@ -21,6 +21,8 @@ go get github.com/tohshi/authent
 | `jwt` | JWS/JWT signing and verification, JWK/JWKS, `RemoteKeySet` with caching and key rotation |
 | `session` | Server-side sessions with idle and absolute timeouts, ID rotation and CSRF tokens |
 | `oidc` | OpenID Connect relying party (authorization code flow with PKCE S256) |
+| `totp` | Time-based one-time passwords (RFC 6238) with replay protection |
+| `webauthn` | WebAuthn relying party: passkeys and security keys |
 | `rebac` | Zanzibar-style relationship-based access control (ReBAC) |
 
 Every authentication method returns an `authent.Principal`. Every
@@ -126,6 +128,63 @@ rejects the response unless its `sub` exactly matches the ID token's. Only
 plain JSON responses are accepted, and redirects are not followed, so the
 access token is never sent anywhere but the advertised https endpoint.
 
+### TOTP
+```go
+key, _ := totp.GenerateKey()                       // SHA1, 6 digits, 30 s: what every app supports
+uri, _ := key.URI("Example", "alice@example.com")  // show as a QR code
+counter, err := key.Verify(code, time.Now(), totp.DefaultSkew) // confirm enrollment
+// store totp.Credential{Subject: "u1", Key: key, LastCounter: counter}
+
+auth, _ := totp.NewAuthenticator(store) // store implements totp.Store
+p, err := auth.Authenticate(ctx, "u1", code)
+```
+- Codes are compared in constant time, and the previous and next time steps
+  are accepted by default.
+- A code can be used only once. `Store.AdvanceCounter` must be an atomic
+  compare-and-set, so two concurrent logins cannot both use one code.
+- Secrets are at least 128 bits. They must be stored readable, so encrypt
+  them at rest. Rate limiting failed attempts is up to the caller.
+
+### WebAuthn
+```go
+rp, _ := webauthn.New(webauthn.Config{
+	RPID:    "example.com",
+	RPName:  "Example",
+	Origins: []string{"https://example.com"},
+}, store) // store implements webauthn.CredentialStore
+
+// Registration
+handle, _ := webauthn.NewUserHandle() // once per user; store it with the user
+opts, ch, _ := rp.BeginRegistration(webauthn.User{Subject: "u1", Handle: handle, Name: "alice"}, existing)
+// send opts as JSON, keep ch server-side (e.g. JSON in a session value) ...
+cred, err := rp.FinishRegistration(ctx, ch, responseJSON) // then save cred
+
+// Login: second factor for a known user, or a passkey without a username
+opts, ch, _ = rp.BeginLogin(userCreds) // or rp.BeginDiscoverableLogin()
+p, cred, err := rp.FinishLogin(ctx, ch, responseJSON)
+```
+In the browser, pass the options to
+`PublicKeyCredential.parseCreationOptionsFromJSON` (or
+`parseRequestOptionsFromJSON`) and send back `credential.toJSON()`.
+
+`FinishRegistration` and `FinishLogin` check:
+- the challenge (single ceremony type, expiry), the origin, the RP ID hash,
+  and that `crossOrigin` is false
+- the user presence flag, and the user verification flag when
+  `UserVerification` is `required`
+- the credential algorithm against an allow-list, with the key type and
+  curve bound to the algorithm (ES256/384/512, EdDSA, RS256, PS256)
+- the attestation statement for the `none`, `packed` and `fido-u2f`
+  formats. Other formats are rejected. Set `AttestationRoots` to require a
+  certificate chain to known roots.
+- that the credential is not already registered, belongs to the expected
+  user, and was in `allowCredentials`
+- the signature counter, which must increase unless it is always 0, and
+  that backup eligibility does not change
+
+CBOR is decoded strictly: no tags, floats, indefinite lengths, duplicate
+map keys or trailing bytes, with bounds on depth and length.
+
 ### ReBAC
 ```go
 schema, _ := rebac.NewSchema(
@@ -192,10 +251,13 @@ and what is out of scope.
 ```
 go test -race ./...
 go test ./jwt -run '^$' -fuzz FuzzVerify -fuzztime 30s
+go test ./webauthn -run '^$' -fuzz FuzzCBOR -fuzztime 30s
 ```
 `jwt/testdata/gen_openssl_vectors.py` generates `jwt/testdata/openssl_vectors.json`
-with OpenSSL. These vectors come from an implementation independent of this
-library.
+with OpenSSL. `webauthn/testdata/extract_spec_vectors.py` extracts
+`webauthn/testdata/spec_vectors.json` from the test vectors in the WebAuthn
+Level 3 specification. The TOTP tests use the RFC 4226 and RFC 6238
+vectors. These vectors come from sources independent of this library.
 
 ## Contributing
 
