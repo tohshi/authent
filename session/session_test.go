@@ -81,6 +81,18 @@ func setup(t *testing.T, opts ...Option) (*Manager, *countingStore, *clock) {
 
 var alice = authent.Principal{Subject: "alice", Method: authent.MethodPassword}
 
+func set(t *testing.T, s *Session, key, v string) {
+	t.Helper()
+	if err := Key[string](key).Set(s, v); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func get(s *Session, key string) string {
+	v, _, _ := Key[string](key).Get(s)
+	return v
+}
+
 func TestCreateAndGet(t *testing.T) {
 	m, store, c := setup(t)
 	ctx := context.Background()
@@ -182,14 +194,14 @@ func TestSaveValues(t *testing.T) {
 	m, _, _ := setup(t)
 	ctx := context.Background()
 	token, s, _ := m.Create(ctx, alice)
-	s.Values["cart"] = "42"
+	set(t, s, "cart", "42")
 	if err := m.Save(ctx, s); err != nil {
 		t.Fatal(err)
 	}
-	s.Values["cart"] = "mutated without save"
+	set(t, s, "cart", "mutated without save")
 	got, _ := m.Get(ctx, token)
-	if got.Values["cart"] != "42" {
-		t.Fatalf("Values = %v", got.Values)
+	if get(got, "cart") != "42" {
+		t.Fatalf("cart = %q", get(got, "cart"))
 	}
 	if err := m.Save(ctx, &Session{}); err == nil {
 		t.Fatal("Save of foreign session succeeded")
@@ -200,7 +212,7 @@ func TestRotate(t *testing.T) {
 	m, _, c := setup(t)
 	ctx := context.Background()
 	token, s, _ := m.Create(ctx, alice)
-	s.Values["k"] = "v"
+	set(t, s, "k", "v")
 	_ = m.Save(ctx, s)
 	created := s.CreatedAt
 
@@ -219,7 +231,7 @@ func TestRotate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Values["k"] != "v" || !got.CreatedAt.Equal(created) {
+	if get(got, "k") != "v" || !got.CreatedAt.Equal(created) {
 		t.Fatalf("rotated session lost data: %+v", got)
 	}
 }
@@ -308,19 +320,19 @@ func TestSaveConflict(t *testing.T) {
 	token, _, _ := m.Create(ctx, alice)
 	a, _ := m.Get(ctx, token)
 	b, _ := m.Get(ctx, token)
-	a.Values["k"] = "a"
+	set(t, a, "k", "a")
 	if err := m.Save(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	b.Values["k"] = "b"
+	set(t, b, "k", "b")
 	if err := m.Save(ctx, b); !errors.Is(err, ErrConflict) || errors.Is(err, authent.ErrUnauthenticated) {
 		t.Fatalf("Save of a stale copy: err = %v, want ErrConflict", err)
 	}
 	got, _ := m.Get(ctx, token)
-	if got.Values["k"] != "a" {
-		t.Fatalf("Values = %v, want the first save", got.Values)
+	if get(got, "k") != "a" {
+		t.Fatalf("k = %q, want the first save", get(got, "k"))
 	}
-	got.Values["k"] = "c"
+	set(t, got, "k", "c")
 	if err := m.Save(ctx, got); err != nil {
 		t.Fatalf("Save after reloading: %v", err)
 	}
@@ -331,7 +343,7 @@ func TestSaveExpired(t *testing.T) {
 	ctx := context.Background()
 	_, s, _ := m.Create(ctx, alice)
 	c.advance(31 * time.Minute)
-	s.Values["k"] = "v"
+	set(t, s, "k", "v")
 	if err := m.Save(ctx, s); !errors.Is(err, ErrInvalidSession) {
 		t.Fatalf("Save of an idle-expired session: err = %v, want ErrInvalidSession", err)
 	}
@@ -344,7 +356,7 @@ func TestGetTouchConflictUsesNewerCopy(t *testing.T) {
 	other, _ := m.Get(ctx, token)
 	c.advance(2 * time.Minute)
 	store.beforeSave = func(string, Record) {
-		other.Values["k"] = "concurrent"
+		set(t, other, "k", "concurrent")
 		if err := m.Save(ctx, other); err != nil {
 			t.Error(err)
 		}
@@ -353,10 +365,10 @@ func TestGetTouchConflictUsesNewerCopy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get with a conflicting touch: %v", err)
 	}
-	if got.Values["k"] != "concurrent" {
-		t.Fatalf("Values = %v, want the concurrent save", got.Values)
+	if get(got, "k") != "concurrent" {
+		t.Fatalf("k = %q, want the concurrent save", get(got, "k"))
 	}
-	got.Values["k"] = "next"
+	set(t, got, "k", "next")
 	if err := m.Save(ctx, got); err != nil {
 		t.Fatalf("Save of the returned copy: %v", err)
 	}
@@ -368,7 +380,7 @@ func TestRotateConflict(t *testing.T) {
 	token, _, _ := m.Create(ctx, alice)
 	other, _ := m.Get(ctx, token)
 	store.beforeDelete = func(string, uint64) {
-		other.Values["k"] = "concurrent"
+		set(t, other, "k", "concurrent")
 		if err := m.Save(ctx, other); err != nil {
 			t.Error(err)
 		}
@@ -377,7 +389,7 @@ func TestRotateConflict(t *testing.T) {
 		t.Fatalf("Rotate racing a save: err = %v, want ErrConflict", err)
 	}
 	got, err := m.Get(ctx, token)
-	if err != nil || got.Values["k"] != "concurrent" {
+	if err != nil || get(got, "k") != "concurrent" {
 		t.Fatalf("old session after a failed Rotate = %+v, %v", got, err)
 	}
 	if store.Len() != 1 {
@@ -411,5 +423,59 @@ func TestCorruptRecordIsNotUnauthenticated(t *testing.T) {
 	_, err := m.Get(context.Background(), tok)
 	if err == nil || errors.Is(err, authent.ErrUnauthenticated) {
 		t.Fatalf("Get of a corrupt record: err = %v, want an infrastructure error", err)
+	}
+}
+
+type cart struct {
+	Items []string `json:"items"`
+	Total int      `json:"total"`
+}
+
+func TestTypedValues(t *testing.T) {
+	m, _, _ := setup(t)
+	ctx := context.Background()
+	token, s, _ := m.Create(ctx, alice)
+	cartKey, countKey := Key[cart]("cart"), Key[int]("count")
+	if v, ok, err := cartKey.Get(s); ok || err != nil || v.Items != nil {
+		t.Fatalf("Get of a missing value = %+v, %v, %v", v, ok, err)
+	}
+	items := []string{"a", "b"}
+	if err := cartKey.Set(s, cart{Items: items, Total: 3}); err != nil {
+		t.Fatal(err)
+	}
+	items[0] = "changed after Set"
+	if err := countKey.Set(s, 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Save(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := m.Get(ctx, token)
+	c, ok, err := cartKey.Get(got)
+	if !ok || err != nil || len(c.Items) != 2 || c.Items[0] != "a" || c.Items[1] != "b" || c.Total != 3 {
+		t.Fatalf("cart = %+v, %v, %v", c, ok, err)
+	}
+	if n, ok, err := countKey.Get(got); !ok || err != nil || n != 7 {
+		t.Fatalf("count = %v, %v, %v", n, ok, err)
+	}
+	// A value read as another type is an error, not a zero value.
+	if _, ok, err := Key[int]("cart").Get(got); !ok || err == nil || errors.Is(err, authent.ErrUnauthenticated) {
+		t.Fatalf("Get as the wrong type = %v, %v", ok, err)
+	}
+	if err := Key[chan int]("ch").Set(got, make(chan int)); err == nil {
+		t.Fatal("Set of an unencodable value succeeded")
+	}
+
+	cartKey.Delete(got)
+	if err := m.Save(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = m.Get(ctx, token)
+	if _, ok, _ := cartKey.Get(got); ok {
+		t.Fatal("deleted value still present")
+	}
+	if _, ok, _ := countKey.Get(got); !ok {
+		t.Fatal("Delete removed another value")
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -32,16 +33,15 @@ type Session struct {
 	Issuer     string
 	AuthMethod authent.Method
 	AuthTime   time.Time
-	// Values holds application data. Call Manager.Save after changing it.
-	Values map[string]string
 	// CSRFToken is a per-session synchronizer token. Embed it in forms or
 	// headers and check it with VerifyCSRF on state-changing requests.
 	CSRFToken  string
 	CreatedAt  time.Time
 	LastSeenAt time.Time
 
-	key     string // store key of the session; set by the Manager
-	version uint64 // version of the stored record s was loaded from
+	values  map[string]jsontext.Value // application data; see Key
+	key     string                    // store key of the session; set by the Manager
+	version uint64                    // version of the stored record s was loaded from
 }
 
 // Principal returns the authenticated subject of the session.
@@ -63,14 +63,14 @@ func (s *Session) VerifyCSRF(token string) bool {
 
 // storedSession is the encoding of a session in Record.Data.
 type storedSession struct {
-	Subject    string            `json:"sub"`
-	Issuer     string            `json:"iss,omitempty"`
-	AuthMethod authent.Method    `json:"method"`
-	AuthTime   time.Time         `json:"auth_time"`
-	Values     map[string]string `json:"values,omitempty"`
-	CSRFToken  string            `json:"csrf"`
-	CreatedAt  time.Time         `json:"created"`
-	LastSeenAt time.Time         `json:"last_seen"`
+	Subject    string                    `json:"sub"`
+	Issuer     string                    `json:"iss,omitempty"`
+	AuthMethod authent.Method            `json:"method"`
+	AuthTime   time.Time                 `json:"auth_time"`
+	Values     map[string]jsontext.Value `json:"values,omitempty"`
+	CSRFToken  string                    `json:"csrf"`
+	CreatedAt  time.Time                 `json:"created"`
+	LastSeenAt time.Time                 `json:"last_seen"`
 }
 
 func (s *Session) encode() ([]byte, error) {
@@ -79,7 +79,7 @@ func (s *Session) encode() ([]byte, error) {
 		Issuer:     s.Issuer,
 		AuthMethod: s.AuthMethod,
 		AuthTime:   s.AuthTime,
-		Values:     s.Values,
+		Values:     s.values,
 		CSRFToken:  s.CSRFToken,
 		CreatedAt:  s.CreatedAt,
 		LastSeenAt: s.LastSeenAt,
@@ -91,15 +91,12 @@ func decode(key string, r Record) (*Session, error) {
 	if err := json.Unmarshal(r.Data, &d); err != nil {
 		return nil, fmt.Errorf("session: decoding stored session: %w", err)
 	}
-	if d.Values == nil {
-		d.Values = map[string]string{}
-	}
 	return &Session{
 		Subject:    d.Subject,
 		Issuer:     d.Issuer,
 		AuthMethod: d.AuthMethod,
 		AuthTime:   d.AuthTime,
-		Values:     d.Values,
+		values:     d.Values,
 		CSRFToken:  d.CSRFToken,
 		CreatedAt:  d.CreatedAt,
 		LastSeenAt: d.LastSeenAt,
@@ -193,7 +190,6 @@ func (m *Manager) Create(ctx context.Context, p authent.Principal) (string, *Ses
 		Issuer:     p.Issuer,
 		AuthMethod: p.Method,
 		AuthTime:   p.AuthTime,
-		Values:     map[string]string{},
 		CreatedAt:  now,
 		LastSeenAt: now,
 	}

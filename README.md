@@ -188,6 +188,15 @@ The store is keyed by the SHA-256 hash of the token, so raw tokens are never
 stored. Setting cookie attributes (`Secure`, `HttpOnly`, `SameSite`) is up to
 the caller.
 
+Application data is stored as JSON under typed keys:
+```go
+var cartKey = session.Key[Cart]("cart")
+err := cartKey.Set(s, cart) // then m.Save(ctx, s)
+cart, ok, err := cartKey.Get(s)
+```
+A stored value that no longer decodes into the key's type is an error, not
+a zero value.
+
 Every stored session has a version, and stores save it with a
 compare-and-swap. `Save` returns an error wrapping `session.ErrConflict`
 when another request saved, rotated or destroyed the session after it was

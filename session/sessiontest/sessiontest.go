@@ -264,13 +264,27 @@ func newManager(t *testing.T, s session.Store, opts ...session.Option) *session.
 
 var alice = authent.Principal{Subject: "alice", Method: authent.MethodPassword}
 
+var cartKey = session.Key[string]("cart")
+
+func set(t *testing.T, s *session.Session, v string) {
+	t.Helper()
+	if err := cartKey.Set(s, v); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func cart(s *session.Session) string {
+	v, _, _ := cartKey.Get(s)
+	return v
+}
+
 func testManager(t *testing.T, s session.Store) {
 	m := newManager(t, s)
 	token, created, err := m.Create(ctx, alice)
 	if err != nil {
 		t.Fatal(err)
 	}
-	created.Values["cart"] = "42"
+	set(t, created, "42")
 	if err := m.Save(ctx, created); err != nil {
 		t.Fatal(err)
 	}
@@ -280,20 +294,20 @@ func testManager(t *testing.T, s session.Store) {
 		t.Fatal(err)
 	}
 	b, _ := m.Get(ctx, token)
-	if a.Subject != "alice" || a.Values["cart"] != "42" || a.CSRFToken != created.CSRFToken {
+	if a.Subject != "alice" || cart(a) != "42" || a.CSRFToken != created.CSRFToken {
 		t.Fatalf("Get = %+v", a)
 	}
-	a.Values["cart"] = "a"
+	set(t, a, "a")
 	if err := m.Save(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	b.Values["cart"] = "b"
+	set(t, b, "b")
 	err = m.Save(ctx, b)
 	if !errors.Is(err, session.ErrConflict) || errors.Is(err, authent.ErrUnauthenticated) {
 		t.Fatalf("Save of a stale copy: err = %v, want ErrConflict", err)
 	}
-	if got, _ := m.Get(ctx, token); got.Values["cart"] != "a" {
-		t.Fatalf("Values = %v after a rejected save", got.Values)
+	if got, _ := m.Get(ctx, token); cart(got) != "a" {
+		t.Fatalf("cart = %q after a rejected save", cart(got))
 	}
 
 	newToken, rotated, err := m.Rotate(ctx, token)
@@ -306,7 +320,7 @@ func testManager(t *testing.T, s session.Store) {
 	if err := m.Save(ctx, a); !errors.Is(err, session.ErrConflict) {
 		t.Fatalf("Save of a rotated-away copy: err = %v, want ErrConflict", err)
 	}
-	if got, err := m.Get(ctx, newToken); err != nil || got.Values["cart"] != "a" || got.CSRFToken != rotated.CSRFToken {
+	if got, err := m.Get(ctx, newToken); err != nil || cart(got) != "a" || got.CSRFToken != rotated.CSRFToken {
 		t.Fatalf("Get(new token) = %+v, %v", got, err)
 	}
 
