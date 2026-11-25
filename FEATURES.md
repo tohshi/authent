@@ -52,7 +52,7 @@ Legend:
 | Parsing private JWKs | ✅ | `ParsePrivateJWK` for RSA (all CRT values, validated), EC and Ed25519; private keys are never marshaled, and `ParseJWK`/`ParseJWKSet` reject or drop keys with private members |
 | `jti` replay detection | ✅ | `WithReplayCache`; `jti` then required, scoped by `iss`, recorded only after every other check |
 | Maximum token age / `auth_time` limits | ✅ | `WithMaxTokenAge` (requires `iat`) and `WithMaxAuthAge` (requires `auth_time`); the leeway applies as for `exp` |
-| `x5c` certificate chain validation | ⬜ | |
+| `x5c` certificate chain validation | ✅ | The leaf must certify the JWK's key when parsed; `WithCertificateRoots` verifies the chain with `crypto/x509`. The token's `x5c` header is never used |
 | JWE (encryption) | ➖ | Large attack surface; not needed for signed tokens |
 | JWS JSON serialization and nested JWTs | ➖ | Rarely needed; increases attack surface |
 | Symmetric keys in JWK JSON | ➖ | Kept out to avoid leaking secrets |

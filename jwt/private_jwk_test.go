@@ -6,9 +6,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"maps"
 	"math/big"
+	"os"
 	"testing"
 )
 
@@ -211,6 +213,12 @@ func TestPublicParsersRejectPrivateMembers(t *testing.T) {
 func FuzzParseJWK(f *testing.F) {
 	for _, s := range []string{rfc7515RSAKey, rfc7517ECKey, rfc8037Ed25519Key, `{"kty":"OKP","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}`} {
 		f.Add([]byte(s))
+	}
+	var x5c struct {
+		JWK jsontext.Value `json:"jwk"`
+	}
+	if data, err := os.ReadFile("testdata/openssl_x5c.json"); err == nil && json.Unmarshal(data, &x5c) == nil {
+		f.Add([]byte(x5c.JWK))
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		pub, pubErr := ParseJWK(data)

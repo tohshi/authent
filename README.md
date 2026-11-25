@@ -94,7 +94,7 @@ Safeguards enforced during verification:
     rejected unless `jwt.WithConfirmationClaim()` is set, so a stolen bound
     token cannot be replayed as a bearer token (RFC 9449 §7.2).
   - Headers with `crit`, `b64` or `zip` are rejected.
-  - `jku`, `x5u` and `jwk` headers are never used to find keys.
+  - `jku`, `x5u`, `x5c` and `jwk` headers are never used to find keys.
 - **Encoding**
   - JSON is decoded with `encoding/json/v2`: member names are matched
     case-sensitively and duplicate members are rejected.
@@ -116,6 +116,11 @@ Optional checks:
   `auth_time`, as OpenID Connect `max_age` requires. Both allow the
   leeway on top of `d`. `Claims.AuthTime` reads `auth_time` for
   per-request checks.
+- `jwt.WithCertificateRoots(pool)` only uses JWKs whose `x5c` chain
+  verifies to `pool` at the verifier's clock, with a leaf allowed to make
+  digital signatures. Keys without `x5c` are not used. Independently of
+  this option, a JWK whose `x5c` leaf certifies a different key is
+  rejected when parsed.
 
 A signing key can come from a private JWK:
 ```go
@@ -364,7 +369,8 @@ go test ./jwt -run '^$' -fuzz FuzzVerify -fuzztime 30s
 go test ./webauthn -run '^$' -fuzz FuzzCBOR -fuzztime 30s
 ```
 `jwt/testdata/gen_openssl_vectors.py` generates `jwt/testdata/openssl_vectors.json`
-with OpenSSL. `webauthn/testdata/extract_spec_vectors.py` extracts
+and `jwt/testdata/gen_openssl_x5c.py` generates the certificate chain in
+`jwt/testdata/openssl_x5c.json` with OpenSSL. `webauthn/testdata/extract_spec_vectors.py` extracts
 `webauthn/testdata/spec_vectors.json` from the test vectors in the WebAuthn
 Level 3 specification. The TOTP tests use the RFC 4226 and RFC 6238
 vectors. These vectors come from sources independent of this library.

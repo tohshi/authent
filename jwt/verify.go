@@ -3,6 +3,7 @@ package jwt
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -29,6 +30,7 @@ type Verifier struct {
 	replay      ReplayCache
 	maxTokenAge *time.Duration
 	maxAuthAge  *time.Duration
+	roots       *x509.CertPool
 	now         func() time.Time
 }
 
@@ -92,6 +94,14 @@ func WithMaxTokenAge(d time.Duration) VerifierOption {
 // authentication within the leeway.
 func WithMaxAuthAge(d time.Duration) VerifierOption {
 	return func(v *Verifier) { v.maxAuthAge = &d }
+}
+
+// WithCertificateRoots only uses keys whose "x5c" certificate chain
+// verifies to one of roots at the Verifier's clock, with a leaf that
+// allows digital signatures. Keys without "x5c" are not used. The "x5c"
+// header of a token is never used to find keys.
+func WithCertificateRoots(roots *x509.CertPool) VerifierOption {
+	return func(v *Verifier) { v.roots = roots }
 }
 
 // WithReplayCache accepts each token only once. "jti" becomes required,
@@ -226,14 +236,24 @@ func (v *Verifier) verifySignature(ctx context.Context, c *compact) error {
 		return err
 	}
 	tried := false
+	var untrusted error
 	for _, k := range keys {
 		if !k.canVerify(c.header.Alg) {
 			continue
+		}
+		if v.roots != nil {
+			if err := k.verifyChain(v.roots, v.now()); err != nil {
+				untrusted = err
+				continue
+			}
 		}
 		tried = true
 		if verify(c.header.Alg, k.Key, []byte(c.signingInput), c.signature) == nil {
 			return nil
 		}
+	}
+	if !tried && untrusted != nil {
+		return fmt.Errorf("%w: kid %q: %v", ErrNoMatchingKey, c.header.Kid, untrusted)
 	}
 	if !tried {
 		return fmt.Errorf("%w: kid %q alg %q", ErrNoMatchingKey, c.header.Kid, c.header.Alg)

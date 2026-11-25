@@ -6,12 +6,15 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"math/big"
 	"slices"
+	"time"
 )
 
 // JWK is a public JSON Web Key (RFC 7517) or an HMAC secret.
@@ -35,6 +38,10 @@ type JWK struct {
 	// Key is *rsa.PublicKey, *ecdsa.PublicKey, ed25519.PublicKey or, for
 	// HMAC, []byte.
 	Key any
+	// Certificates is the "x5c" chain, leaf first. ParseJWK checks that
+	// the leaf certifies Key; the chain itself is only verified with
+	// WithCertificateRoots.
+	Certificates []*x509.Certificate
 }
 
 // NewHMACKey returns a JWK holding an HMAC secret for alg (HS256, HS384 or
@@ -77,6 +84,7 @@ type rawJWK struct {
 	E      string   `json:"e,omitempty"`
 	X      string   `json:"x,omitempty"`
 	Y      string   `json:"y,omitempty"`
+	X5C    []string `json:"x5c,omitempty"`
 
 	// Private or symmetric key material (RFC 7518 §6.2.2, §6.3.2, §6.4,
 	// RFC 8037 §2). Only ParsePrivateJWK accepts it.
@@ -144,7 +152,63 @@ func (r rawJWK) publicJWK() (JWK, error) {
 	if k.Algorithm != "" && checkVerifyKey(k.Algorithm, k.Key) != nil {
 		return JWK{}, fmt.Errorf("jwt: alg %q does not match the key", k.Algorithm)
 	}
+	if k.Certificates, err = parseX5C(r.X5C, k.Key); err != nil {
+		return JWK{}, err
+	}
 	return k, nil
+}
+
+// parseX5C parses an "x5c" chain and checks that its leaf certifies key
+// (RFC 7517 §4.7).
+func parseX5C(chain []string, key any) ([]*x509.Certificate, error) {
+	var certs []*x509.Certificate
+	for _, s := range chain {
+		// x5c uses base64 with padding, not base64url.
+		der, err := base64.StdEncoding.Strict().DecodeString(s)
+		if err != nil {
+			return nil, errors.New("jwt: invalid x5c encoding")
+		}
+		c, err := x509.ParseCertificate(der)
+		if err != nil {
+			return nil, fmt.Errorf("jwt: invalid x5c certificate: %w", err)
+		}
+		certs = append(certs, c)
+	}
+	if len(certs) > 0 {
+		leaf, ok := certs[0].PublicKey.(interface{ Equal(crypto.PublicKey) bool })
+		if !ok || !leaf.Equal(key) {
+			return nil, errors.New("jwt: x5c leaf certificate does not match the key")
+		}
+	}
+	return certs, nil
+}
+
+// verifyChain checks that k's x5c chain leads to roots at time now and
+// that the leaf may make digital signatures.
+func (k JWK) verifyChain(roots *x509.CertPool, now time.Time) error {
+	if len(k.Certificates) == 0 {
+		return errors.New("no x5c certificate chain")
+	}
+	leaf := k.Certificates[0]
+	intermediates := x509.NewCertPool()
+	for _, c := range k.Certificates[1:] {
+		intermediates.AddCert(c)
+	}
+	_, err := leaf.Verify(x509.VerifyOptions{
+		Roots:         roots,
+		Intermediates: intermediates,
+		CurrentTime:   now,
+		// The default would require the TLS server extended key usage.
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+	})
+	if err != nil {
+		return err
+	}
+	// RFC 5280 §4.2.1.3: without the extension, every usage is allowed.
+	if leaf.KeyUsage != 0 && leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+		return errors.New("x5c leaf certificate is not for digital signatures")
+	}
+	return nil
 }
 
 func parseRSA(r rawJWK) (*rsa.PublicKey, error) {
@@ -377,6 +441,9 @@ func (k JWK) raw() (rawJWK, error) {
 		r.X = b64.EncodeToString(pub)
 	default:
 		return rawJWK{}, fmt.Errorf("jwt: cannot marshal key of type %T", k.Key)
+	}
+	for _, c := range k.Certificates {
+		r.X5C = append(r.X5C, base64.StdEncoding.EncodeToString(c.Raw))
 	}
 	return r, nil
 }
