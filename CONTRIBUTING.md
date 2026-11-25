@@ -44,7 +44,21 @@ go test ./webauthn -run '^$' -fuzz FuzzParseAuthData -fuzztime 30s
 go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 ```
 
-CI runs the same checks on every pull request.
+Adapters for external services (PostgreSQL, Redis) are tested from nested
+modules such as `integration/`, so their drivers stay out of the root
+module. These tests skip when their service is not configured. To run them:
+
+```
+docker run -d --name authent-pg -e POSTGRES_PASSWORD=authent -e POSTGRES_DB=authent -p 55432:5432 postgres:17
+docker run -d --name authent-redis -p 56379:6379 redis:8
+export AUTHENT_POSTGRES_DSN='postgres://postgres:authent@localhost:55432/authent?sslmode=disable'
+export AUTHENT_REDIS_ADDR=localhost:56379
+export AUTHENT_REQUIRE_INTEGRATION=1   # fail instead of skip when a service is missing
+(cd integration && go test -race ./...)
+```
+
+CI runs the same checks on every pull request, with
+`AUTHENT_REQUIRE_INTEGRATION=1`.
 
 ## Commit messages
 

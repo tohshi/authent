@@ -6,6 +6,12 @@ updates:
       interval: weekly
     commit-message:
       prefix: "all"
+  - package-ecosystem: gomod
+    directory: /integration
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "integration"
   - package-ecosystem: github-actions
     directory: /
     schedule:
