@@ -79,6 +79,19 @@ p, err := auth.Authenticate(ctx, username, pw)
   verify and report `NeedsRehash`, so logins move them to the current pepper.
   A hash whose key ID is not configured fails with `ErrUnknownPepper`, which
   `Authenticate` returns as a server error rather than a login failure.
+- Password reset tokens are single use and expire after 30 minutes by
+  default:
+  ```go
+  resets, _ := password.NewResetManager(password.NewMemoryResetStore())
+  token, err := resets.Issue(ctx, subject) // send it to the user, e.g. in a link
+  subject, err := resets.Redeem(ctx, token) // then set the new password with policy.Hash
+  ```
+  The store keeps only the token's SHA-256 hash, the subject and the expiry.
+  `ResetTokenStore.TakeResetToken` must remove and return a token in one
+  atomic step (in SQL, `DELETE ... RETURNING`), so a token cannot be redeemed
+  twice. Issuing a token invalidates the subject's earlier ones, so only the
+  most recent link works. Expired, unknown and reused tokens return
+  `ErrInvalidResetToken`, which wraps `authent.ErrUnauthenticated`.
 - To migrate users from another system, store their existing hashes as they
   are. `Verify` accepts bcrypt (`$2a$`, `$2b$`, `$2y$`), Werkzeug scrypt
   (`scrypt:32768:8:1$salt$hex`, the Flask default) and Django PBKDF2
