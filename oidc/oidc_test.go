@@ -49,7 +49,11 @@ type fakeProvider struct {
 	userinfoEndpoint string
 	accessTokens     map[string]bool // issued access tokens
 	// userinfo overrides the UserInfo response for a valid access token.
-	userinfo func(w http.ResponseWriter, r *http.Request)
+	userinfo          func(w http.ResponseWriter, r *http.Request)
+	authMethods       []string
+	authAlgs          []string
+	assertionVerifier *jwt.Verifier
+	assertions        []jwt.Claims
 }
 
 func newFakeProvider(t *testing.T) *fakeProvider {
@@ -74,12 +78,14 @@ func newFakeProvider(t *testing.T) *fakeProvider {
 			userinfo = ""
 		}
 		_ = json.MarshalWrite(w, Provider{
-			Issuer:                           iss,
-			AuthorizationEndpoint:            p.URL + "/authorize",
-			TokenEndpoint:                    p.URL + "/token",
-			JWKSURI:                          p.URL + "/jwks",
-			UserinfoEndpoint:                 userinfo,
-			IDTokenSigningAlgValuesSupported: []string{"ES256", "HS256"},
+			Issuer:                            iss,
+			AuthorizationEndpoint:             p.URL + "/authorize",
+			TokenEndpoint:                     p.URL + "/token",
+			JWKSURI:                           p.URL + "/jwks",
+			UserinfoEndpoint:                  userinfo,
+			IDTokenSigningAlgValuesSupported:  []string{"ES256", "HS256"},
+			TokenEndpointAuthMethodsSupported: p.authMethods,
+			TokenEndpointAuthSigningAlgValuesSupported: p.authAlgs,
 		})
 	})
 	mux.HandleFunc("GET /jwks", func(w http.ResponseWriter, r *http.Request) {
@@ -125,13 +131,32 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 		tokenError()
 		return
 	}
-	id, secret, ok := r.BasicAuth()
-	if !ok {
-		id, secret = r.PostForm.Get("client_id"), r.PostForm.Get("client_secret")
-	}
-	if id != clientID || secret != clientSecret {
-		w.WriteHeader(http.StatusUnauthorized)
-		return
+	if p.assertionVerifier != nil {
+		_, _, basic := r.BasicAuth()
+		if basic || r.PostForm.Get("client_id") != clientID || r.PostForm.Has("client_secret") ||
+			r.PostForm.Get("client_assertion_type") != "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" ||
+			len(r.PostForm["client_assertion"]) != 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		claims, err := p.assertionVerifier.Verify(r.Context(), r.PostForm.Get("client_assertion"))
+		if err != nil || claims.Subject != clientID || claims.ID == "" ||
+			claims.IssuedAt.Time != now || claims.ExpiresAt.Time != now.Add(5*time.Minute) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		p.mu.Lock()
+		p.assertions = append(p.assertions, *claims)
+		p.mu.Unlock()
+	} else {
+		id, secret, ok := r.BasicAuth()
+		if !ok {
+			id, secret = r.PostForm.Get("client_id"), r.PostForm.Get("client_secret")
+		}
+		if id != clientID || secret != clientSecret {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 	}
 	p.mu.Lock()
 	g, ok := p.grants[r.PostForm.Get("code")]
@@ -214,6 +239,96 @@ func TestFlow(t *testing.T) {
 	}
 	if res.Principal.Claims["email"] != "user42@example.com" || res.Token.AccessToken == "" {
 		t.Fatalf("result = %+v", res)
+	}
+}
+
+func TestPrivateKeyJWTFlow(t *testing.T) {
+	p := newFakeProvider(t)
+	p.authMethods = []string{"client_secret_basic", "private_key_jwt"}
+	p.authAlgs = []string{"ES256"}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := jwt.NewSigner(jwt.ES256, key, jwt.WithKeyID("client-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.assertionVerifier, err = jwt.NewVerifier(jwt.NewStaticKeySet(signer.VerificationKey()),
+		jwt.WithAlgorithms(jwt.ES256), jwt.WithIssuer(clientID), jwt.WithAudience(p.URL),
+		jwt.WithExpectedType("client-authentication+jwt"), jwt.WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := Discover(context.Background(), p.URL, p.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := NewClient(meta, Config{
+		ClientID: clientID, RedirectURL: redirectURL, Scopes: []string{"email"},
+		PrivateKeyJWT: &PrivateKeyJWTConfig{Algorithm: jwt.ES256, PrivateKey: key, KeyID: "client-key"},
+		HTTPClient:    p.Client(), Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		req, err := c.AuthCodeURL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, code := p.authorize(t, req.URL)
+		res, err := c.Exchange(context.Background(), req, state, code)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Principal.Subject != "user-42" {
+			t.Fatalf("principal = %+v", res.Principal)
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.assertions) != 2 || p.assertions[0].ID == p.assertions[1].ID ||
+		len(p.assertions[0].Audience) != 1 || p.assertions[0].Audience[0] != p.URL {
+		t.Fatalf("assertions = %+v", p.assertions)
+	}
+}
+
+func TestPrivateKeyJWTConfigValidation(t *testing.T) {
+	p := newFakeProvider(t)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := &Provider{Issuer: p.URL, AuthorizationEndpoint: p.URL + "/authorize",
+		TokenEndpoint: p.URL + "/token", JWKSURI: p.URL + "/jwks"}
+	base := Config{ClientID: clientID, RedirectURL: redirectURL,
+		PrivateKeyJWT: &PrivateKeyJWTConfig{Algorithm: jwt.ES256, PrivateKey: key}}
+	for _, tc := range []struct {
+		name   string
+		change func(*Provider, *Config)
+	}{
+		{"secret and key", func(_ *Provider, c *Config) { c.ClientSecret = clientSecret }},
+		{"symmetric algorithm", func(_ *Provider, c *Config) {
+			c.PrivateKeyJWT = &PrivateKeyJWTConfig{Algorithm: jwt.HS256, PrivateKey: make([]byte, 32)}
+		}},
+		{"wrong key", func(_ *Provider, c *Config) {
+			c.PrivateKeyJWT = &PrivateKeyJWTConfig{Algorithm: jwt.RS256, PrivateKey: key}
+		}},
+		{"unsupported method", func(p *Provider, _ *Config) {
+			p.TokenEndpointAuthMethodsSupported = []string{"client_secret_basic"}
+		}},
+		{"unsupported algorithm", func(p *Provider, _ *Config) {
+			p.TokenEndpointAuthSigningAlgValuesSupported = []string{"RS256"}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider, cfg := *meta, base
+			tc.change(&provider, &cfg)
+			if _, err := NewClient(&provider, cfg); err == nil {
+				t.Fatal("NewClient accepted invalid private_key_jwt configuration")
+			}
+		})
 	}
 }
 

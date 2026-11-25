@@ -44,13 +44,15 @@ var (
 
 // Provider is OpenID Provider metadata (OpenID Connect Discovery 1.0).
 type Provider struct {
-	Issuer                           string   `json:"issuer"`
-	AuthorizationEndpoint            string   `json:"authorization_endpoint"`
-	TokenEndpoint                    string   `json:"token_endpoint"`
-	JWKSURI                          string   `json:"jwks_uri"`
-	UserinfoEndpoint                 string   `json:"userinfo_endpoint,omitempty"`
-	IDTokenSigningAlgValuesSupported []string `json:"id_token_signing_alg_values_supported,omitempty"`
-	CodeChallengeMethodsSupported    []string `json:"code_challenge_methods_supported,omitempty"`
+	Issuer                                     string   `json:"issuer"`
+	AuthorizationEndpoint                      string   `json:"authorization_endpoint"`
+	TokenEndpoint                              string   `json:"token_endpoint"`
+	JWKSURI                                    string   `json:"jwks_uri"`
+	UserinfoEndpoint                           string   `json:"userinfo_endpoint,omitempty"`
+	IDTokenSigningAlgValuesSupported           []string `json:"id_token_signing_alg_values_supported,omitempty"`
+	CodeChallengeMethodsSupported              []string `json:"code_challenge_methods_supported,omitempty"`
+	TokenEndpointAuthMethodsSupported          []string `json:"token_endpoint_auth_methods_supported,omitempty"`
+	TokenEndpointAuthSigningAlgValuesSupported []string `json:"token_endpoint_auth_signing_alg_values_supported,omitempty"`
 }
 
 // Discover fetches the provider metadata for issuer. The issuer in the
@@ -125,8 +127,12 @@ func requireHTTPS(name, raw string) error {
 // Config configures a Client.
 type Config struct {
 	ClientID     string
-	ClientSecret string // empty for public clients
-	RedirectURL  string
+	ClientSecret string // empty for public clients and private_key_jwt
+	// PrivateKeyJWT enables private_key_jwt token endpoint authentication.
+	// The provider must have the corresponding public key registered for this client.
+	// It cannot be combined with ClientSecret.
+	PrivateKeyJWT *PrivateKeyJWTConfig
+	RedirectURL   string
 	// Scopes requested in addition to "openid".
 	Scopes []string
 	// Algorithms accepted for ID tokens. The default is the asymmetric
@@ -142,12 +148,24 @@ type Config struct {
 	Now func() time.Time
 }
 
+// PrivateKeyJWTConfig selects the signing key for client authentication.
+// PrivateKey is an RSA or ECDSA private key, or an Ed25519 private key,
+// matching Algorithm. KeyID is sent in the JWT's kid header when set.
+type PrivateKeyJWTConfig struct {
+	Algorithm  jwt.Algorithm
+	PrivateKey any
+	KeyID      string
+}
+
 // Client is an OpenID Connect relying party. It is safe for concurrent use.
 type Client struct {
-	provider *Provider
-	oauth    oauth2.Config
-	verifier *jwt.Verifier
-	client   *http.Client
+	provider          *Provider
+	oauth             oauth2.Config
+	verifier          *jwt.Verifier
+	client            *http.Client
+	assertionSigner   *jwt.Signer
+	assertionAudience string
+	now               func() time.Time
 }
 
 // NewClient returns a Client for the provider.
@@ -157,6 +175,27 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 	}
 	if cfg.ClientID == "" || cfg.RedirectURL == "" {
 		return nil, errors.New("oidc: ClientID and RedirectURL are required")
+	}
+	var assertionSigner *jwt.Signer
+	if cfg.PrivateKeyJWT != nil {
+		if cfg.ClientSecret != "" {
+			return nil, errors.New("oidc: PrivateKeyJWT and ClientSecret cannot be combined")
+		}
+		if cfg.PrivateKeyJWT.Algorithm.IsSymmetric() {
+			return nil, errors.New("oidc: PrivateKeyJWT requires an asymmetric algorithm")
+		}
+		if len(p.TokenEndpointAuthMethodsSupported) > 0 && !slices.Contains(p.TokenEndpointAuthMethodsSupported, "private_key_jwt") {
+			return nil, errors.New("oidc: provider does not support private_key_jwt")
+		}
+		if len(p.TokenEndpointAuthSigningAlgValuesSupported) > 0 && !slices.Contains(p.TokenEndpointAuthSigningAlgValuesSupported, string(cfg.PrivateKeyJWT.Algorithm)) {
+			return nil, fmt.Errorf("oidc: provider does not support %s for client authentication", cfg.PrivateKeyJWT.Algorithm)
+		}
+		var err error
+		assertionSigner, err = jwt.NewSigner(cfg.PrivateKeyJWT.Algorithm, cfg.PrivateKeyJWT.PrivateKey,
+			jwt.WithKeyID(cfg.PrivateKeyJWT.KeyID), jwt.WithType("client-authentication+jwt"))
+		if err != nil {
+			return nil, fmt.Errorf("oidc: private_key_jwt: %w", err)
+		}
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = http.DefaultClient
@@ -187,6 +226,12 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 		return nil, err
 	}
 	scopes := append([]string{"openid"}, slices.DeleteFunc(slices.Clone(cfg.Scopes), func(s string) bool { return s == "openid" })...)
+	authStyle := oauth2.AuthStyleAutoDetect
+	if assertionSigner != nil {
+		// InParams adds client_id without a client_secret or Basic header.
+		// AutoDetect would first try Basic and could resend the same assertion.
+		authStyle = oauth2.AuthStyleInParams
+	}
 	return &Client{
 		provider: p,
 		oauth: oauth2.Config{
@@ -195,12 +240,16 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 			RedirectURL:  cfg.RedirectURL,
 			Scopes:       scopes,
 			Endpoint: oauth2.Endpoint{
-				AuthURL:  p.AuthorizationEndpoint,
-				TokenURL: p.TokenEndpoint,
+				AuthURL:   p.AuthorizationEndpoint,
+				TokenURL:  p.TokenEndpoint,
+				AuthStyle: authStyle,
 			},
 		},
-		verifier: verifier,
-		client:   cfg.HTTPClient,
+		verifier:          verifier,
+		client:            cfg.HTTPClient,
+		assertionSigner:   assertionSigner,
+		assertionAudience: p.Issuer,
+		now:               cfg.Now,
 	}, nil
 }
 
@@ -285,8 +334,30 @@ func (c *Client) Exchange(ctx context.Context, req AuthRequest, state, code stri
 		return nil, fmt.Errorf("%w: empty code", ErrExchangeRejected)
 	}
 
+	opts := []oauth2.AuthCodeOption{oauth2.VerifierOption(req.CodeVerifier)}
+	if c.assertionSigner != nil {
+		id, err := randomString()
+		if err != nil {
+			return nil, fmt.Errorf("oidc: client assertion ID: %w", err)
+		}
+		now := c.now()
+		assertion, err := c.assertionSigner.Sign(jwt.Claims{
+			Issuer:    c.oauth.ClientID,
+			Subject:   c.oauth.ClientID,
+			Audience:  jwt.Audience{c.assertionAudience},
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(5 * time.Minute)),
+			ID:        id,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("oidc: signing client assertion: %w", err)
+		}
+		opts = append(opts,
+			oauth2.SetAuthURLParam("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"),
+			oauth2.SetAuthURLParam("client_assertion", assertion))
+	}
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, c.client)
-	tok, err := c.oauth.Exchange(ctx, code, oauth2.VerifierOption(req.CodeVerifier))
+	tok, err := c.oauth.Exchange(ctx, code, opts...)
 	if err != nil {
 		var re *oauth2.RetrieveError
 		if errors.As(err, &re) {

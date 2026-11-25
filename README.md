@@ -101,6 +101,19 @@ res, err := client.Exchange(ctx, req, r.URL.Query().Get("state"), r.URL.Query().
 
 info, err := client.UserInfo(ctx, res.Token, res.Principal.Subject) // optional
 ```
+For `private_key_jwt`, register the corresponding public key with the provider
+and configure an asymmetric signing key instead of `ClientSecret`:
+```go
+client, _ := oidc.NewClient(prov, oidc.Config{
+	ClientID: id, RedirectURL: cb,
+	PrivateKeyJWT: &oidc.PrivateKeyJWTConfig{
+		Algorithm: jwt.ES256, PrivateKey: privateKey, KeyID: "client-key-1",
+	},
+})
+```
+Each token exchange signs a fresh, five-minute client assertion. Its audience
+is the provider issuer, as required by RFC 10070.
+
 `Exchange` checks:
 - the state and nonce
 - PKCE (S256)
