@@ -18,6 +18,7 @@ import (
 //
 // Only public keys are read from and written to JSON. HMAC secrets can be
 // used through NewHMACKey but are never parsed from or serialized to JSON.
+// Private keys for signing are read with ParsePrivateJWK.
 type JWK struct {
 	// KeyID is the "kid" parameter.
 	KeyID string
@@ -77,15 +78,28 @@ type rawJWK struct {
 	X      string   `json:"x,omitempty"`
 	Y      string   `json:"y,omitempty"`
 
-	// Private or symmetric key material. Its presence is an error.
-	D jsontext.Value `json:"d,omitzero"`
-	K jsontext.Value `json:"k,omitzero"`
+	// Private or symmetric key material (RFC 7518 §6.2.2, §6.3.2, §6.4,
+	// RFC 8037 §2). Only ParsePrivateJWK accepts it.
+	D   jsontext.Value `json:"d,omitzero"`
+	P   jsontext.Value `json:"p,omitzero"`
+	Q   jsontext.Value `json:"q,omitzero"`
+	DP  jsontext.Value `json:"dp,omitzero"`
+	DQ  jsontext.Value `json:"dq,omitzero"`
+	QI  jsontext.Value `json:"qi,omitzero"`
+	Oth jsontext.Value `json:"oth,omitzero"`
+	K   jsontext.Value `json:"k,omitzero"`
+}
+
+func (r rawJWK) hasPrivate() bool {
+	return slices.ContainsFunc([]jsontext.Value{r.D, r.P, r.Q, r.DP, r.DQ, r.QI, r.Oth, r.K},
+		func(v jsontext.Value) bool { return len(v) > 0 })
 }
 
 var errUnsupportedKey = errors.New("jwt: unsupported key type")
 
-// ParseJWK parses a single public JWK. Keys containing private or
-// symmetric key material are rejected.
+// ParseJWK parses a single public JWK. Keys containing any private or
+// symmetric key member are rejected, so a private key never ends up being
+// used, logged or republished as a public one.
 func ParseJWK(data []byte) (JWK, error) {
 	var r rawJWK
 	if err := json.Unmarshal(data, &r); err != nil {
@@ -95,9 +109,14 @@ func ParseJWK(data []byte) (JWK, error) {
 }
 
 func (r rawJWK) toJWK() (JWK, error) {
-	if len(r.D) > 0 || len(r.K) > 0 {
+	if r.hasPrivate() {
 		return JWK{}, errors.New("jwt: JWK contains private or symmetric key material")
 	}
+	return r.publicJWK()
+}
+
+// publicJWK parses the public members of r, ignoring private ones.
+func (r rawJWK) publicJWK() (JWK, error) {
 	k := JWK{KeyID: r.Kid, Algorithm: Algorithm(r.Alg), Use: r.Use, KeyOps: r.KeyOps}
 	if k.Algorithm != "" {
 		if _, ok := k.Algorithm.spec(); !ok {
@@ -190,6 +209,139 @@ func parseOKP(r rawJWK) (ed25519.PublicKey, error) {
 		return nil, errors.New("jwt: invalid OKP JWK")
 	}
 	return ed25519.PublicKey(x), nil
+}
+
+// PrivateJWK is a private JSON Web Key used for signing.
+type PrivateJWK struct {
+	// KeyID is the "kid" parameter.
+	KeyID string
+	// Algorithm is the "alg" parameter, or empty if the JWK has none.
+	Algorithm Algorithm
+	// Key is *rsa.PrivateKey, *ecdsa.PrivateKey or ed25519.PrivateKey, as
+	// NewSigner accepts.
+	Key crypto.Signer
+}
+
+// ParsePrivateJWK parses a private RSA, EC (P-256, P-384, P-521) or OKP
+// (Ed25519) JWK. The private key must match the public members: RSA keys
+// need all CRT parameters, which are validated, EC keys need a scalar in
+// range for the curve, and the Ed25519 seed must produce "x". A "use"
+// other than "sig", or "key_ops" without "sign", is rejected, as are
+// symmetric and multi-prime RSA keys.
+//
+// Private keys cannot be marshaled back to JSON.
+func ParsePrivateJWK(data []byte) (PrivateJWK, error) {
+	var r rawJWK
+	if err := json.Unmarshal(data, &r); err != nil {
+		return PrivateJWK{}, fmt.Errorf("jwt: parsing JWK: %w", err)
+	}
+	switch {
+	case len(r.K) > 0:
+		return PrivateJWK{}, fmt.Errorf("%w: symmetric JWK", errUnsupportedKey)
+	case len(r.Oth) > 0:
+		return PrivateJWK{}, fmt.Errorf("%w: multi-prime RSA JWK", errUnsupportedKey)
+	case len(r.D) == 0:
+		return PrivateJWK{}, errors.New("jwt: JWK has no private key")
+	case r.Use != "" && r.Use != "sig":
+		return PrivateJWK{}, fmt.Errorf("jwt: JWK use %q is not for signing", r.Use)
+	case len(r.KeyOps) > 0 && !slices.Contains(r.KeyOps, "sign"):
+		return PrivateJWK{}, fmt.Errorf("jwt: JWK key_ops %q do not include sign", r.KeyOps)
+	}
+	pub, err := r.publicJWK()
+	if err != nil {
+		return PrivateJWK{}, err
+	}
+	var priv crypto.Signer
+	switch pk := pub.Key.(type) {
+	case *rsa.PublicKey:
+		priv, err = parseRSAPrivate(r, pk)
+	case *ecdsa.PublicKey:
+		priv, err = parseECPrivate(r, pk)
+	case ed25519.PublicKey:
+		priv, err = parseOKPPrivate(r, pk)
+	}
+	if err != nil {
+		return PrivateJWK{}, err
+	}
+	return PrivateJWK{KeyID: pub.KeyID, Algorithm: pub.Algorithm, Key: priv}, nil
+}
+
+// privateParam decodes a base64url private key member.
+func privateParam(v jsontext.Value) ([]byte, error) {
+	var s string
+	if err := json.Unmarshal(v, &s); err != nil {
+		return nil, err
+	}
+	b, err := b64.DecodeString(s)
+	if err != nil || len(b) == 0 {
+		return nil, errors.New("invalid base64url value")
+	}
+	return b, nil
+}
+
+func parseRSAPrivate(r rawJWK, pub *rsa.PublicKey) (*rsa.PrivateKey, error) {
+	var v [6]*big.Int
+	for i, m := range []jsontext.Value{r.D, r.P, r.Q, r.DP, r.DQ, r.QI} {
+		if len(m) == 0 {
+			return nil, errors.New("jwt: private RSA JWK needs d, p, q, dp, dq and qi")
+		}
+		b, err := privateParam(m)
+		if err != nil {
+			return nil, fmt.Errorf("jwt: invalid private RSA JWK: %w", err)
+		}
+		v[i] = new(big.Int).SetBytes(b)
+	}
+	priv := &rsa.PrivateKey{
+		PublicKey:   *pub,
+		D:           v[0],
+		Primes:      []*big.Int{v[1], v[2]},
+		Precomputed: rsa.PrecomputedValues{Dp: v[3], Dq: v[4], Qinv: v[5]},
+	}
+	// With the CRT values set, Validate checks n = pq, d, dp, dq and qi
+	// against each other.
+	priv.Precompute()
+	if err := priv.Validate(); err != nil {
+		return nil, fmt.Errorf("jwt: invalid private RSA JWK: %w", err)
+	}
+	return priv, nil
+}
+
+func hasRSAPrivateMembers(r rawJWK) bool {
+	return len(r.P) > 0 || len(r.Q) > 0 || len(r.DP) > 0 || len(r.DQ) > 0 || len(r.QI) > 0
+}
+
+func parseECPrivate(r rawJWK, pub *ecdsa.PublicKey) (*ecdsa.PrivateKey, error) {
+	if hasRSAPrivateMembers(r) {
+		return nil, errors.New("jwt: invalid private EC JWK: unexpected RSA members")
+	}
+	d, err := privateParam(r.D)
+	// RFC 7518 §6.2.2.1: d MUST be the full size of the curve order.
+	if err != nil || len(d) != curveByteSize(pub.Curve) {
+		return nil, errors.New("jwt: invalid private EC JWK")
+	}
+	priv, err := ecdsa.ParseRawPrivateKey(pub.Curve, d)
+	if err != nil {
+		return nil, fmt.Errorf("jwt: invalid private EC JWK: %w", err)
+	}
+	if !priv.PublicKey.Equal(pub) {
+		return nil, errors.New("jwt: invalid private EC JWK: d does not match x and y")
+	}
+	return priv, nil
+}
+
+func parseOKPPrivate(r rawJWK, pub ed25519.PublicKey) (ed25519.PrivateKey, error) {
+	if hasRSAPrivateMembers(r) {
+		return nil, errors.New("jwt: invalid private OKP JWK: unexpected RSA members")
+	}
+	seed, err := privateParam(r.D)
+	if err != nil || len(seed) != ed25519.SeedSize {
+		return nil, errors.New("jwt: invalid private OKP JWK")
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+	if !pub.Equal(priv.Public()) {
+		return nil, errors.New("jwt: invalid private OKP JWK: d does not match x")
+	}
+	return priv, nil
 }
 
 // MarshalJSON encodes the public key. HMAC keys cannot be marshaled.

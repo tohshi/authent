@@ -49,7 +49,7 @@ Legend:
 | JWK thumbprint (RFC 7638) | ✅ | |
 | Rejection of sender-constrained (`cnf`) tokens as bearer tokens | ✅ | Opt out with `WithConfirmationClaim` when the binding is verified elsewhere |
 | Verification with a key embedded in the `jwk` header | ✅ | Separate `VerifyWithEmbeddedKey` API for DPoP proofs; `Verifier` never uses it |
-| Parsing private JWKs | ⬜ | Signing keys are passed as Go crypto keys |
+| Parsing private JWKs | ✅ | `ParsePrivateJWK` for RSA (all CRT values, validated), EC and Ed25519; private keys are never marshaled, and `ParseJWK`/`ParseJWKSet` reject or drop keys with private members |
 | `jti` replay detection | ⬜ | Needs a store |
 | Maximum token age / `auth_time` limits | ⬜ | |
 | `x5c` certificate chain validation | ⬜ | |

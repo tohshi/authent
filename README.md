@@ -105,6 +105,14 @@ Safeguards enforced during verification:
   - RSA keys must be at least 2048 bits.
   - HMAC keys must be at least as long as the hash output.
 
+A signing key can come from a private JWK:
+```go
+k, _ := jwt.ParsePrivateJWK(data) // RSA with CRT values, EC or Ed25519; checked against the public members
+signer, _ := jwt.NewSigner(jwt.ES256, k.Key, jwt.WithKeyID(k.KeyID))
+```
+`ParseJWK` rejects any JWK with private members, and `ParseJWKSet` drops
+such keys, so a leaked private key is never used to verify tokens.
+
 `RemoteKeySet` keeps a fetched set for the `max-age` of its
 `Cache-Control` header, clamped between `WithMinRefreshInterval` (default
 1 minute) and `WithMaxRefreshInterval` (default 24 hours). `no-store` and
