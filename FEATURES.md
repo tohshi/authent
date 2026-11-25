@@ -89,7 +89,7 @@ Legend:
 | Signed UserInfo responses (`application/jwt`) | ⬜ | Currently rejected; needs JWT verification without `exp`. Encrypted responses are out of scope along with JWE |
 | Refresh token helper | ⬜ | The `oauth2.Token` is returned and can be used with `x/oauth2` |
 | `max_age`, `auth_time` and `acr` enforcement | ⬜ | |
-| `private_key_jwt` client authentication | ⬜ | |
+| `private_key_jwt` client authentication | ✅ | Asymmetric JWT assertion on each code exchange; issuer audience per RFC 10070 |
 | RP-initiated, front-channel and back-channel logout | ⬜ | |
 | PAR (RFC 9126) and DPoP (RFC 9449) | ⬜ | |
 | Implicit and hybrid flows (`c_hash`) | ➖ | Discouraged by current OAuth security best practice |
