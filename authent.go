@@ -29,6 +29,7 @@ const (
 	MethodOIDC     Method = "oidc"
 	MethodTOTP     Method = "totp"
 	MethodHOTP     Method = "hotp"
+	MethodRecovery Method = "recovery_code"
 	MethodWebAuthn Method = "webauthn"
 	MethodDPoP     Method = "dpop"
 	MethodAPIKey   Method = "apikey"

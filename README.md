@@ -262,6 +262,20 @@ p, err = hotp.Resync(ctx, "u1", code1, code2) // after the token ran ahead
 - `HOTPStore.AdvanceHOTPCounter` must be an atomic compare-and-set, like
   `AdvanceCounter`.
 
+Recovery codes let a user log in after losing the second factor:
+```go
+codes, hashes, _ := totp.GenerateRecoveryCodes(10) // show codes once, store hashes
+recovery, _ := totp.NewRecoveryAuthenticator(rstore) // rstore implements totp.RecoveryStore
+p, err := recovery.Authenticate(ctx, "u1", code)     // p.Method is authent.MethodRecovery
+```
+- Each code has 120 random bits and is stored as its SHA-256 (NIST
+  SP 800-63B requires 112 bits for an unsalted fast hash).
+- Hyphens, spaces and ASCII case are ignored when a code is entered.
+  Anything else that is not a code is rejected before the store is
+  queried.
+- `RecoveryStore.ConsumeRecoveryCode` must check and remove the hash
+  atomically, so a code works only once.
+
 ### WebAuthn
 ```go
 rp, _ := webauthn.New(webauthn.Config{
