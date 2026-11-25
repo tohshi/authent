@@ -22,6 +22,8 @@ var (
 	ErrExpired              = fmt.Errorf("%w: expired", ErrInvalidToken)
 	ErrNotYetValid          = fmt.Errorf("%w: not yet valid", ErrInvalidToken)
 	ErrIssuedInFuture       = fmt.Errorf("%w: issued in the future", ErrInvalidToken)
+	ErrTokenTooOld          = fmt.Errorf("%w: issued too long ago", ErrInvalidToken)
+	ErrAuthenticationTooOld = fmt.Errorf("%w: authentication too long ago", ErrInvalidToken)
 	ErrInvalidIssuer        = fmt.Errorf("%w: issuer not accepted", ErrInvalidToken)
 	ErrInvalidAudience      = fmt.Errorf("%w: audience not accepted", ErrInvalidToken)
 	// ErrSenderConstrained means the token has a "cnf" claim but the

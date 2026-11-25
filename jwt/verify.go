@@ -27,6 +27,8 @@ type Verifier struct {
 	leeway      time.Duration
 	maxSize     int
 	replay      ReplayCache
+	maxTokenAge *time.Duration
+	maxAuthAge  *time.Duration
 	now         func() time.Time
 }
 
@@ -78,6 +80,20 @@ func WithLeeway(d time.Duration) VerifierOption { return func(v *Verifier) { v.l
 // DefaultMaxTokenSize.
 func WithMaxTokenSize(n int) VerifierOption { return func(v *Verifier) { v.maxSize = n } }
 
+// WithMaxTokenAge rejects tokens issued more than d ago, plus the leeway,
+// with ErrTokenTooOld. "iat" becomes required.
+func WithMaxTokenAge(d time.Duration) VerifierOption {
+	return func(v *Verifier) { v.maxTokenAge = &d }
+}
+
+// WithMaxAuthAge rejects tokens whose subject authenticated more than d
+// ago, plus the leeway, with ErrAuthenticationTooOld, as OpenID Connect
+// "max_age" requires. "auth_time" becomes required. Zero accepts only an
+// authentication within the leeway.
+func WithMaxAuthAge(d time.Duration) VerifierOption {
+	return func(v *Verifier) { v.maxAuthAge = &d }
+}
+
 // WithReplayCache accepts each token only once. "jti" becomes required,
 // and the pair of "iss" and "jti" is recorded in c until "exp" (plus the
 // leeway) once every other check has passed. A replayed token fails with
@@ -116,6 +132,9 @@ func NewVerifier(keys KeySet, opts ...VerifierOption) (*Verifier, error) {
 	}
 	if v.leeway < 0 {
 		return nil, errors.New("jwt: negative leeway")
+	}
+	if (v.maxTokenAge != nil && *v.maxTokenAge < 0) || (v.maxAuthAge != nil && *v.maxAuthAge < 0) {
+		return nil, errors.New("jwt: negative maximum age")
 	}
 	return v, nil
 }
@@ -236,6 +255,26 @@ func (v *Verifier) validate(c *Claims) error {
 	if !c.IssuedAt.IsZero() && now.Add(v.leeway).Before(c.IssuedAt.Time) {
 		return ErrIssuedInFuture
 	}
+	if v.maxTokenAge != nil {
+		if c.IssuedAt.IsZero() {
+			return fmt.Errorf("%w: iat", ErrMissingClaim)
+		}
+		if now.After(c.IssuedAt.Add(*v.maxTokenAge + v.leeway)) {
+			return ErrTokenTooOld
+		}
+	}
+	if v.maxAuthAge != nil {
+		at, err := c.AuthTime()
+		if err != nil {
+			return err
+		}
+		if at.IsZero() {
+			return fmt.Errorf("%w: auth_time", ErrMissingClaim)
+		}
+		if now.After(at.Add(*v.maxAuthAge + v.leeway)) {
+			return ErrAuthenticationTooOld
+		}
+	}
 	if !v.anyIssuer && !slices.Contains(v.issuers, c.Issuer) {
 		return fmt.Errorf("%w: %q", ErrInvalidIssuer, c.Issuer)
 	}
@@ -273,8 +312,8 @@ func PrincipalFromClaims(c *Claims, method authent.Method) (authent.Principal, e
 		return authent.Principal{}, err
 	}
 	authTime := c.IssuedAt.Time
-	if at, ok := c.Extra["auth_time"].(float64); ok && at > 0 && at <= maxUnixSeconds {
-		authTime = time.Unix(int64(at), 0).UTC()
+	if at, err := c.AuthTime(); err == nil && !at.IsZero() {
+		authTime = at
 	}
 	return authent.Principal{
 		Subject:  c.Subject,

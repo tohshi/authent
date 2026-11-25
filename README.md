@@ -111,6 +111,11 @@ Optional checks:
   until `exp` once every other check has passed. A cache error rejects the
   token but does not wrap `authent.ErrUnauthenticated`. `dpop.Verifier`
   takes the same `jwt.ReplayCache` interface.
+- `jwt.WithMaxTokenAge(d)` rejects tokens issued more than `d` ago and
+  makes `iat` required. `jwt.WithMaxAuthAge(d)` does the same for
+  `auth_time`, as OpenID Connect `max_age` requires. Both allow the
+  leeway on top of `d`. `Claims.AuthTime` reads `auth_time` for
+  per-request checks.
 
 A signing key can come from a private JWK:
 ```go
