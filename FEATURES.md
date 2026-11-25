@@ -197,7 +197,7 @@ Legend:
 | Independent test vectors (OpenSSL, RFCs) and fuzz tests | ✅ | |
 | `net/http` middleware | ✅ | `httpauth`: bearer JWTs, session cookies and API keys; `Require` and `Optional`; CSRF check on unsafe methods; Principal in the context via `authent.NewContext` |
 | gRPC interceptors | ➖ | A gRPC dependency is outside the dependency policy; an interceptor is a few lines on top of `jwt.Verifier` and `authent.NewContext` (example in the README) |
-| Mapping a Principal to a ReBAC subject | ⬜ | |
+| Mapping a Principal to a ReBAC subject | ✅ | `rebac.SubjectOf`; `httpauth.RequirePermission` checks a permission per request. The issuer is not part of the subject |
 | Observability hooks (logging, metrics, tracing) | ⬜ | |
 | API keys / opaque tokens | ✅ | `apikey`: prefixed keys with a CRC-32 checksum, SHA-256 at rest, expiry and revocation |
 | Multi-factor authentication (TOTP, WebAuthn) | ✅ | See the `totp` and `webauthn` sections |

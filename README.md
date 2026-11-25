@@ -386,6 +386,21 @@ ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("us
   `false` with `ErrTooComplex`.
 - Store errors fail closed: `Check` returns `false` with the error.
 
+To check permissions for an authenticated request, map its Principal to a
+subject:
+```go
+sub, err := rebac.SubjectOf(p, "user") // user:<p.Subject>; an empty or "*" subject is an error
+ok, err := engine.Check(ctx, rebac.Obj("doc", id), "viewer", sub)
+
+// or as middleware, inside httpauth.Require:
+mux.Handle("GET /docs/{id}", httpauth.Require(auth)(
+	httpauth.RequirePermission(engine, "viewer", "user", func(r *http.Request) (rebac.Object, error) {
+		return rebac.Obj("doc", r.PathValue("id")), nil
+	})(docHandler)))
+```
+`RequirePermission` responds 403 when the check is denied or the object
+ID is invalid, and 500 when the check fails.
+
 #### Persistent tuple storage
 ```go
 import _ "github.com/jackc/pgx/v5/stdlib" // or any database/sql driver
