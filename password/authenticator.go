@@ -112,7 +112,11 @@ func (a *Authenticator) rehashIfNeeded(ctx context.Context, cred Credential, pas
 	if err != nil || !needs {
 		return err
 	}
-	hash, err := a.hasher.Hash(password)
+	_, _, _, normalize, err := decode(cred.Hash)
+	if err != nil {
+		return err
+	}
+	hash, err := a.hasher.hash(password, normalize)
 	if err != nil {
 		return err
 	}

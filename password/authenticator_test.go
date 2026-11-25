@@ -3,6 +3,7 @@ package password
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +90,31 @@ func TestAuthenticateRehashesOutdatedHash(t *testing.T) {
 	}
 	if err := h.Verify("s3cret", newHash); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAuthenticateRehashPreservesNFC(t *testing.T) {
+	old, _ := NewHasher(Params{Memory: 32, Iterations: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32})
+	policy, _ := NewPolicy(1, 64, &stubBreachChecker{})
+	hash, err := policy.Hash(context.Background(), old, "cafe\u0301")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeStore{
+		creds:   map[string]Credential{"alice": {Subject: "u-1", Hash: hash}},
+		updated: map[string]string{},
+	}
+	h := newTestHasher(t)
+	a, _ := NewAuthenticator(store, h)
+	if _, err := a.Authenticate(context.Background(), "alice", "café"); err != nil {
+		t.Fatal(err)
+	}
+	updated := store.updated["u-1"]
+	if !strings.Contains(updated, ",norm=nfc$") {
+		t.Fatalf("NFC tag lost during rehash: %q", updated)
+	}
+	if err := h.Verify("cafe\u0301", updated); err != nil {
+		t.Fatalf("upgraded hash does not verify: %v", err)
 	}
 }
 
