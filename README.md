@@ -66,6 +66,15 @@ p, err := auth.Authenticate(ctx, username, pw)
   reveal whether a username exists.
 - If `store` also implements `CredentialUpdater`, hashes created with
   outdated parameters are upgraded after a successful login.
+- To migrate users from another system, store their existing hashes as they
+  are. `Verify` accepts bcrypt (`$2a$`, `$2b$`, `$2y$`), Werkzeug scrypt
+  (`scrypt:32768:8:1$salt$hex`, the Flask default) and Django PBKDF2
+  (`pbkdf2_sha256$1000000$salt$base64`, the Django default). It never creates
+  them. `NeedsRehash` always reports them, so `Authenticate` replaces each one
+  with Argon2id at the user's next login. They are compared byte for byte,
+  without NFC normalization, as the original system did. Hashes above bcrypt
+  cost 16, 1 GiB of scrypt memory or 10,000,000 PBKDF2 iterations are
+  rejected as malformed.
 
 ### JWT
 ```go

@@ -9,6 +9,10 @@
 //
 // Policy.Hash adds a norm=nfc parameter to mark hashes that use Unicode NFC
 // normalization; hashes without it retain their original byte semantics.
+//
+// Verify also accepts bcrypt, Werkzeug scrypt and Django PBKDF2 hashes so
+// that users can be migrated from other systems. These are never created;
+// NeedsRehash always reports them as outdated.
 package password
 
 import (
@@ -28,8 +32,8 @@ import (
 var (
 	// ErrMismatch is returned when a password does not match a hash.
 	ErrMismatch = errors.New("password: mismatch")
-	// ErrMalformedHash is returned when an encoded hash cannot be parsed or
-	// carries parameters outside the accepted bounds.
+	// ErrMalformedHash is returned when an encoded hash is not in a supported
+	// format or carries parameters outside the accepted bounds.
 	ErrMalformedHash = errors.New("password: malformed hash")
 )
 
@@ -119,41 +123,76 @@ func (h *Hasher) hash(password string, normalize bool) (string, error) {
 
 // Verify reports whether password matches encoded. It returns nil on a
 // match, ErrMismatch on a mismatch and ErrMalformedHash if encoded is not a
-// valid Argon2id hash. The comparison is constant time.
+// valid hash in a supported format. The comparison is constant time.
 //
 // The parameters stored in encoded are used, so hashes created with older
-// parameters still verify; use NeedsRehash to upgrade them.
+// parameters or a legacy algorithm still verify; use NeedsRehash to upgrade
+// them.
 func (h *Hasher) Verify(password, encoded string) error {
-	p, salt, want, normalize, err := decode(encoded)
+	_, err := h.verify(password, encoded)
+	return err
+}
+
+func (h *Hasher) verify(password, encoded string) (storedHash, error) {
+	s, err := parseHash(encoded)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	if !s.matches(password) {
+		return nil, ErrMismatch
+	}
+	return s, nil
+}
+
+// NeedsRehash reports whether encoded was created with parameters other than
+// the Hasher's, or with a legacy algorithm, in which case the password should
+// be hashed again after a successful Verify.
+func (h *Hasher) NeedsRehash(encoded string) (bool, error) {
+	s, err := parseHash(encoded)
+	if err != nil {
+		return false, err
+	}
+	return !s.current(h), nil
+}
+
+// storedHash is a parsed encoded hash.
+type storedHash interface {
+	// matches reports in constant time whether password produces the hash.
+	matches(password string) bool
+	// current reports whether h would create a hash with the same parameters.
+	current(h *Hasher) bool
+	// normalized reports whether passwords are NFC-normalized before hashing.
+	normalized() bool
+}
+
+func parseHash(encoded string) (storedHash, error) {
+	if strings.HasPrefix(encoded, "$argon2id$") {
+		return parseArgon2id(encoded)
+	}
+	return parseLegacy(encoded)
+}
+
+type argon2idHash struct {
+	params    Params
+	salt, key []byte
+	normalize bool
+}
+
+func (a *argon2idHash) matches(password string) bool {
 	valid := true
-	if normalize {
+	if a.normalize {
 		valid = utf8.ValidString(password)
 		if valid {
 			password = norm.NFC.String(password)
 		}
 	}
-	got := derive(password, salt, p)
-	if subtle.ConstantTimeCompare(got, want) != 1 || !valid {
-		return ErrMismatch
-	}
-	return nil
+	got := derive(password, a.salt, a.params)
+	return subtle.ConstantTimeCompare(got, a.key) == 1 && valid
 }
 
-// NeedsRehash reports whether encoded was created with parameters other than
-// the Hasher's, in which case the password should be hashed again after a
-// successful Verify.
-func (h *Hasher) NeedsRehash(encoded string) (bool, error) {
-	p, salt, key, _, err := decode(encoded)
-	if err != nil {
-		return false, err
-	}
-	p.SaltLength = uint32(len(salt))
-	p.KeyLength = uint32(len(key))
-	return p != h.params, nil
-}
+func (a *argon2idHash) current(h *Hasher) bool { return a.params == h.params }
+
+func (a *argon2idHash) normalized() bool { return a.normalize }
 
 func derive(password string, salt []byte, p Params) []byte {
 	return argon2.IDKey([]byte(password), salt, p.Iterations, p.Memory, p.Parallelism, p.KeyLength)
@@ -170,39 +209,38 @@ func encode(p Params, salt, key []byte, normalize bool) string {
 		argon2.Version, costs, b64.EncodeToString(salt), b64.EncodeToString(key))
 }
 
-func decode(encoded string) (Params, []byte, []byte, bool, error) {
-	var p Params
+func parseArgon2id(encoded string) (*argon2idHash, error) {
 	// "", "argon2id", "v=19", "m=..,t=..,p=..", salt, hash
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" {
-		return p, nil, nil, false, ErrMalformedHash
+		return nil, ErrMalformedHash
 	}
 	if parts[2] != "v="+strconv.Itoa(argon2.Version) {
-		return p, nil, nil, false, ErrMalformedHash
+		return nil, ErrMalformedHash
 	}
 
 	costs := strings.Split(parts[3], ",")
 	if len(costs) != 3 && (len(costs) != 4 || costs[3] != "norm=nfc") {
-		return p, nil, nil, false, ErrMalformedHash
+		return nil, ErrMalformedHash
 	}
 	normalize := len(costs) == 4
 	m, err1 := parseCost(costs[0], "m=", 32)
 	t, err2 := parseCost(costs[1], "t=", 32)
 	l, err3 := parseCost(costs[2], "p=", 8)
 	if err := errors.Join(err1, err2, err3); err != nil {
-		return p, nil, nil, false, ErrMalformedHash
+		return nil, ErrMalformedHash
 	}
 
 	salt, err := b64.DecodeString(parts[4])
 	if err != nil {
-		return p, nil, nil, false, ErrMalformedHash
+		return nil, ErrMalformedHash
 	}
 	key, err := b64.DecodeString(parts[5])
 	if err != nil {
-		return p, nil, nil, false, ErrMalformedHash
+		return nil, ErrMalformedHash
 	}
 
-	p = Params{
+	p := Params{
 		Memory:      uint32(m),
 		Iterations:  uint32(t),
 		Parallelism: uint8(l),
@@ -210,9 +248,9 @@ func decode(encoded string) (Params, []byte, []byte, bool, error) {
 		KeyLength:   uint32(len(key)),
 	}
 	if p.validate() != nil {
-		return p, nil, nil, false, ErrMalformedHash
+		return nil, ErrMalformedHash
 	}
-	return p, salt, key, normalize, nil
+	return &argon2idHash{params: p, salt: salt, key: key, normalize: normalize}, nil
 }
 
 func parseCost(s, prefix string, bits int) (uint64, error) {
