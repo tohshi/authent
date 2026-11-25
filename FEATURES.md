@@ -31,7 +31,7 @@ Legend:
 | HS256/384/512, RS256/384/512, PS256/384/512 | ✅ | RSA keys must be at least 2048 bits; HMAC keys at least the hash size |
 | ES256/384/512 | ✅ | Fixed-width R‖S only; DER is rejected |
 | EdDSA (Ed25519) | ✅ | |
-| EdDSA (Ed448) | ⬜ | No Ed448 in the standard library |
+| EdDSA (Ed448) | ➖ | No Ed448 in the standard library or golang.org/x/crypto |
 | Required algorithm allow-list; `none` always rejected | ✅ | |
 | Key and algorithm binding (algorithm-confusion protection) | ✅ | JWK `alg`, `use` and `key_ops` are honored |
 | Strict parsing | ✅ | Case-sensitive, no duplicate members, canonical base64url, size limit |
