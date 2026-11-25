@@ -45,7 +45,7 @@ Legend:
 | JWK Set parsing that skips unusable keys | ✅ | |
 | `StaticKeySet` | ✅ | |
 | `RemoteKeySet` | ✅ | TTL, refetch on unknown `kid`, refresh throttling, stale-on-error, concurrent fetch deduplication |
-| Refresh interval from `Cache-Control` | ⬜ | The interval is fixed |
+| Refresh interval from `Cache-Control` | ✅ | `max-age` clamped between the minimum and maximum refresh intervals; `no-store` and `no-cache` use the minimum |
 | JWK thumbprint (RFC 7638) | ✅ | |
 | Rejection of sender-constrained (`cnf`) tokens as bearer tokens | ✅ | Opt out with `WithConfirmationClaim` when the binding is verified elsewhere |
 | Verification with a key embedded in the `jwk` header | ✅ | Separate `VerifyWithEmbeddedKey` API for DPoP proofs; `Verifier` never uses it |

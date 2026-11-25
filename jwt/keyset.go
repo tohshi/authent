@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -55,15 +56,19 @@ func hasKeyID(keys []JWK, kid string) bool {
 
 // RemoteKeySet fetches a JWK Set over HTTPS and caches it.
 //
-// The set is refreshed when the cache is older than the refresh interval,
-// or when a token names a kid that is not cached (key rotation), but at
-// most once per minimum refresh interval. If a refresh fails while cached
-// keys exist, the cached keys keep being used.
+// The set is refreshed when it is no longer fresh, or when a token names
+// a kid that is not cached (key rotation), but at most once per minimum
+// refresh interval. A fetched set stays fresh for the max-age of the
+// response's Cache-Control header, clamped between the minimum and maximum
+// refresh intervals; no-store and no-cache make it fresh for the minimum
+// interval only, and without max-age the refresh interval applies. If a
+// refresh fails while cached keys exist, the cached keys keep being used.
 type RemoteKeySet struct {
 	url             string
 	client          *http.Client
 	refreshInterval time.Duration
 	minInterval     time.Duration
+	maxInterval     time.Duration
 	maxBodySize     int64
 	now             func() time.Time
 
@@ -71,8 +76,9 @@ type RemoteKeySet struct {
 
 	mu        sync.RWMutex
 	keys      []JWK
-	fetchedAt time.Time // zero until the first successful fetch
-	attempted time.Time // last fetch attempt, successful or not
+	fetchedAt time.Time     // zero until the first successful fetch
+	freshFor  time.Duration // freshness lifetime of keys
+	attempted time.Time     // last fetch attempt, successful or not
 }
 
 // RemoteKeySetOption configures a RemoteKeySet.
@@ -83,8 +89,8 @@ func WithHTTPClient(c *http.Client) RemoteKeySetOption {
 	return func(r *RemoteKeySet) { r.client = c }
 }
 
-// WithRefreshInterval sets how long a fetched set is considered fresh.
-// The default is 1 hour.
+// WithRefreshInterval sets how long a fetched set is considered fresh when
+// the response has no Cache-Control max-age. The default is 1 hour.
 func WithRefreshInterval(d time.Duration) RemoteKeySetOption {
 	return func(r *RemoteKeySet) { r.refreshInterval = d }
 }
@@ -94,6 +100,13 @@ func WithRefreshInterval(d time.Duration) RemoteKeySetOption {
 // 1 minute.
 func WithMinRefreshInterval(d time.Duration) RemoteKeySetOption {
 	return func(r *RemoteKeySet) { r.minInterval = d }
+}
+
+// WithMaxRefreshInterval caps the freshness lifetime taken from a
+// Cache-Control max-age, so that a removed key does not stay trusted for
+// long. The default is 24 hours.
+func WithMaxRefreshInterval(d time.Duration) RemoteKeySetOption {
+	return func(r *RemoteKeySet) { r.maxInterval = d }
 }
 
 // WithKeySetClock overrides the clock, for tests.
@@ -116,22 +129,26 @@ func NewRemoteKeySet(rawURL string, opts ...RemoteKeySetOption) (*RemoteKeySet, 
 		client:          http.DefaultClient,
 		refreshInterval: time.Hour,
 		minInterval:     time.Minute,
+		maxInterval:     24 * time.Hour,
 		maxBodySize:     1 << 20,
 		now:             time.Now,
 	}
 	for _, opt := range opts {
 		opt(r)
 	}
+	if r.minInterval > r.maxInterval {
+		return nil, errors.New("jwt: minimum refresh interval exceeds the maximum")
+	}
 	return r, nil
 }
 
 func (r *RemoteKeySet) VerificationKeys(ctx context.Context, kid string) ([]JWK, error) {
 	r.mu.RLock()
-	keys, fetchedAt, attempted := r.keys, r.fetchedAt, r.attempted
+	keys, fetchedAt, freshFor, attempted := r.keys, r.fetchedAt, r.freshFor, r.attempted
 	r.mu.RUnlock()
 
 	now := r.now()
-	fresh := !fetchedAt.IsZero() && now.Sub(fetchedAt) < r.refreshInterval
+	fresh := !fetchedAt.IsZero() && now.Sub(fetchedAt) < freshFor
 	known := kid == "" || hasKeyID(keys, kid)
 	throttled := !attempted.IsZero() && now.Sub(attempted) < r.minInterval
 
@@ -168,7 +185,7 @@ func (r *RemoteKeySet) refresh(ctx context.Context, seenAttempt time.Time) ([]JW
 		return keys, nil
 	}
 
-	fetched, err := r.fetch(ctx)
+	fetched, freshFor, err := r.fetch(ctx)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -179,34 +196,80 @@ func (r *RemoteKeySet) refresh(ctx context.Context, seenAttempt time.Time) ([]JW
 		}
 		return r.keys, nil // keep serving the cached keys
 	}
-	r.keys, r.fetchedAt = fetched, r.attempted
+	r.keys, r.fetchedAt, r.freshFor = fetched, r.attempted, freshFor
 	return fetched, nil
 }
 
-func (r *RemoteKeySet) fetch(ctx context.Context) ([]JWK, error) {
+func (r *RemoteKeySet) fetch(ctx context.Context) ([]JWK, time.Duration, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.url, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("jwt: fetching JWK set: %w", err)
+		return nil, 0, fmt.Errorf("jwt: fetching JWK set: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("jwt: fetching JWK set: status %s", resp.Status)
+		return nil, 0, fmt.Errorf("jwt: fetching JWK set: status %s", resp.Status)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, r.maxBodySize+1))
 	if err != nil {
-		return nil, fmt.Errorf("jwt: reading JWK set: %w", err)
+		return nil, 0, fmt.Errorf("jwt: reading JWK set: %w", err)
 	}
 	if int64(len(body)) > r.maxBodySize {
-		return nil, errors.New("jwt: JWK set too large")
+		return nil, 0, errors.New("jwt: JWK set too large")
 	}
 	set, err := ParseJWKSet(body)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return set.Keys, nil
+	freshFor := r.refreshInterval
+	if d, ok := cacheLifetime(resp.Header.Values("Cache-Control")); ok {
+		freshFor = min(max(d, r.minInterval), r.maxInterval)
+	}
+	return set.Keys, freshFor, nil
+}
+
+// cacheLifetime returns the freshness lifetime that Cache-Control header
+// values give a response, and false when they set none. no-store and
+// no-cache give zero, as do a repeated or invalid max-age, which RFC 9111
+// §4.2.1 says to treat as stale.
+func cacheLifetime(values []string) (time.Duration, bool) {
+	var maxAge time.Duration
+	found := false
+	for _, v := range values {
+		for directive := range strings.SplitSeq(v, ",") {
+			name, arg, _ := strings.Cut(strings.TrimSpace(directive), "=")
+			switch strings.ToLower(strings.TrimSpace(name)) {
+			case "no-store", "no-cache":
+				return 0, true
+			case "max-age":
+				secs, ok := parseDeltaSeconds(strings.TrimSpace(arg))
+				if !ok || found {
+					return 0, true
+				}
+				maxAge, found = time.Duration(secs)*time.Second, true
+			}
+		}
+	}
+	return maxAge, found
+}
+
+// parseDeltaSeconds parses delta-seconds, capping values above 2^31 as
+// RFC 9111 §1.2.2 requires.
+func parseDeltaSeconds(s string) (int64, bool) {
+	const limit = 1 << 31
+	if s == "" {
+		return 0, false
+	}
+	var n int64
+	for _, c := range []byte(s) {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = min(n*10+int64(c-'0'), limit)
+	}
+	return n, true
 }

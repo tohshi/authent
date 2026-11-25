@@ -105,6 +105,13 @@ Safeguards enforced during verification:
   - RSA keys must be at least 2048 bits.
   - HMAC keys must be at least as long as the hash output.
 
+`RemoteKeySet` keeps a fetched set for the `max-age` of its
+`Cache-Control` header, clamped between `WithMinRefreshInterval` (default
+1 minute) and `WithMaxRefreshInterval` (default 24 hours). `no-store` and
+`no-cache` keep it for the minimum interval. Without `max-age`,
+`WithRefreshInterval` (default 1 hour) applies. A token with an unknown
+`kid` triggers an early refetch, at most once per minimum interval.
+
 ### Sessions
 ```go
 m, _ := session.NewManager(store, session.WithIdleTimeout(30*time.Minute), session.WithAbsoluteTimeout(24*time.Hour))

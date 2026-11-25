@@ -20,6 +20,8 @@ type jwksServer struct {
 	fail  bool
 	hits  atomic.Int32
 	delay time.Duration
+	// cacheControl holds the Cache-Control header lines of each response.
+	cacheControl []string
 }
 
 func newJWKSServer(t *testing.T, keys ...JWK) *jwksServer {
@@ -32,6 +34,9 @@ func newJWKSServer(t *testing.T, keys ...JWK) *jwksServer {
 		if s.fail {
 			http.Error(w, "boom", http.StatusInternalServerError)
 			return
+		}
+		for _, v := range s.cacheControl {
+			w.Header().Add("Cache-Control", v)
 		}
 		_ = json.MarshalWrite(w, s.set)
 	}))
@@ -187,6 +192,71 @@ func TestRemoteKeySetEndToEnd(t *testing.T) {
 	}
 	if _, err := v.Verify(context.Background(), tok); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRemoteKeySetHonorsCacheControl(t *testing.T) {
+	for name, tc := range map[string]struct {
+		header []string
+		fresh  time.Duration
+	}{
+		"absent":                {nil, time.Hour},
+		"max-age":               {[]string{"max-age=600"}, 10 * time.Minute},
+		"with other directives": {[]string{"public, max-age=7200, must-revalidate"}, 2 * time.Hour},
+		"case-insensitive":      {[]string{"Max-Age=600"}, 10 * time.Minute},
+		"below minimum":         {[]string{"max-age=5"}, time.Minute},
+		"above maximum":         {[]string{"max-age=86400"}, 6 * time.Hour},
+		"beyond 2^31":           {[]string{"max-age=99999999999999999999"}, 6 * time.Hour},
+		"no-store":              {[]string{"no-store"}, time.Minute},
+		"no-cache wins":         {[]string{"max-age=600", "no-cache"}, time.Minute},
+		"invalid max-age":       {[]string{"max-age=ten"}, time.Minute},
+		"quoted max-age":        {[]string{`max-age="600"`}, time.Minute},
+		"repeated max-age":      {[]string{"max-age=600, max-age=7200"}, time.Minute},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			srv := newJWKSServer(t, ecSigner(t, "k1").VerificationKey())
+			srv.cacheControl = tc.header
+			clock := &fakeClock{t: testNow}
+			ks, err := NewRemoteKeySet(srv.URL, WithHTTPClient(srv.Client()), WithKeySetClock(clock.now),
+				WithRefreshInterval(time.Hour), WithMinRefreshInterval(time.Minute), WithMaxRefreshInterval(6*time.Hour))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ks.VerificationKeys(ctx, "k1"); err != nil {
+				t.Fatal(err)
+			}
+			clock.advance(tc.fresh - time.Second)
+			_, _ = ks.VerificationKeys(ctx, "k1")
+			if got := srv.hits.Load(); got != 1 {
+				t.Fatalf("refetched %v after the first fetch, before the set went stale", tc.fresh-time.Second)
+			}
+			clock.advance(time.Second)
+			_, _ = ks.VerificationKeys(ctx, "k1")
+			if got := srv.hits.Load(); got != 2 {
+				t.Fatalf("not refetched %v after the first fetch", tc.fresh)
+			}
+		})
+	}
+}
+
+func FuzzCacheLifetime(f *testing.F) {
+	for _, s := range []string{"max-age=600", "no-store", "public, max-age=99999999999999999999", "max-age=", ",,=,"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, header string) {
+		d, ok := cacheLifetime([]string{header})
+		if d < 0 || d > (1<<31)*time.Second || (!ok && d != 0) {
+			t.Fatalf("cacheLifetime(%q) = %v, %v", header, d, ok)
+		}
+	})
+}
+
+func TestNewRemoteKeySetRejectsInvertedIntervals(t *testing.T) {
+	_, err := NewRemoteKeySet("https://issuer.example/jwks",
+		WithMinRefreshInterval(time.Hour), WithMaxRefreshInterval(time.Minute))
+	if err == nil {
+		t.Fatal("minimum refresh interval above the maximum accepted")
 	}
 }
 
