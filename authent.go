@@ -2,7 +2,7 @@
 // building blocks that do not depend on any HTTP framework.
 //
 // Every authentication method in the sub-packages (password, jwt, session,
-// oidc, dpop, totp, webauthn) produces a [Principal]. Authorization is provided by the rebac
+// oidc, dpop, totp, webauthn, apikey) produces a [Principal]. Authorization is provided by the rebac
 // package, a Zanzibar-style relationship-based access control engine.
 //
 // The packages depend only on the Go standard library and golang.org/x.
@@ -30,6 +30,7 @@ const (
 	MethodTOTP     Method = "totp"
 	MethodWebAuthn Method = "webauthn"
 	MethodDPoP     Method = "dpop"
+	MethodAPIKey   Method = "apikey"
 )
 
 // Principal is an authenticated subject.

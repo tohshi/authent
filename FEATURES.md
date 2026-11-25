@@ -199,7 +199,7 @@ Legend:
 | gRPC interceptors | ⬜ | |
 | Mapping a Principal to a ReBAC subject | ⬜ | |
 | Observability hooks (logging, metrics, tracing) | ⬜ | |
-| API keys / opaque tokens | ⬜ | |
+| API keys / opaque tokens | ✅ | `apikey`: prefixed keys with a CRC-32 checksum, SHA-256 at rest, expiry and revocation |
 | Multi-factor authentication (TOTP, WebAuthn) | ✅ | See the `totp` and `webauthn` sections |
 | Recording several factors in a session (`amr`, step-up) | ⬜ | `Session.AuthMethod` holds one method |
 | OAuth 2.0 authorization server (issuing endpoints) | ➖ | A separate product; the `jwt` package covers token signing |

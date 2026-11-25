@@ -25,6 +25,7 @@ go get github.com/tohshi/authent
 | `totp` | Time-based one-time passwords (RFC 6238) with replay protection |
 | `webauthn` | WebAuthn relying party: passkeys and security keys |
 | `rebac` | Zanzibar-style relationship-based access control (ReBAC) |
+| `apikey` | API keys with a scannable prefix and checksum, stored hashed |
 
 Every authentication method returns an `authent.Principal`. Every
 authentication failure wraps `authent.ErrUnauthenticated`, so callers can
@@ -117,6 +118,23 @@ m.Destroy(ctx, token)                  // log out
 The store is keyed by the SHA-256 hash of the token, so raw tokens are never
 stored. Setting cookie attributes (`Secure`, `HttpOnly`, `SameSite`) is up to
 the caller.
+
+### API keys
+```go
+keys, _ := apikey.NewManager("myapp", store) // store implements apikey.Store; or apikey.NewMemoryStore()
+key, rec, _ := keys.Create(ctx, "u1", time.Now().AddDate(1, 0, 0)) // show key once; rec.ID is public
+p, err := keys.Authenticate(ctx, key) // p.Method is authent.MethodAPIKey, p.Claims["key_id"] is rec.ID
+keys.Revoke(ctx, rec.ID)
+```
+- Keys look like `myapp_<id>_<secret>`. A fixed prefix and format let
+  secret scanners find leaked keys.
+- The last segment carries a CRC-32 of the whole key. Mistyped or
+  truncated keys fail with `apikey.ErrMalformed` before the store is
+  queried.
+- The store keeps the SHA-256 of the secret, never the key itself. Hashes
+  are compared in constant time.
+- Every key has an expiry. Unknown, wrong, expired and revoked keys wrap
+  `authent.ErrUnauthenticated`; store failures do not.
 
 ### OIDC
 ```go
@@ -335,6 +353,7 @@ and what is out of scope.
 go test -race ./...
 go test ./jwt -run '^$' -fuzz FuzzVerify -fuzztime 30s
 go test ./webauthn -run '^$' -fuzz FuzzCBOR -fuzztime 30s
+go test ./apikey -run '^$' -fuzz FuzzParse -fuzztime 30s
 ```
 `jwt/testdata/gen_openssl_vectors.py` generates `jwt/testdata/openssl_vectors.json`
 with OpenSSL. `webauthn/testdata/extract_spec_vectors.py` extracts
