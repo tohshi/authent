@@ -154,11 +154,16 @@ func FuzzParseHash(f *testing.F) {
 		f.Add(v.Hash)
 	}
 	f.Add(referenceHash)
-	f.Add("$argon2id$v=19$m=64,t=1,p=1,norm=nfc$c29tZXNhbHQ$GpZ3sK/oH9p7VIiV56G/64Zo/8GaUw434IimaPqxwCo")
+	f.Add(pepperedReferenceHash)
+	f.Add("$argon2id$v=19$m=64,t=1,p=1,keyid=k2$c29tZXNhbHQ$GpZ3sK/oH9p7VIiV56G/64Zo/8GaUw434IimaPqxwCo")
+	h, err := NewHasher(testParams, WithPepper("k1", pepper1))
+	if err != nil {
+		f.Fatal(err)
+	}
 	f.Fuzz(func(t *testing.T, encoded string) {
-		s, err := parseHash(encoded)
+		s, err := h.parse(encoded)
 		if err != nil {
-			if !errors.Is(err, ErrMalformedHash) {
+			if !errors.Is(err, ErrMalformedHash) && !errors.Is(err, ErrUnknownPepper) {
 				t.Fatalf("parseHash(%q) = %v", encoded, err)
 			}
 			return
@@ -166,7 +171,7 @@ func FuzzParseHash(f *testing.F) {
 		var ok bool
 		switch s := s.(type) {
 		case *argon2idHash:
-			ok = s.params.validate() == nil
+			ok = s.params.validate() == nil && (s.keyID == "") == (s.pepper == nil)
 		case *bcryptHash:
 			ok = len(s.encoded) == 60
 		case *scryptHash:

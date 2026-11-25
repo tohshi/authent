@@ -66,6 +66,19 @@ p, err := auth.Authenticate(ctx, username, pw)
   reveal whether a username exists.
 - If `store` also implements `CredentialUpdater`, hashes created with
   outdated parameters are upgraded after a successful login.
+- A pepper is a server-side secret that a stolen credential database does
+  not contain. Keep it in a secret manager, not next to the hashes:
+  ```go
+  hasher, _ := password.NewHasher(password.DefaultParams,
+      password.WithPepper("2026", pepper),           // at least 32 bytes
+      password.WithRetiredPepper("2025", oldPepper)) // verify only
+  ```
+  The password is normalized (for NFC-tagged hashes), keyed with
+  HMAC-SHA-256 under the pepper, then hashed with Argon2id. The hash records
+  the key ID as `keyid=2026`. Hashes with a retired pepper or no pepper still
+  verify and report `NeedsRehash`, so logins move them to the current pepper.
+  A hash whose key ID is not configured fails with `ErrUnknownPepper`, which
+  `Authenticate` returns as a server error rather than a login failure.
 - To migrate users from another system, store their existing hashes as they
   are. `Verify` accepts bcrypt (`$2a$`, `$2b$`, `$2y$`), Werkzeug scrypt
   (`scrypt:32768:8:1$salt$hex`, the Flask default) and Django PBKDF2

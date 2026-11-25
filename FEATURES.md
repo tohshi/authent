@@ -18,7 +18,7 @@ Legend:
 | Timing-safe handling of unknown users | ✅ | Unknown users are verified against a dummy hash |
 | Pluggable credential store | ✅ | `CredentialStore` interface |
 | Verifying legacy hashes (bcrypt, scrypt, PBKDF2) | ✅ | Verify only: bcrypt (`$2a$`, `$2b$`, `$2y$`), Werkzeug scrypt and Django PBKDF2-SHA256, with bounded costs. Upgraded to Argon2id on login |
-| Pepper (server-side secret) | ⬜ | |
+| Pepper (server-side secret) | ✅ | HMAC-SHA-256 before Argon2id; `keyid` in the PHC string; retired peppers verify and trigger a rehash; unknown key IDs fail closed |
 | Password policy (length, blocklist, breached-password check) | ✅ | Configurable limits, exact-match blocklist, Pwned Passwords range lookup and NFC normalization for new passwords |
 | Password reset tokens | ⬜ | |
 | Rate limiting and account lockout | ➖ | Depends on deployment; belongs in the caller |
