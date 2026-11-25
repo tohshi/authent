@@ -105,12 +105,11 @@ jobs:
           for mod in $(find . -mindepth 2 -name go.mod -not -path './.git/*' | sort); do
             dir=$(dirname "$mod")
             echo "::group::$dir"
-            (
-              cd "$dir"
-              go vet ./...
-              go mod tidy
-              git diff --exit-code go.mod go.sum
-              go test -race -count=1 ./...
-            ) || exit 1
+            (cd "$dir" &&
+              go vet ./... &&
+              go mod tidy &&
+              git diff --exit-code -- go.mod go.sum &&
+              go run golang.org/x/vuln/cmd/govulncheck@latest ./... &&
+              go test -race -count=1 ./...) || exit 1
             echo "::endgroup::"
           done

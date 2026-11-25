@@ -1,6 +1,7 @@
 package testenv
 
 import (
+	"bufio"
 	"context"
 	"net"
 	"testing"
@@ -20,5 +21,13 @@ func TestRedisReachable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn.Close()
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Write([]byte("*1\r\n$4\r\nPING\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil || reply != "+PONG\r\n" {
+		t.Fatalf("PING = %q, %v", reply, err)
+	}
 }
