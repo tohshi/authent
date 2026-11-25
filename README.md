@@ -155,3 +155,7 @@ go test ./jwt -run '^$' -fuzz FuzzVerify -fuzztime 30s
 `jwt/testdata/gen_openssl_vectors.py` generates `jwt/testdata/openssl_vectors.json`
 with OpenSSL. These vectors come from an implementation independent of this
 library.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
