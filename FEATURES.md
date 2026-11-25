@@ -110,7 +110,8 @@ Legend:
 | Write validation against the schema | ✅ | Batches are atomic |
 | Tuple string format (parse and format) | ✅ | `doc:readme#viewer@user:alice` |
 | `TupleStore` interface and `MemoryStore` | ✅ | `MemoryStore` supports reverse (subject) filters |
-| Persistent stores (PostgreSQL, etc.) | ⬜ | |
+| Persistent stores: `SQLStore` for PostgreSQL, MySQL and SQLite | ✅ | Through `database/sql`; bring your own driver. Byte-wise identifier comparison |
+| `TupleStore` conformance suite | ✅ | `rebactest.TestTupleStore` |
 | `Expand` (userset tree) | ⬜ | |
 | `ListObjects` / `ListSubjects` | ⬜ | |
 | Consistency tokens (zookies) | ⬜ | |

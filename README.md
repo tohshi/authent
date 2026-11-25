@@ -160,6 +160,29 @@ ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("us
   `false` with `ErrTooComplex`.
 - Store errors fail closed: `Check` returns `false` with the error.
 
+#### Persistent tuple storage
+```go
+import _ "github.com/jackc/pgx/v5/stdlib" // or any database/sql driver
+
+db, _ := sql.Open("pgx", dsn)
+store, _ := rebac.NewSQLStore(db, rebac.PostgreSQL) // also rebac.MySQL, rebac.SQLite
+store.CreateTable(ctx) // or apply store.CreateTableStatements() with your migration tool
+engine, _ := rebac.NewEngine(schema, store)
+```
+- `SQLStore` works through `database/sql` and imports no driver; you choose
+  one.
+- Identifiers are compared byte by byte. `CreateTable` uses `COLLATE "C"`
+  on PostgreSQL and `VARBINARY` on MySQL, so `Alice` and `alice` are
+  different subjects whatever the server collation. Rows that do not
+  exactly match a lookup are discarded anyway, and rows that are not valid
+  tuples make the read fail.
+- A write is one transaction. A read releases its connection before
+  returning tuples, so a pool with a single connection (common for SQLite)
+  does not deadlock on recursive checks.
+- `rebactest.TestTupleStore` is a conformance suite for `TupleStore`
+  implementations. Run it against your own store, or against `SQLStore`
+  with your database and driver.
+
 ## Feature status
 
 See [FEATURES.md](FEATURES.md) for what is implemented, what is not yet,
