@@ -17,7 +17,7 @@ go get github.com/tohshi/authent
 | Package | Purpose |
 |---|---|
 | `authent` | The shared `Principal` (an authenticated subject) and `ErrUnauthenticated` |
-| `password` | Argon2id password hashing and verification, `Authenticator` |
+| `password` | Argon2id password hashing and verification, new-password policy, `Authenticator` |
 | `jwt` | JWS/JWT signing and verification, JWK/JWKS, `RemoteKeySet` with caching and key rotation |
 | `session` | Server-side sessions with idle and absolute timeouts, ID rotation and CSRF tokens |
 | `oidc` | OpenID Connect relying party (authorization code flow with PKCE S256) |
@@ -39,6 +39,28 @@ hasher, _ := password.NewHasher(password.DefaultParams) // RFC 9106 recommendati
 auth, _ := password.NewAuthenticator(store, hasher)       // store implements CredentialStore
 p, err := auth.Authenticate(ctx, username, pw)
 ```
+- When setting or changing a password, use the policy to validate and hash it:
+  ```go
+  checker := password.NewPwnedPasswordsChecker(nil) // 5-second HTTP timeout
+  blocked, _ := password.NewStaticBlocklist("authent-password-2026")
+  policy, _ := password.NewPolicy(password.DefaultMinLength, password.DefaultMaxLength,
+      checker, password.WithBlocklist(blocked))
+  hash, err := policy.Hash(ctx, hasher, newPassword)
+  ```
+  `Policy.Hash` checks the password before hashing. It can return `ErrTooShort`,
+  `ErrTooLong`, `ErrBlocked`, `ErrBreached`, or a lookup error. The default
+  limits are 15–1024 Unicode code points. The optional blocklist matches
+  entire passwords, including service- or account-specific values supplied by
+  the caller. Passwords are normalized to NFC before checking and hashing;
+  hashes carry an NFC marker. Legacy hashes keep their original byte semantics.
+  The breach lookup sends
+  only the first five SHA-1 hex digits to the Pwned Passwords API over HTTPS,
+  with response padding requested. Service failures reject the check; they do
+  not silently accept the password. The policy is not applied during login or
+  hash upgrades, so existing passwords continue to work. `Hasher.Hash` remains
+  available for existing callers but does not apply the policy.
+  No character-class or periodic-rotation rules are imposed, following
+  [NIST SP 800-63B-4](https://pages.nist.gov/800-63-4/sp800-63b.html#passwords).
 - Unknown users are checked against a dummy hash, so response times do not
   reveal whether a username exists.
 - If `store` also implements `CredentialUpdater`, hashes created with

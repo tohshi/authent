@@ -19,7 +19,7 @@ Legend:
 | Pluggable credential store | ✅ | `CredentialStore` interface |
 | Verifying legacy hashes (bcrypt, scrypt, PBKDF2) | ⬜ | Would help migrations |
 | Pepper (server-side secret) | ⬜ | |
-| Password policy (length, breached-password check) | ⬜ | |
+| Password policy (length, blocklist, breached-password check) | ✅ | Configurable limits, exact-match blocklist, Pwned Passwords range lookup and NFC normalization for new passwords |
 | Password reset tokens | ⬜ | |
 | Rate limiting and account lockout | ➖ | Depends on deployment; belongs in the caller |
 

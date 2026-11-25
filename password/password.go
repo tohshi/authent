@@ -1,10 +1,14 @@
-// Package password hashes and verifies passwords with Argon2id and
-// authenticates users against a pluggable credential store.
+// Package password hashes and verifies passwords with Argon2id, validates
+// new passwords against a policy, and authenticates users against a pluggable
+// credential store.
 //
 // Hashes are encoded in the PHC string format used by the Argon2 reference
 // implementation:
 //
 //	$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>
+//
+// Policy.Hash adds a norm=nfc parameter to mark hashes that use Unicode NFC
+// normalization; hashes without it retain their original byte semantics.
 package password
 
 import (
@@ -15,8 +19,10 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
+	"golang.org/x/text/unicode/norm"
 )
 
 var (
@@ -94,12 +100,21 @@ func NewHasher(p Params) (*Hasher, error) {
 
 // Hash returns the PHC-encoded Argon2id hash of password with a fresh salt.
 func (h *Hasher) Hash(password string) (string, error) {
+	return h.hash(password, false)
+}
+
+// hash creates either a legacy raw hash or an NFC-tagged hash. NFC-tagged
+// hashes are created by Policy.Hash and normalized again during verification.
+func (h *Hasher) hash(password string, normalize bool) (string, error) {
+	if normalize {
+		password = norm.NFC.String(password)
+	}
 	salt := make([]byte, h.params.SaltLength)
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("password: generating salt: %w", err)
 	}
 	key := derive(password, salt, h.params)
-	return encode(h.params, salt, key), nil
+	return encode(h.params, salt, key, normalize), nil
 }
 
 // Verify reports whether password matches encoded. It returns nil on a
@@ -109,12 +124,19 @@ func (h *Hasher) Hash(password string) (string, error) {
 // The parameters stored in encoded are used, so hashes created with older
 // parameters still verify; use NeedsRehash to upgrade them.
 func (h *Hasher) Verify(password, encoded string) error {
-	p, salt, want, err := decode(encoded)
+	p, salt, want, normalize, err := decode(encoded)
 	if err != nil {
 		return err
 	}
+	valid := true
+	if normalize {
+		valid = utf8.ValidString(password)
+		if valid {
+			password = norm.NFC.String(password)
+		}
+	}
 	got := derive(password, salt, p)
-	if subtle.ConstantTimeCompare(got, want) != 1 {
+	if subtle.ConstantTimeCompare(got, want) != 1 || !valid {
 		return ErrMismatch
 	}
 	return nil
@@ -124,7 +146,7 @@ func (h *Hasher) Verify(password, encoded string) error {
 // the Hasher's, in which case the password should be hashed again after a
 // successful Verify.
 func (h *Hasher) NeedsRehash(encoded string) (bool, error) {
-	p, salt, key, err := decode(encoded)
+	p, salt, key, _, err := decode(encoded)
 	if err != nil {
 		return false, err
 	}
@@ -139,41 +161,45 @@ func derive(password string, salt []byte, p Params) []byte {
 
 var b64 = base64.RawStdEncoding.Strict()
 
-func encode(p Params, salt, key []byte) string {
-	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
-		argon2.Version, p.Memory, p.Iterations, p.Parallelism,
-		b64.EncodeToString(salt), b64.EncodeToString(key))
+func encode(p Params, salt, key []byte, normalize bool) string {
+	costs := fmt.Sprintf("m=%d,t=%d,p=%d", p.Memory, p.Iterations, p.Parallelism)
+	if normalize {
+		costs += ",norm=nfc"
+	}
+	return fmt.Sprintf("$argon2id$v=%d$%s$%s$%s",
+		argon2.Version, costs, b64.EncodeToString(salt), b64.EncodeToString(key))
 }
 
-func decode(encoded string) (Params, []byte, []byte, error) {
+func decode(encoded string) (Params, []byte, []byte, bool, error) {
 	var p Params
 	// "", "argon2id", "v=19", "m=..,t=..,p=..", salt, hash
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" {
-		return p, nil, nil, ErrMalformedHash
+		return p, nil, nil, false, ErrMalformedHash
 	}
 	if parts[2] != "v="+strconv.Itoa(argon2.Version) {
-		return p, nil, nil, ErrMalformedHash
+		return p, nil, nil, false, ErrMalformedHash
 	}
 
 	costs := strings.Split(parts[3], ",")
-	if len(costs) != 3 {
-		return p, nil, nil, ErrMalformedHash
+	if len(costs) != 3 && (len(costs) != 4 || costs[3] != "norm=nfc") {
+		return p, nil, nil, false, ErrMalformedHash
 	}
+	normalize := len(costs) == 4
 	m, err1 := parseCost(costs[0], "m=", 32)
 	t, err2 := parseCost(costs[1], "t=", 32)
 	l, err3 := parseCost(costs[2], "p=", 8)
 	if err := errors.Join(err1, err2, err3); err != nil {
-		return p, nil, nil, ErrMalformedHash
+		return p, nil, nil, false, ErrMalformedHash
 	}
 
 	salt, err := b64.DecodeString(parts[4])
 	if err != nil {
-		return p, nil, nil, ErrMalformedHash
+		return p, nil, nil, false, ErrMalformedHash
 	}
 	key, err := b64.DecodeString(parts[5])
 	if err != nil {
-		return p, nil, nil, ErrMalformedHash
+		return p, nil, nil, false, ErrMalformedHash
 	}
 
 	p = Params{
@@ -184,9 +210,9 @@ func decode(encoded string) (Params, []byte, []byte, error) {
 		KeyLength:   uint32(len(key)),
 	}
 	if p.validate() != nil {
-		return p, nil, nil, ErrMalformedHash
+		return p, nil, nil, false, ErrMalformedHash
 	}
-	return p, salt, key, nil
+	return p, salt, key, normalize, nil
 }
 
 func parseCost(s, prefix string, bits int) (uint64, error) {

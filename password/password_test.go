@@ -73,6 +73,7 @@ func TestVerifyMalformed(t *testing.T) {
 		"$argon2id$v=19$m=64,t=1,p=1$$GpZ3sK/oH9p7VIiV56G/64Zo/8GaUw434IimaPqxwCo",
 		"$argon2id$v=19$m=64,t=1,p=1,x=1$c29tZXNhbHQ$GpZ3sK/oH9p7VIiV56G/64Zo/8GaUw434IimaPqxwCo",
 		"$argon2id$v=19$t=1,m=64,p=1$c29tZXNhbHQ$GpZ3sK/oH9p7VIiV56G/64Zo/8GaUw434IimaPqxwCo",
+		"$argon2id$v=19$m=64,t=1,p=1,norm=none$c29tZXNhbHQ$GpZ3sK/oH9p7VIiV56G/64Zo/8GaUw434IimaPqxwCo",
 	} {
 		if err := h.Verify("password", encoded); !errors.Is(err, ErrMalformedHash) {
 			t.Errorf("Verify(%q) = %v, want ErrMalformedHash", encoded, err)
