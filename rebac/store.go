@@ -30,6 +30,11 @@ type TupleStore interface {
 	Write(ctx context.Context, writes, deletes []Tuple) error
 	// Read yields the tuples matching f, in any order. The Engine always
 	// sets ObjectType, ObjectID and Relation, so stores should index those.
+	// The Engine calls Read again before an earlier sequence is exhausted,
+	// so implementations must not hold a resource that the nested call
+	// needs, such as the only connection of a pool.
+	//
+	// The rebactest package tests implementations against this contract.
 	Read(ctx context.Context, f Filter) iter.Seq2[Tuple, error]
 }
 
