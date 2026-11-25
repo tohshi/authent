@@ -28,4 +28,7 @@ var (
 	// Verifier does not check proof of possession; see
 	// WithConfirmationClaim.
 	ErrSenderConstrained = fmt.Errorf("%w: sender-constrained token without proof of possession", ErrInvalidToken)
+	// ErrReplayed means the token's "jti" was already accepted; see
+	// WithReplayCache.
+	ErrReplayed = fmt.Errorf("%w: replayed", ErrInvalidToken)
 )

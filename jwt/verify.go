@@ -2,10 +2,12 @@ package jwt
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +26,7 @@ type Verifier struct {
 	allowCnf    bool
 	leeway      time.Duration
 	maxSize     int
+	replay      ReplayCache
 	now         func() time.Time
 }
 
@@ -75,6 +78,13 @@ func WithLeeway(d time.Duration) VerifierOption { return func(v *Verifier) { v.l
 // DefaultMaxTokenSize.
 func WithMaxTokenSize(n int) VerifierOption { return func(v *Verifier) { v.maxSize = n } }
 
+// WithReplayCache accepts each token only once. "jti" becomes required,
+// and the pair of "iss" and "jti" is recorded in c until "exp" (plus the
+// leeway) once every other check has passed. A replayed token fails with
+// ErrReplayed; an error from c is returned as is, and the token is not
+// accepted.
+func WithReplayCache(c ReplayCache) VerifierOption { return func(v *Verifier) { v.replay = c } }
+
 // WithClock overrides the clock, for tests.
 func WithClock(now func() time.Time) VerifierOption { return func(v *Verifier) { v.now = now } }
 
@@ -111,8 +121,8 @@ func NewVerifier(keys KeySet, opts ...VerifierOption) (*Verifier, error) {
 }
 
 // Verify checks the token's signature and claims and returns the claims.
-// Rejections wrap ErrInvalidToken. Errors from the KeySet, such as network
-// failures, are returned as is.
+// Rejections wrap ErrInvalidToken. Errors from the KeySet or the
+// ReplayCache, such as network failures, are returned as is.
 //
 // "exp" is always required. Tokens with a "cnf" claim are rejected unless
 // WithConfirmationClaim is set.
@@ -130,6 +140,10 @@ type Header struct {
 
 // VerifyWithHeader is like Verify but also returns the token's header.
 func (v *Verifier) VerifyWithHeader(ctx context.Context, token string) (*Claims, Header, error) {
+	return v.verifyToken(ctx, token, false)
+}
+
+func (v *Verifier) verifyToken(ctx context.Context, token string, requireSubject bool) (*Claims, Header, error) {
 	c, err := v.verify(ctx, token)
 	if err != nil {
 		return nil, Header{}, err
@@ -141,7 +155,32 @@ func (v *Verifier) VerifyWithHeader(ctx context.Context, token string) (*Claims,
 	if err := v.validate(&claims); err != nil {
 		return nil, Header{}, err
 	}
+	if requireSubject && claims.Subject == "" {
+		return nil, Header{}, fmt.Errorf("%w: sub", ErrMissingClaim)
+	}
+	// Recorded last, so that a token failing any other check is not
+	// burned.
+	if err := v.checkReplay(ctx, &claims); err != nil {
+		return nil, Header{}, err
+	}
 	return &claims, Header{Algorithm: c.header.Alg, KeyID: c.header.Kid, Type: c.header.Typ}, nil
+}
+
+func (v *Verifier) checkReplay(ctx context.Context, c *Claims) error {
+	if v.replay == nil {
+		return nil
+	}
+	// "jti" is unique per issuer (RFC 7519 §4.1.7). The length prefix
+	// keeps distinct (iss, jti) pairs from hashing the same input.
+	id := sha256.Sum256([]byte(strconv.Itoa(len(c.Issuer)) + ":" + c.Issuer + c.ID))
+	fresh, err := v.replay.Add(ctx, b64.EncodeToString(id[:]), c.ExpiresAt.Add(v.leeway).Sub(v.now()))
+	if err != nil {
+		return fmt.Errorf("jwt: replay cache: %w", err)
+	}
+	if !fresh {
+		return ErrReplayed
+	}
+	return nil
 }
 
 // verify parses token and checks its header and signature.
@@ -208,13 +247,16 @@ func (v *Verifier) validate(c *Claims) error {
 	}) {
 		return fmt.Errorf("%w: %q", ErrInvalidAudience, c.Audience)
 	}
+	if v.replay != nil && c.ID == "" {
+		return fmt.Errorf("%w: jti", ErrMissingClaim)
+	}
 	return nil
 }
 
 // Authenticate verifies token and returns its Principal. "sub" is
 // required. AuthTime is taken from "auth_time" if present, else "iat".
 func (v *Verifier) Authenticate(ctx context.Context, token string) (authent.Principal, error) {
-	c, err := v.Verify(ctx, token)
+	c, _, err := v.verifyToken(ctx, token, true)
 	if err != nil {
 		return authent.Principal{}, err
 	}

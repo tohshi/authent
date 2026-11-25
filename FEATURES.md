@@ -50,7 +50,7 @@ Legend:
 | Rejection of sender-constrained (`cnf`) tokens as bearer tokens | ✅ | Opt out with `WithConfirmationClaim` when the binding is verified elsewhere |
 | Verification with a key embedded in the `jwk` header | ✅ | Separate `VerifyWithEmbeddedKey` API for DPoP proofs; `Verifier` never uses it |
 | Parsing private JWKs | ✅ | `ParsePrivateJWK` for RSA (all CRT values, validated), EC and Ed25519; private keys are never marshaled, and `ParseJWK`/`ParseJWKSet` reject or drop keys with private members |
-| `jti` replay detection | ⬜ | Needs a store |
+| `jti` replay detection | ✅ | `WithReplayCache`; `jti` then required, scoped by `iss`, recorded only after every other check |
 | Maximum token age / `auth_time` limits | ⬜ | |
 | `x5c` certificate chain validation | ⬜ | |
 | JWE (encryption) | ➖ | Large attack surface; not needed for signed tokens |
@@ -107,7 +107,7 @@ Legend:
 | Client `http.RoundTripper` | ✅ | Proof per request, `ath` with access tokens, refuses non-DPoP tokens |
 | Server-provided nonces on the client | ✅ | Kept per origin; one retry on `use_dpop_nonce` (400 and 401) |
 | Proof verification (RFC 9449 §4.3) | ✅ | All twelve checks; `htu` compared after RFC 3986 normalization |
-| Replay detection | ✅ | `ReplayCache` interface and `MemoryReplayCache`; opting out must be explicit |
+| Replay detection | ✅ | `jwt.ReplayCache` interface and `jwt.MemoryReplayCache`; opting out must be explicit |
 | Server nonce validation | ✅ | Pluggable `WithNonce`; issuing nonces is up to the caller |
 | Resource server `Authenticator` for JWT access tokens | ✅ | Checks `cnf.jkt` against the proof key |
 | `WWW-Authenticate` challenges | ✅ | `Challenge` with `algs` and error codes |

@@ -105,6 +105,13 @@ Safeguards enforced during verification:
   - RSA keys must be at least 2048 bits.
   - HMAC keys must be at least as long as the hash output.
 
+Optional checks:
+- `jwt.WithReplayCache(jwt.NewMemoryReplayCache())` accepts each token
+  once. `jti` becomes required, and the `iss` and `jti` pair is recorded
+  until `exp` once every other check has passed. A cache error rejects the
+  token but does not wrap `authent.ErrUnauthenticated`. `dpop.Verifier`
+  takes the same `jwt.ReplayCache` interface.
+
 A signing key can come from a private JWK:
 ```go
 k, _ := jwt.ParsePrivateJWK(data) // RSA with CRT values, EC or Ed25519; checked against the public members
@@ -201,7 +208,7 @@ tokens, _ := jwt.NewVerifier(keys, jwt.WithAlgorithms(jwt.ES256), jwt.WithIssuer
 	jwt.WithAudience("api"), jwt.WithExpectedType("at+jwt"),
 	jwt.WithConfirmationClaim()) // the binding is checked by dpop.Authenticator
 proofs, _ := dpop.NewVerifier(dpop.WithAlgorithms(jwt.ES256),
-	dpop.WithReplayCache(dpop.NewMemoryReplayCache())) // or dpop.WithoutReplayCheck()
+	dpop.WithReplayCache(jwt.NewMemoryReplayCache())) // or dpop.WithoutReplayCheck()
 auth, _ := dpop.NewAuthenticator(tokens, proofs)
 
 at, err := dpop.AccessToken(r.Header.Get("Authorization"))
