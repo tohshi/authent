@@ -136,16 +136,10 @@ ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("us
   `false` with `ErrTooComplex`.
 - Store errors fail closed: `Check` returns `false` with the error.
 
-## Limitations and roadmap
-- **jwt**: no JWE, no JSON serialization, and no `x5c` certificate chain
-  validation.
-- **session**: no way yet to revoke all of a user's sessions at once
-  ("log out everywhere").
-- **rebac**:
-  - No consistency tokens (zookies), `Expand`/`ListObjects` or text DSL yet.
-  - When the subtracted side of an `Exclusion` is reached through a cycle in
-    the data, the cycle evaluates to `false`.
-- **Adapters**: no HTTP or gRPC adapters; the library is core logic only.
+## Feature status
+
+See [FEATURES.md](FEATURES.md) for what is implemented, what is not yet,
+and what is out of scope.
 
 ## Testing
 ```
