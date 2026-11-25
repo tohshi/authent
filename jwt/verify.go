@@ -21,6 +21,7 @@ type Verifier struct {
 	audiences   []string
 	anyAudience bool
 	typ         string
+	allowCnf    bool
 	leeway      time.Duration
 	maxSize     int
 	now         func() time.Time
@@ -56,6 +57,16 @@ func WithAnyAudience() VerifierOption { return func(v *Verifier) { v.anyAudience
 // case-insensitively and ignoring an "application/" prefix (RFC 7515
 // §4.1.9), for example "at+jwt" for OAuth access tokens (RFC 9068).
 func WithExpectedType(typ string) VerifierOption { return func(v *Verifier) { v.typ = typ } }
+
+// WithConfirmationClaim accepts tokens that carry a "cnf" (confirmation)
+// claim (RFC 7800). Such tokens are sender-constrained, for example bound
+// to a DPoP key (RFC 9449) or a TLS client certificate (RFC 8705), and are
+// only valid together with proof of possession of that key, which Verifier
+// does not check. By default they are rejected with ErrSenderConstrained so
+// that a stolen bound token cannot be replayed as a bearer token (RFC 9449
+// §7.2). Use this option only when the caller verifies the binding, as
+// dpop.Authenticator does.
+func WithConfirmationClaim() VerifierOption { return func(v *Verifier) { v.allowCnf = true } }
 
 // WithLeeway tolerates clock skew when checking exp, nbf and iat.
 func WithLeeway(d time.Duration) VerifierOption { return func(v *Verifier) { v.leeway = d } }
@@ -103,7 +114,8 @@ func NewVerifier(keys KeySet, opts ...VerifierOption) (*Verifier, error) {
 // Rejections wrap ErrInvalidToken. Errors from the KeySet, such as network
 // failures, are returned as is.
 //
-// "exp" is always required.
+// "exp" is always required. Tokens with a "cnf" claim are rejected unless
+// WithConfirmationClaim is set.
 func (v *Verifier) Verify(ctx context.Context, token string) (*Claims, error) {
 	claims, _, err := v.VerifyWithHeader(ctx, token)
 	return claims, err
@@ -187,6 +199,9 @@ func (v *Verifier) validate(c *Claims) error {
 	}
 	if !v.anyIssuer && !slices.Contains(v.issuers, c.Issuer) {
 		return fmt.Errorf("%w: %q", ErrInvalidIssuer, c.Issuer)
+	}
+	if _, bound := c.Extra["cnf"]; bound && !v.allowCnf {
+		return ErrSenderConstrained
 	}
 	if !v.anyAudience && !slices.ContainsFunc(c.Audience, func(a string) bool {
 		return slices.Contains(v.audiences, a)

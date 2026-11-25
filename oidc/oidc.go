@@ -1,10 +1,13 @@
 // Package oidc is an OpenID Connect relying party for the authorization
-// code flow with PKCE (OpenID Connect Core 1.0, RFC 7636).
+// code flow with PKCE (OpenID Connect Core 1.0, RFC 7636), optionally with
+// pushed authorization requests (PAR, RFC 9126) and DPoP-bound tokens
+// (RFC 9449).
 //
-// It is HTTP-framework agnostic: AuthCodeURL returns the URL to redirect to
-// and the state, nonce and PKCE verifier that the caller must keep (for
-// example in a session) until the callback, where it passes them back to
-// Exchange together with the "state" and "code" query parameters.
+// It is HTTP-framework agnostic: AuthCodeURL (or PushAuthCodeURL) returns
+// the URL to redirect to and the state, nonce and PKCE verifier that the
+// caller must keep (for example in a session) until the callback, where it
+// passes them back to Exchange together with the "state" and "code" query
+// parameters.
 package oidc
 
 import (
@@ -17,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -26,6 +30,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/dpop"
 	"github.com/tohshi/authent/jwt"
 )
 
@@ -40,6 +45,14 @@ var (
 	// specific to OpenID Connect. Signature and standard claim failures
 	// are reported as jwt errors.
 	ErrInvalidIDToken = fmt.Errorf("oidc: invalid ID token: %w", authent.ErrUnauthenticated)
+	// ErrPushRejected means the provider rejected a pushed authorization
+	// request, typically because of the client's configuration (for
+	// example an unregistered redirect URI or wrong credentials). No user
+	// is involved yet, so it does not wrap authent.ErrUnauthenticated.
+	ErrPushRejected = errors.New("oidc: pushed authorization request rejected")
+	// ErrPARRequired is returned by AuthCodeURL when the provider
+	// requires pushed authorization requests; use PushAuthCodeURL.
+	ErrPARRequired = errors.New("oidc: provider requires pushed authorization requests")
 )
 
 // Provider is OpenID Provider metadata (OpenID Connect Discovery 1.0).
@@ -53,6 +66,12 @@ type Provider struct {
 	CodeChallengeMethodsSupported              []string `json:"code_challenge_methods_supported,omitempty"`
 	TokenEndpointAuthMethodsSupported          []string `json:"token_endpoint_auth_methods_supported,omitempty"`
 	TokenEndpointAuthSigningAlgValuesSupported []string `json:"token_endpoint_auth_signing_alg_values_supported,omitempty"`
+
+	// RFC 9126 §5.
+	PushedAuthorizationRequestEndpoint string `json:"pushed_authorization_request_endpoint,omitempty"`
+	RequirePushedAuthorizationRequests bool   `json:"require_pushed_authorization_requests,omitempty"`
+	// RFC 9449 §5.1.
+	DPoPSigningAlgValuesSupported []string `json:"dpop_signing_alg_values_supported,omitempty"`
 }
 
 // Discover fetches the provider metadata for issuer. The issuer in the
@@ -103,17 +122,19 @@ func Discover(ctx context.Context, issuer string, client *http.Client) (*Provide
 }
 
 func (p *Provider) validate() error {
-	var userinfo error
-	if p.UserinfoEndpoint != "" {
-		userinfo = requireHTTPS("userinfo_endpoint", p.UserinfoEndpoint)
-	}
-	return errors.Join(
+	errs := []error{
 		requireHTTPS("issuer", p.Issuer),
 		requireHTTPS("authorization_endpoint", p.AuthorizationEndpoint),
 		requireHTTPS("token_endpoint", p.TokenEndpoint),
 		requireHTTPS("jwks_uri", p.JWKSURI),
-		userinfo,
-	)
+	}
+	if p.UserinfoEndpoint != "" {
+		errs = append(errs, requireHTTPS("userinfo_endpoint", p.UserinfoEndpoint))
+	}
+	if p.PushedAuthorizationRequestEndpoint != "" || p.RequirePushedAuthorizationRequests {
+		errs = append(errs, requireHTTPS("pushed_authorization_request_endpoint", p.PushedAuthorizationRequestEndpoint))
+	}
+	return errors.Join(errs...)
 }
 
 func requireHTTPS(name, raw string) error {
@@ -138,9 +159,21 @@ type Config struct {
 	// Algorithms accepted for ID tokens. The default is the asymmetric
 	// algorithms the provider advertises, or RS256 if it advertises none.
 	Algorithms []jwt.Algorithm
-	// HTTPClient is used for the token endpoint, the JWK Set and the
-	// UserInfo endpoint. The default is http.DefaultClient.
+	// HTTPClient is used for the token, pushed authorization request,
+	// UserInfo and JWK Set endpoints. The default is http.DefaultClient.
 	HTTPClient *http.Client
+	// AuthStyle selects how the client secret is sent to the token
+	// endpoint. The default auto-detects it. Pushed authorization requests
+	// use client_secret_post with AuthStyleInParams and
+	// client_secret_basic otherwise.
+	AuthStyle oauth2.AuthStyle
+	// DPoP, if set, binds the issued tokens to the Prover's key
+	// (RFC 9449): authorization requests carry its thumbprint in
+	// "dpop_jkt" (or, when pushed, a DPoP proof), token requests carry
+	// DPoP proofs, and Exchange fails unless the provider issues a
+	// DPoP-bound access token. Use HTTPClient to call resource servers
+	// with the token.
+	DPoP *dpop.Prover
 	// Leeway tolerates clock skew when validating ID tokens. The default
 	// is 1 minute.
 	Leeway time.Duration
@@ -162,7 +195,10 @@ type Client struct {
 	provider          *Provider
 	oauth             oauth2.Config
 	verifier          *jwt.Verifier
-	client            *http.Client
+	client            *http.Client // for the token and PAR endpoints; adds DPoP proofs if configured
+	singleShot        *http.Client // client, without the DPoP transport's nonce retry
+	base              *http.Client // Config.HTTPClient
+	dpop              *dpop.Prover
 	assertionSigner   *jwt.Signer
 	assertionAudience string
 	now               func() time.Time
@@ -210,6 +246,10 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 	if len(algs) == 0 {
 		algs = defaultAlgorithms(p.IDTokenSigningAlgValuesSupported)
 	}
+	if cfg.DPoP != nil && len(p.DPoPSigningAlgValuesSupported) > 0 &&
+		!slices.Contains(p.DPoPSigningAlgValuesSupported, string(cfg.DPoP.Algorithm())) {
+		return nil, fmt.Errorf("oidc: provider does not support DPoP algorithm %q", cfg.DPoP.Algorithm())
+	}
 
 	keys, err := jwt.NewRemoteKeySet(p.JWKSURI, jwt.WithHTTPClient(cfg.HTTPClient), jwt.WithKeySetClock(cfg.Now))
 	if err != nil {
@@ -221,16 +261,28 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 		jwt.WithAudience(cfg.ClientID),
 		jwt.WithLeeway(cfg.Leeway),
 		jwt.WithClock(cfg.Now),
+		// The ID token is consumed here, never presented as a bearer
+		// credential, so a "cnf" claim in it is harmless.
+		jwt.WithConfirmationClaim(),
 	)
 	if err != nil {
 		return nil, err
 	}
 	scopes := append([]string{"openid"}, slices.DeleteFunc(slices.Clone(cfg.Scopes), func(s string) bool { return s == "openid" })...)
-	authStyle := oauth2.AuthStyleAutoDetect
+	authStyle := cfg.AuthStyle
 	if assertionSigner != nil {
 		// InParams adds client_id without a client_secret or Basic header.
 		// AutoDetect would first try Basic and could resend the same assertion.
 		authStyle = oauth2.AuthStyleInParams
+	}
+	client, singleShot := cfg.HTTPClient, cfg.HTTPClient
+	if cfg.DPoP != nil {
+		c := *cfg.HTTPClient
+		c.Transport = &dpop.Transport{Prover: cfg.DPoP, Base: cfg.HTTPClient.Transport}
+		client = &c
+		s := c
+		s.Transport = singleUse{c.Transport}
+		singleShot = &s
 	}
 	return &Client{
 		provider: p,
@@ -246,7 +298,10 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 			},
 		},
 		verifier:          verifier,
-		client:            cfg.HTTPClient,
+		client:            client,
+		singleShot:        singleShot,
+		base:              cfg.HTTPClient,
+		dpop:              cfg.DPoP,
 		assertionSigner:   assertionSigner,
 		assertionAudience: p.Issuer,
 		now:               cfg.Now,
@@ -281,6 +336,9 @@ type AuthRequest struct {
 	State        string
 	Nonce        string
 	CodeVerifier string
+	// Expiry is when the pushed request behind URL expires (RFC 9126
+	// §2.2); redirect before then. It is zero for AuthCodeURL.
+	Expiry time.Time
 }
 
 func randomString() (string, error) {
@@ -292,27 +350,209 @@ func randomString() (string, error) {
 }
 
 // AuthCodeURL starts an authorization request with fresh state, nonce and
-// an S256 PKCE challenge. opts may add parameters such as prompt.
+// an S256 PKCE challenge. opts may add parameters such as prompt. It fails
+// with ErrPARRequired if the provider requires PushAuthCodeURL.
 func (c *Client) AuthCodeURL(opts ...oauth2.AuthCodeOption) (AuthRequest, error) {
-	state, err := randomString()
+	if c.provider.RequirePushedAuthorizationRequests {
+		return AuthRequest{}, ErrPARRequired
+	}
+	if c.dpop != nil {
+		// RFC 9449 §10: binds the authorization code to the DPoP key.
+		opts = append(slices.Clip(opts), oauth2.SetAuthURLParam("dpop_jkt", c.dpop.Thumbprint()))
+	}
+	req, opts, err := newAuthRequest(opts)
 	if err != nil {
 		return AuthRequest{}, err
 	}
+	req.URL = c.oauth.AuthCodeURL(req.State, opts...)
+	return req, nil
+}
+
+// newAuthRequest generates state, nonce and PKCE verifier, and returns
+// opts extended with the matching parameters.
+func newAuthRequest(opts []oauth2.AuthCodeOption) (AuthRequest, []oauth2.AuthCodeOption, error) {
+	state, err := randomString()
+	if err != nil {
+		return AuthRequest{}, nil, err
+	}
 	nonce, err := randomString()
 	if err != nil {
-		return AuthRequest{}, err
+		return AuthRequest{}, nil, err
 	}
 	verifier := oauth2.GenerateVerifier()
 	opts = append([]oauth2.AuthCodeOption{
 		oauth2.S256ChallengeOption(verifier),
 		oauth2.SetAuthURLParam("nonce", nonce),
 	}, opts...)
-	return AuthRequest{
-		URL:          c.oauth.AuthCodeURL(state, opts...),
-		State:        state,
-		Nonce:        nonce,
-		CodeVerifier: verifier,
+	return AuthRequest{State: state, Nonce: nonce, CodeVerifier: verifier}, opts, nil
+}
+
+// PushAuthCodeURL is like AuthCodeURL but sends the authorization request
+// parameters directly to the provider's pushed authorization request
+// endpoint (RFC 9126), authenticated with the client credentials. The
+// returned URL carries only client_id and the request_uri reference, so
+// the parameters cannot be read or altered in the browser.
+//
+// With DPoP configured, the request carries a DPoP proof, which binds the
+// authorization code to the key (RFC 9449 §10.1).
+//
+// A rejection by the provider wraps ErrPushRejected.
+func (c *Client) PushAuthCodeURL(ctx context.Context, opts ...oauth2.AuthCodeOption) (AuthRequest, error) {
+	endpoint := c.provider.PushedAuthorizationRequestEndpoint
+	if endpoint == "" {
+		return AuthRequest{}, errors.New("oidc: provider has no pushed_authorization_request_endpoint")
+	}
+	req, opts, err := newAuthRequest(opts)
+	if err != nil {
+		return AuthRequest{}, err
+	}
+	params, err := c.authParams(req.State, opts)
+	if err != nil {
+		return AuthRequest{}, err
+	}
+
+	if c.oauth.ClientSecret != "" && c.oauth.Endpoint.AuthStyle == oauth2.AuthStyleInParams {
+		params.Set("client_secret", c.oauth.ClientSecret)
+	}
+	status, body, err := c.push(ctx, endpoint, params)
+	if code, _ := oauthError(status, body); err == nil && code == "use_dpop_nonce" && c.assertionSigner != nil && c.dpop != nil {
+		// The DPoP transport does not resend a client assertion; retry
+		// here with a fresh one and the nonce the provider just supplied.
+		status, body, err = c.push(ctx, endpoint, params)
+	}
+	if err != nil {
+		return AuthRequest{}, err
+	}
+	if status != http.StatusCreated && status != http.StatusOK {
+		if code, desc := oauthError(status, body); code != "" {
+			return AuthRequest{}, fmt.Errorf("%w: %s: %s", ErrPushRejected, code, desc)
+		}
+		return AuthRequest{}, fmt.Errorf("oidc: pushed authorization request: status %d", status)
+	}
+	var par struct {
+		RequestURI string `json:"request_uri"`
+		ExpiresIn  int64  `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &par); err != nil {
+		return AuthRequest{}, fmt.Errorf("oidc: pushed authorization response: %w", err)
+	}
+	if par.RequestURI == "" || par.ExpiresIn <= 0 {
+		return AuthRequest{}, errors.New("oidc: pushed authorization response lacks request_uri or expires_in")
+	}
+
+	// RFC 9126 §4: only client_id and request_uri go to the browser.
+	u, err := url.Parse(c.provider.AuthorizationEndpoint)
+	if err != nil {
+		return AuthRequest{}, err
+	}
+	q := u.Query()
+	q.Set("client_id", c.oauth.ClientID)
+	q.Set("request_uri", par.RequestURI)
+	u.RawQuery = q.Encode()
+	req.URL = u.String()
+	req.Expiry = c.now().Add(time.Duration(par.ExpiresIn) * time.Second)
+	return req, nil
+}
+
+// push sends one pushed authorization request with the client's
+// credentials and returns the response status and body.
+func (c *Client) push(ctx context.Context, endpoint string, params url.Values) (int, []byte, error) {
+	if c.assertionSigner != nil {
+		assertion, err := c.clientAssertion()
+		if err != nil {
+			return 0, nil, err
+		}
+		params = maps.Clone(params)
+		maps.Copy(params, assertion)
+	}
+	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(params.Encode()))
+	if err != nil {
+		return 0, nil, err
+	}
+	if c.assertionSigner != nil {
+		// A client assertion is single use, so the body must not be
+		// replayed by the DPoP transport.
+		hr.GetBody = nil
+	}
+	hr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	hr.Header.Set("Accept", "application/json")
+	if c.oauth.ClientSecret != "" && c.oauth.Endpoint.AuthStyle != oauth2.AuthStyleInParams {
+		// RFC 6749 §2.3.1: both values are form-encoded first.
+		hr.SetBasicAuth(url.QueryEscape(c.oauth.ClientID), url.QueryEscape(c.oauth.ClientSecret))
+	}
+	resp, err := c.client.Do(hr)
+	if err != nil {
+		return 0, nil, fmt.Errorf("oidc: pushed authorization request: %w", err)
+	}
+	defer resp.Body.Close()
+	const maxBody = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if err != nil {
+		return 0, nil, fmt.Errorf("oidc: pushed authorization request: %w", err)
+	}
+	if len(body) > maxBody {
+		return 0, nil, errors.New("oidc: pushed authorization response too large")
+	}
+	return resp.StatusCode, body, nil
+}
+
+// oauthError returns the error code and description of an OAuth error
+// response (RFC 6749 §5.2), or empty strings for a success or a body that
+// is not one.
+func oauthError(status int, body []byte) (code, description string) {
+	if status < 400 {
+		return "", ""
+	}
+	var e struct {
+		Error       string `json:"error"`
+		Description string `json:"error_description"`
+	}
+	if json.Unmarshal(body, &e) != nil {
+		return "", ""
+	}
+	return e.Error, e.Description
+}
+
+// clientAssertion returns the private_key_jwt client authentication
+// parameters with a freshly signed assertion.
+func (c *Client) clientAssertion() (url.Values, error) {
+	id, err := randomString()
+	if err != nil {
+		return nil, fmt.Errorf("oidc: client assertion ID: %w", err)
+	}
+	now := c.now()
+	assertion, err := c.assertionSigner.Sign(jwt.Claims{
+		Issuer:    c.oauth.ClientID,
+		Subject:   c.oauth.ClientID,
+		Audience:  jwt.Audience{c.assertionAudience},
+		IssuedAt:  jwt.NewNumericDate(now),
+		ExpiresAt: jwt.NewNumericDate(now.Add(5 * time.Minute)),
+		ID:        id,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("oidc: signing client assertion: %w", err)
+	}
+	return url.Values{
+		"client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
+		"client_assertion":      {assertion},
 	}, nil
+}
+
+// authParams returns the authorization request parameters that
+// AuthCodeURL would put in the URL.
+func (c *Client) authParams(state string, opts []oauth2.AuthCodeOption) (url.Values, error) {
+	// A Config without AuthURL renders just "?" and the parameters. It is
+	// built afresh because oauth2.Config must not be copied.
+	cfg := oauth2.Config{ClientID: c.oauth.ClientID, RedirectURL: c.oauth.RedirectURL, Scopes: c.oauth.Scopes}
+	params, err := url.ParseQuery(strings.TrimPrefix(cfg.AuthCodeURL(state, opts...), "?"))
+	if err != nil {
+		return nil, err
+	}
+	// RFC 9126 §2.1.
+	if params.Has("request_uri") {
+		return nil, errors.New("oidc: request_uri cannot be pushed")
+	}
+	return params, nil
 }
 
 // Result is the outcome of a successful Exchange.
@@ -334,36 +574,24 @@ func (c *Client) Exchange(ctx context.Context, req AuthRequest, state, code stri
 		return nil, fmt.Errorf("%w: empty code", ErrExchangeRejected)
 	}
 
-	opts := []oauth2.AuthCodeOption{oauth2.VerifierOption(req.CodeVerifier)}
-	if c.assertionSigner != nil {
-		id, err := randomString()
-		if err != nil {
-			return nil, fmt.Errorf("oidc: client assertion ID: %w", err)
-		}
-		now := c.now()
-		assertion, err := c.assertionSigner.Sign(jwt.Claims{
-			Issuer:    c.oauth.ClientID,
-			Subject:   c.oauth.ClientID,
-			Audience:  jwt.Audience{c.assertionAudience},
-			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(5 * time.Minute)),
-			ID:        id,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("oidc: signing client assertion: %w", err)
-		}
-		opts = append(opts,
-			oauth2.SetAuthURLParam("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"),
-			oauth2.SetAuthURLParam("client_assertion", assertion))
+	tok, err := c.exchange(ctx, code, req.CodeVerifier)
+	var re *oauth2.RetrieveError
+	if c.assertionSigner != nil && c.dpop != nil && errors.As(err, &re) && re.ErrorCode == "use_dpop_nonce" {
+		// The DPoP transport does not resend a client assertion; retry
+		// here with a fresh one and the nonce the provider just supplied.
+		tok, err = c.exchange(ctx, code, req.CodeVerifier)
 	}
-	ctx = context.WithValue(ctx, oauth2.HTTPClient, c.client)
-	tok, err := c.oauth.Exchange(ctx, code, opts...)
 	if err != nil {
-		var re *oauth2.RetrieveError
 		if errors.As(err, &re) {
 			return nil, fmt.Errorf("%w: %w", ErrExchangeRejected, err)
 		}
 		return nil, fmt.Errorf("oidc: token exchange: %w", err)
+	}
+	if c.dpop != nil && !strings.EqualFold(tok.TokenType, dpop.TokenType) {
+		// RFC 9449 §5: without a DPoP token_type the access token is not
+		// bound, so the protection asked for is not given. This is a
+		// provider or configuration problem, not a failed login.
+		return nil, fmt.Errorf("oidc: provider issued a %q access token instead of a DPoP-bound one", tok.TokenType)
 	}
 
 	raw, _ := tok.Extra("id_token").(string)
@@ -382,6 +610,53 @@ func (c *Client) Exchange(ctx context.Context, req AuthRequest, state, code stri
 		return nil, err
 	}
 	return &Result{Principal: p, IDToken: claims, RawIDToken: raw, Token: tok}, nil
+}
+
+// exchange sends one token request for code.
+func (c *Client) exchange(ctx context.Context, code, verifier string) (*oauth2.Token, error) {
+	opts := []oauth2.AuthCodeOption{oauth2.VerifierOption(verifier)}
+	client := c.client
+	if c.assertionSigner != nil {
+		assertion, err := c.clientAssertion()
+		if err != nil {
+			return nil, err
+		}
+		for k := range assertion {
+			opts = append(opts, oauth2.SetAuthURLParam(k, assertion.Get(k)))
+		}
+		client = c.singleShot
+	}
+	return c.oauth.Exchange(context.WithValue(ctx, oauth2.HTTPClient, client), code, opts...)
+}
+
+// singleUse stops the DPoP transport from replaying a request body that
+// carries a single-use client assertion.
+type singleUse struct{ base http.RoundTripper }
+
+func (t singleUse) RoundTrip(req *http.Request) (*http.Response, error) {
+	r := req.Clone(req.Context())
+	r.GetBody = nil
+	return t.base.RoundTrip(r)
+}
+
+// HTTPClient returns a client that sends tok's access token with every
+// request and refreshes it with the refresh token when it expires. With
+// DPoP configured, the token is sent with the DPoP scheme and every
+// request, including refreshes, carries a proof. Requests use the
+// transport of Config.HTTPClient; ctx is used for refreshes.
+//
+// Refreshed ID tokens are not verified. With PrivateKeyJWT the token is
+// not refreshed, because x/oauth2 cannot add a client assertion.
+func (c *Client) HTTPClient(ctx context.Context, tok *oauth2.Token) *http.Client {
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, c.client)
+	src := c.oauth.TokenSource(ctx, tok)
+	hc := *c.base
+	if c.dpop != nil {
+		hc.Transport = &dpop.Transport{Prover: c.dpop, Source: src, Base: c.base.Transport}
+	} else {
+		hc.Transport = &oauth2.Transport{Source: src, Base: c.base.Transport}
+	}
+	return &hc
 }
 
 // checkIDToken applies the ID token checks of OpenID Connect Core §3.1.3.7

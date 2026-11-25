@@ -8,10 +8,12 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strings"
 
 	"golang.org/x/oauth2"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/dpop"
 )
 
 var (
@@ -40,7 +42,8 @@ type UserInfo struct {
 const maxUserInfoSize = 1 << 20
 
 // UserInfo fetches claims about the end-user from the provider's UserInfo
-// endpoint (OpenID Connect Core §5.3) using token's access token.
+// endpoint (OpenID Connect Core §5.3) using token's access token. A DPoP
+// token is sent with a DPoP proof when Config.DPoP is set.
 //
 // subject must be the "sub" of the ID token the access token was issued
 // with, for example Result.Principal.Subject. A response for any other
@@ -61,7 +64,13 @@ func (c *Client) UserInfo(ctx context.Context, token *oauth2.Token, subject stri
 	if token == nil || token.AccessToken == "" {
 		return nil, errors.New("oidc: userinfo: access token is required")
 	}
-	if typ := token.Type(); typ != "Bearer" {
+	hc := *c.base
+	switch typ := token.Type(); {
+	case typ == "Bearer":
+	case strings.EqualFold(typ, dpop.TokenType) && c.dpop != nil:
+		// RFC 9449 §7: the token goes with the DPoP scheme and a proof.
+		hc.Transport = &dpop.Transport{Prover: c.dpop, Source: oauth2.StaticTokenSource(token), Base: c.base.Transport}
+	default:
 		return nil, fmt.Errorf("oidc: userinfo: unsupported token type %q", typ)
 	}
 	if subject == "" {
@@ -72,10 +81,11 @@ func (c *Client) UserInfo(ctx context.Context, token *oauth2.Token, subject stri
 	if err != nil {
 		return nil, err
 	}
-	token.SetAuthHeader(req)
+	if token.Type() == "Bearer" {
+		token.SetAuthHeader(req)
+	}
 	req.Header.Set("Accept", "application/json")
 
-	hc := *c.client
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := hc.Do(req)
 	if err != nil {

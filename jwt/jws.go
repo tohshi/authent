@@ -8,7 +8,8 @@
 //   - a key is only used with an algorithm matching its type (and its "alg"
 //     if set), which prevents algorithm-confusion attacks
 //   - headers with "crit" or "b64" are rejected; "jku", "x5u", "jwk" and
-//     "x5c" are ignored and never used to find keys
+//     "x5c" are ignored and never used to find keys by Verifier (only
+//     VerifyWithEmbeddedKey, which exists for DPoP proofs, uses "jwk")
 //   - JSON is decoded case-sensitively and duplicate members are rejected
 package jwt
 
@@ -16,6 +17,7 @@ import (
 	"encoding/base64"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -26,6 +28,9 @@ type header struct {
 	Alg Algorithm `json:"alg"`
 	Kid string    `json:"kid,omitempty"`
 	Typ string    `json:"typ,omitempty"`
+	// JWK is the "jwk" header. Verifier ignores it; only
+	// VerifyWithEmbeddedKey uses it.
+	JWK jsontext.Value `json:"jwk,omitzero"`
 
 	// Present only to be rejected.
 	Crit jsontext.Value `json:"crit,omitzero"`
@@ -95,10 +100,12 @@ func parseCompact(token string, maxSize int) (*compact, error) {
 
 // Signer creates signed JWTs. It is safe for concurrent use.
 type Signer struct {
-	alg Algorithm
-	key any
-	kid string
-	typ string
+	alg      Algorithm
+	key      any
+	kid      string
+	typ      string
+	embedJWK bool
+	jwk      jsontext.Value // the public key, when embedJWK is set
 }
 
 // SignerOption configures a Signer.
@@ -109,6 +116,10 @@ func WithKeyID(kid string) SignerOption { return func(s *Signer) { s.kid = kid }
 
 // WithType sets the "typ" header. The default is "JWT".
 func WithType(typ string) SignerOption { return func(s *Signer) { s.typ = typ } }
+
+// WithJWKHeader embeds the public key in the "jwk" header, as DPoP proofs
+// (RFC 9449) require. It is only valid for asymmetric algorithms.
+func WithJWKHeader() SignerOption { return func(s *Signer) { s.embedJWK = true } }
 
 // NewSigner returns a Signer for alg. key must be []byte for HS*,
 // *rsa.PrivateKey for RS*/PS*, *ecdsa.PrivateKey on the matching curve for
@@ -124,6 +135,17 @@ func NewSigner(alg Algorithm, key any, opts ...SignerOption) (*Signer, error) {
 	for _, opt := range opts {
 		opt(s)
 	}
+	if s.embedJWK {
+		if alg.IsSymmetric() {
+			return nil, errors.New("jwt: WithJWKHeader requires an asymmetric algorithm")
+		}
+		pub, _ := publicKeyOf(key)
+		raw, err := json.Marshal(JWK{Key: pub})
+		if err != nil {
+			return nil, err
+		}
+		s.jwk = raw
+	}
 	return s, nil
 }
 
@@ -138,7 +160,7 @@ func (s *Signer) Sign(c Claims) (string, error) {
 
 // SignPayload signs an arbitrary payload. Prefer Sign for JWTs.
 func (s *Signer) SignPayload(payload []byte) (string, error) {
-	h, err := json.Marshal(header{Alg: s.alg, Kid: s.kid, Typ: s.typ})
+	h, err := json.Marshal(header{Alg: s.alg, Kid: s.kid, Typ: s.typ, JWK: s.jwk})
 	if err != nil {
 		return "", err
 	}

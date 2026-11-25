@@ -11,12 +11,17 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/dpop"
 )
 
 // userinfoHandler serves the UserInfo endpoint for access tokens issued by
 // the token endpoint.
 func (p *fakeProvider) userinfoHandler(w http.ResponseWriter, r *http.Request) {
 	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if dpopTok, err := dpop.AccessToken(r.Header.Get("Authorization")); err == nil {
+		_, err := p.checkProof(r, dpopTok)
+		tok, ok = dpopTok, err == nil
+	}
 	p.mu.Lock()
 	valid := ok && p.accessTokens[tok]
 	p.mu.Unlock()

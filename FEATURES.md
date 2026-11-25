@@ -46,7 +46,9 @@ Legend:
 | `StaticKeySet` | ✅ | |
 | `RemoteKeySet` | ✅ | TTL, refetch on unknown `kid`, refresh throttling, stale-on-error, concurrent fetch deduplication |
 | Refresh interval from `Cache-Control` | ⬜ | The interval is fixed |
-| JWK thumbprint (RFC 7638) | ⬜ | |
+| JWK thumbprint (RFC 7638) | ✅ | |
+| Rejection of sender-constrained (`cnf`) tokens as bearer tokens | ✅ | Opt out with `WithConfirmationClaim` when the binding is verified elsewhere |
+| Verification with a key embedded in the `jwk` header | ✅ | Separate `VerifyWithEmbeddedKey` API for DPoP proofs; `Verifier` never uses it |
 | Parsing private JWKs | ⬜ | Signing keys are passed as Go crypto keys |
 | `jti` replay detection | ⬜ | Needs a store |
 | Maximum token age / `auth_time` limits | ⬜ | |
@@ -85,14 +87,33 @@ Legend:
 | HMAC-signed ID tokens rejected by default | ✅ | |
 | `client_secret_basic` / `client_secret_post` | ✅ | Through `x/oauth2` |
 | Distinguishing rejected exchanges from network errors | ✅ | |
-| UserInfo endpoint | ✅ | `sub` must match the ID token; https only; redirects are not followed |
+| UserInfo endpoint | ✅ | `sub` must match the ID token; https only; redirects are not followed; Bearer or DPoP tokens |
 | Signed UserInfo responses (`application/jwt`) | ⬜ | Currently rejected; needs JWT verification without `exp`. Encrypted responses are out of scope along with JWE |
-| Refresh token helper | ⬜ | The `oauth2.Token` is returned and can be used with `x/oauth2` |
+| Refresh token helper | ⬜ | `HTTPClient` refreshes through `x/oauth2`, but refreshed ID tokens are not verified and `private_key_jwt` clients cannot refresh |
+| Calling APIs with the access token (`HTTPClient`) | ✅ | Bearer, or DPoP when configured |
 | `max_age`, `auth_time` and `acr` enforcement | ⬜ | |
 | `private_key_jwt` client authentication | ✅ | Asymmetric JWT assertion on each code exchange; issuer audience per RFC 10070 |
 | RP-initiated, front-channel and back-channel logout | ⬜ | |
-| PAR (RFC 9126) and DPoP (RFC 9449) | ⬜ | |
+| Pushed authorization requests (RFC 9126) | ✅ | `PushAuthCodeURL`; honors `require_pushed_authorization_requests`; client secret or `private_key_jwt` |
+| JWT-secured authorization requests (JAR, RFC 9101) | ⬜ | |
+| DPoP-bound tokens (RFC 9449) | ✅ | `dpop_jkt` or a proof on the pushed request; `Exchange` rejects a Bearer downgrade |
 | Implicit and hybrid flows (`c_hash`) | ➖ | Discouraged by current OAuth security best practice |
+
+## dpop
+
+| Feature | Status | Notes |
+|---|---|---|
+| Proof creation (`Prover`) | ✅ | RSA, ECDSA and Ed25519 keys; 128-bit `jti` |
+| Client `http.RoundTripper` | ✅ | Proof per request, `ath` with access tokens, refuses non-DPoP tokens |
+| Server-provided nonces on the client | ✅ | Kept per origin; one retry on `use_dpop_nonce` (400 and 401) |
+| Proof verification (RFC 9449 §4.3) | ✅ | All twelve checks; `htu` compared after RFC 3986 normalization |
+| Replay detection | ✅ | `ReplayCache` interface and `MemoryReplayCache`; opting out must be explicit |
+| Server nonce validation | ✅ | Pluggable `WithNonce`; issuing nonces is up to the caller |
+| Resource server `Authenticator` for JWT access tokens | ✅ | Checks `cnf.jkt` against the proof key |
+| `WWW-Authenticate` challenges | ✅ | `Challenge` with `algs` and error codes |
+| Opaque tokens (introspection, RFC 9449 §6.2) | ⬜ | Use `Verifier` with `Request.JKT` from the introspection response |
+| Authorization server side (issuing bound tokens) | ➖ | Same reason as the OAuth 2.0 authorization server below |
+| Shared replay cache stores (Redis, SQL) | ⬜ | |
 
 ## rebac
 
