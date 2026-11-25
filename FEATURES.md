@@ -123,6 +123,49 @@ Legend:
 | Watch API / change log | ⬜ | |
 | Exact semantics for `Exclusion` over data cycles | ⬜ | A cycle reached from the subtracted side evaluates to `false` |
 
+## totp
+
+| Feature | Status | Notes |
+|---|---|---|
+| HOTP (RFC 4226) and TOTP (RFC 6238) | ✅ | SHA1, SHA256, SHA512; 6 to 8 digits; any whole-second period |
+| Key generation | ✅ | Secret length matches the hash output; at least 128 bits required |
+| `otpauth://` URI and base32 secret | ✅ | For QR codes and manual entry |
+| Clock skew window | ✅ | Default ±1 step, at most ±5 |
+| Constant-time comparison | ✅ | |
+| Replay protection | ✅ | `Store.AdvanceCounter` is a compare-and-set on the last used step |
+| Pluggable store | ✅ | `Store` interface |
+| Recovery codes | ⬜ | |
+| HOTP counter-based authentication | ⬜ | Only the HOTP function is used, for TOTP |
+| Parsing `otpauth://` URIs | ⬜ | |
+| Encrypting secrets at rest | ➖ | Depends on the deployment's key management; belongs in the store |
+| Rate limiting | ➖ | Depends on deployment; belongs in the caller |
+
+## webauthn
+
+| Feature | Status | Notes |
+|---|---|---|
+| Registration and authentication ceremonies | ✅ | WebAuthn Level 3 §7.1 and §7.2 |
+| JSON options and responses | ✅ | `parseCreationOptionsFromJSON`, `parseRequestOptionsFromJSON` and `toJSON()` formats |
+| Second-factor logins and discoverable (passkey) logins | ✅ | `BeginLogin` and `BeginDiscoverableLogin` |
+| Challenge, origin, RP ID hash, `type` checks | ✅ | Challenges expire and are bound to one ceremony type |
+| User presence and user verification | ✅ | `UserVerification` policy; UV result in `Principal.Claims` |
+| ES256/384/512, EdDSA (Ed25519), RS256, PS256 | ✅ | Key type and curve must match the algorithm; RSA keys at least 2048 bits |
+| Strict CBOR and authenticator data parsing | ✅ | No tags, floats or indefinite lengths; no duplicate keys or trailing bytes |
+| Attestation formats `none`, `packed`, `fido-u2f` | ✅ | Self and basic attestation |
+| Attestation trust roots | ✅ | `AttestationRoots` requires a chain to the given roots |
+| Signature counter clone detection | ✅ | A counter that does not increase is rejected |
+| Backup eligibility and state flags | ✅ | BE must not change; BS is stored |
+| Duplicate credential and user handle checks | ✅ | |
+| WebAuthn Level 3 test vectors | ✅ | §16 vectors, including rejected ones |
+| Attestation formats `tpm`, `android-key`, `android-safetynet`, `apple` | ⬜ | Rejected; browsers send `none` unless attestation is requested |
+| FIDO Metadata Service (MDS3) | ⬜ | |
+| Ed448 | ⬜ | No Ed448 in the standard library |
+| Cross-origin iframes (`crossOrigin`, `topOrigin`) | ⬜ | Rejected |
+| Related origins and native app origins | ⬜ | Origins must be https within the RP ID |
+| Extensions (`credProps`, `prf`, `largeBlob`, `appid`) | ⬜ | Authenticator extension outputs are parsed but not used |
+| Conditional create (registration without user presence) | ⬜ | User presence is always required |
+| Single-use enforcement of challenges | ➖ | The caller keeps the `Challenge` and deletes it after use |
+
 ## Cross-cutting
 
 | Feature | Status | Notes |
@@ -136,5 +179,6 @@ Legend:
 | Mapping a Principal to a ReBAC subject | ⬜ | |
 | Observability hooks (logging, metrics, tracing) | ⬜ | |
 | API keys / opaque tokens | ⬜ | |
-| Multi-factor authentication (TOTP, WebAuthn) | ⬜ | |
+| Multi-factor authentication (TOTP, WebAuthn) | ✅ | See the `totp` and `webauthn` sections |
+| Recording several factors in a session (`amr`, step-up) | ⬜ | `Session.AuthMethod` holds one method |
 | OAuth 2.0 authorization server (issuing endpoints) | ➖ | A separate product; the `jwt` package covers token signing |

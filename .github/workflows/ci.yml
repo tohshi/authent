@@ -69,3 +69,5 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./jwt -run '^$' -fuzz '^FuzzVerify$' -fuzztime 60s
+      - run: go test ./webauthn -run '^$' -fuzz '^FuzzCBOR$' -fuzztime 30s
+      - run: go test ./webauthn -run '^$' -fuzz '^FuzzParseAuthData$' -fuzztime 30s

@@ -2,7 +2,7 @@
 // building blocks that do not depend on any HTTP framework.
 //
 // Every authentication method in the sub-packages (password, jwt, session,
-// oidc) produces a [Principal]. Authorization is provided by the rebac
+// oidc, totp, webauthn) produces a [Principal]. Authorization is provided by the rebac
 // package, a Zanzibar-style relationship-based access control engine.
 //
 // The packages depend only on the Go standard library and golang.org/x.
@@ -27,6 +27,8 @@ const (
 	MethodJWT      Method = "jwt"
 	MethodSession  Method = "session"
 	MethodOIDC     Method = "oidc"
+	MethodTOTP     Method = "totp"
+	MethodWebAuthn Method = "webauthn"
 )
 
 // Principal is an authenticated subject.

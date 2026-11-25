@@ -39,6 +39,8 @@ gofmt -l .                # must print nothing
 go vet ./...
 go test -race ./...
 go test ./jwt -run '^$' -fuzz FuzzVerify -fuzztime 30s
+go test ./webauthn -run '^$' -fuzz FuzzCBOR -fuzztime 30s
+go test ./webauthn -run '^$' -fuzz FuzzParseAuthData -fuzztime 30s
 go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 ```
 
@@ -60,7 +62,8 @@ Fixes #42
 
 - **First line:** `<prefix>: <summary>`
   - The prefix is the package directory you changed (`jwt`, `oidc`,
-    `password`, `rebac`, `session`, or `authent` for the root package).
+    `password`, `rebac`, `session`, `totp`, `webauthn`, or `authent` for
+    the root package).
     Use a comma-separated list for a few packages (`jwt, oidc: ...`) and
     `all:` for repository-wide changes. For non-code changes use the file
     or directory (`README:`, `.github:`, `CONTRIBUTING:`).
