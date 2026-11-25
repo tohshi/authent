@@ -101,11 +101,16 @@ func Discover(ctx context.Context, issuer string, client *http.Client) (*Provide
 }
 
 func (p *Provider) validate() error {
+	var userinfo error
+	if p.UserinfoEndpoint != "" {
+		userinfo = requireHTTPS("userinfo_endpoint", p.UserinfoEndpoint)
+	}
 	return errors.Join(
 		requireHTTPS("issuer", p.Issuer),
 		requireHTTPS("authorization_endpoint", p.AuthorizationEndpoint),
 		requireHTTPS("token_endpoint", p.TokenEndpoint),
 		requireHTTPS("jwks_uri", p.JWKSURI),
+		userinfo,
 	)
 }
 
@@ -127,8 +132,8 @@ type Config struct {
 	// Algorithms accepted for ID tokens. The default is the asymmetric
 	// algorithms the provider advertises, or RS256 if it advertises none.
 	Algorithms []jwt.Algorithm
-	// HTTPClient is used for the token endpoint and the JWK Set. The
-	// default is http.DefaultClient.
+	// HTTPClient is used for the token endpoint, the JWK Set and the
+	// UserInfo endpoint. The default is http.DefaultClient.
 	HTTPClient *http.Client
 	// Leeway tolerates clock skew when validating ID tokens. The default
 	// is 1 minute.

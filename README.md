@@ -98,6 +98,8 @@ client, _ := oidc.NewClient(prov, oidc.Config{ClientID: id, ClientSecret: secret
 req, _ := client.AuthCodeURL() // keep req.State, Nonce and CodeVerifier server-side
 // ... redirect to req.URL and receive the callback ...
 res, err := client.Exchange(ctx, req, r.URL.Query().Get("state"), r.URL.Query().Get("code"))
+
+info, err := client.UserInfo(ctx, res.Token, res.Principal.Subject) // optional
 ```
 `Exchange` checks:
 - the state and nonce
@@ -105,6 +107,11 @@ res, err := client.Exchange(ctx, req, r.URL.Query().Get("state"), r.URL.Query().
 - the ID token's signature, `iss`, `aud` and `exp`
 - `azp`
 - `at_hash`
+
+`UserInfo` calls the provider's UserInfo endpoint with the access token and
+rejects the response unless its `sub` exactly matches the ID token's. Only
+plain JSON responses are accepted, and redirects are not followed, so the
+access token is never sent anywhere but the advertised https endpoint.
 
 ### ReBAC
 ```go

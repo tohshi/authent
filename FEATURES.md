@@ -77,7 +77,7 @@ Legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| Discovery | ✅ | Requires an exact issuer match and https endpoints |
+| Discovery | ✅ | Requires an exact issuer match and https endpoints (including `userinfo_endpoint` when present) |
 | Authorization code flow with PKCE (S256) | ✅ | |
 | `state` and `nonce` generation and checks | ✅ | Compared in constant time |
 | ID token verification | ✅ | Signature, `iss`, `aud`, `exp`, `nbf`, `iat` |
@@ -85,7 +85,8 @@ Legend:
 | HMAC-signed ID tokens rejected by default | ✅ | |
 | `client_secret_basic` / `client_secret_post` | ✅ | Through `x/oauth2` |
 | Distinguishing rejected exchanges from network errors | ✅ | |
-| UserInfo endpoint | ⬜ | |
+| UserInfo endpoint | ✅ | `sub` must match the ID token; https only; redirects are not followed |
+| Signed UserInfo responses (`application/jwt`) | ⬜ | Currently rejected; needs JWT verification without `exp`. Encrypted responses are out of scope along with JWE |
 | Refresh token helper | ⬜ | The `oauth2.Token` is returned and can be used with `x/oauth2` |
 | `max_age`, `auth_time` and `acr` enforcement | ⬜ | |
 | `private_key_jwt` client authentication | ⬜ | |
