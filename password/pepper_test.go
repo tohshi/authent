@@ -64,8 +64,6 @@ func TestPepperHashAndVerify(t *testing.T) {
 		t.Fatalf("NeedsRehash(current) = %v, %v", needs, err)
 	}
 
-	// Without the pepper the hash cannot be checked at all; it must not
-	// fall back to verifying the unkeyed password.
 	for _, other := range []*Hasher{
 		newTestHasher(t),
 		newPepperedHasher(t, WithPepper("k2", pepper2)),
@@ -102,7 +100,6 @@ func TestPepperRotation(t *testing.T) {
 		}
 	}
 
-	// Dropping the pepper entirely: peppered hashes are upgraded to plain ones.
 	unpeppered := newPepperedHasher(t, WithRetiredPepper("k1", pepper1))
 	if needs, err := unpeppered.NeedsRehash(oldHash); err != nil || !needs {
 		t.Fatalf("NeedsRehash(retired) = %v, %v; want true", needs, err)

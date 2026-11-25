@@ -119,8 +119,7 @@ const (
 
 // WithPepper sets the pepper, a server-side secret of at least 32 bytes
 // that new hashes are keyed with. The id is recorded in each hash so that
-// the pepper can be rotated; it is 1 to 16 ASCII letters or digits. Keep
-// the pepper outside the credential store.
+// the pepper can be rotated; it is 1 to 16 ASCII letters or digits.
 func WithPepper(id string, key []byte) HasherOption {
 	return func(h *Hasher) error {
 		if h.pepperID != "" {
@@ -188,7 +187,7 @@ func (h *Hasher) Hash(password string) (string, error) {
 	return h.hash(password, false)
 }
 
-// hash creates either a legacy raw hash or an NFC-tagged hash. NFC-tagged
+// hash creates either a raw hash or an NFC-tagged hash. NFC-tagged
 // hashes are created by Policy.Hash and normalized again during verification.
 func (h *Hasher) hash(password string, normalize bool) (string, error) {
 	a := &argon2idHash{
@@ -240,17 +239,12 @@ func (h *Hasher) NeedsRehash(encoded string) (bool, error) {
 	return !s.current(h), nil
 }
 
-// storedHash is a parsed encoded hash.
 type storedHash interface {
-	// matches reports in constant time whether password produces the hash.
 	matches(password string) bool
-	// current reports whether h would create a hash with the same parameters.
 	current(h *Hasher) bool
-	// normalized reports whether passwords are NFC-normalized before hashing.
 	normalized() bool
 }
 
-// parse parses encoded and resolves its pepper.
 func (h *Hasher) parse(encoded string) (storedHash, error) {
 	if !strings.HasPrefix(encoded, "$argon2id$") {
 		return parseLegacy(encoded)

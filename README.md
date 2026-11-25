@@ -88,8 +88,8 @@ p, err := auth.Authenticate(ctx, username, pw)
   ```
   The store keeps only the token's SHA-256 hash, the subject and the expiry.
   `ResetTokenStore.TakeResetToken` must remove and return a token in one
-  atomic step (in SQL, `DELETE ... RETURNING`), so a token cannot be redeemed
-  twice. Issuing a token invalidates the subject's earlier ones, so only the
+  atomic step (in SQL, `DELETE ... RETURNING` or a locking transaction), so
+  a token cannot be redeemed twice. Issuing a token invalidates the subject's earlier ones, so only the
   most recent link works. Expired, unknown and reused tokens return
   `ErrInvalidResetToken`, which wraps `authent.ErrUnauthenticated`.
 - To migrate users from another system, store their existing hashes as they

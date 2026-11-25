@@ -40,7 +40,8 @@ type ResetTokenStore interface {
 	// TakeResetToken removes the token with the given hash and returns it,
 	// or returns ErrResetTokenNotFound. It must be atomic: of concurrent
 	// calls with the same hash, at most one returns the token. In SQL, use
-	// a single DELETE ... RETURNING statement.
+	// DELETE ... RETURNING, or SELECT ... FOR UPDATE and DELETE in one
+	// transaction.
 	TakeResetToken(ctx context.Context, hash [sha256.Size]byte) (ResetToken, error)
 }
 
@@ -78,8 +79,7 @@ const resetTokenBytes = 32
 
 var resetB64 = base64.RawURLEncoding.Strict()
 
-// Issue creates a token for subject. Deliver it to the user out of band,
-// for example in an emailed link. Only the newest token of a subject is
+// Issue creates a token for subject. Only the newest token of a subject is
 // valid: issuing one invalidates the earlier ones.
 func (m *ResetManager) Issue(ctx context.Context, subject string) (string, error) {
 	if subject == "" {
@@ -117,8 +117,8 @@ func (m *ResetManager) Redeem(ctx context.Context, token string) (string, error)
 	return t.Subject, nil
 }
 
-// MemoryResetStore is an in-process ResetTokenStore, suitable for tests and
-// single-instance deployments. It holds at most one token per subject.
+// MemoryResetStore is an in-process ResetTokenStore. It holds at most one
+// token per subject.
 type MemoryResetStore struct {
 	mu        sync.Mutex
 	byHash    map[[sha256.Size]byte]ResetToken

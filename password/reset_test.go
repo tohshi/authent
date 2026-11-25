@@ -98,8 +98,6 @@ func TestResetTokenExpires(t *testing.T) {
 	_, err := m.Redeem(ctx, expiring)
 	wantInvalidResetToken(t, err)
 
-	// The expired token was consumed, so turning the clock back does not
-	// revive it.
 	clock.t = clock.t.Add(-time.Hour)
 	_, err = m.Redeem(ctx, expiring)
 	wantInvalidResetToken(t, err)
@@ -181,8 +179,6 @@ func (s failingPutStore) TakeResetToken(context.Context, [sha256.Size]byte) (Res
 	return ResetToken{}, ErrResetTokenNotFound
 }
 
-// racyResetStore reads and deletes in two steps, letting every concurrent
-// caller read before any of them deletes.
 type racyResetStore struct {
 	*MemoryResetStore
 	read sync.WaitGroup

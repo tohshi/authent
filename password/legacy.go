@@ -16,10 +16,10 @@ import (
 // Bounds applied to legacy hashes. Each is well above the current default
 // of the library that creates the format.
 const (
-	maxBcryptCost       = 16
-	maxScryptMemory     = 1 << 30 // bytes, 128·N·r
-	maxScryptWork       = 1 << 24 // N·r·p
-	maxPBKDF2Iterations = 10_000_000
+	maxBcryptCost        = 16
+	maxScryptMemoryBytes = 1 << 30
+	maxScryptWork        = 1 << 24
+	maxPBKDF2Iterations  = 10_000_000
 )
 
 // legacy hashes are verified against the raw password bytes, as the systems
@@ -42,8 +42,8 @@ func parseLegacy(encoded string) (storedHash, error) {
 	return nil, ErrMalformedHash
 }
 
-// bcryptHash is a $2a$, $2b$ or $2y$ hash. Only the first 72 bytes of a
-// password are significant, as in every bcrypt implementation.
+// Only the first 72 bytes of a password are significant, as in every bcrypt
+// implementation.
 type bcryptHash struct {
 	legacy
 	encoded []byte
@@ -78,17 +78,13 @@ func (b *bcryptHash) matches(password string) bool {
 	return bcrypt.CompareHashAndPassword(b.encoded, []byte(password)) == nil
 }
 
-// scryptHash is a hash in the Werkzeug format, the default of Flask
-// applications since Werkzeug 3.0:
-//
-//	scrypt:32768:8:1$<salt>$<hex key>
-type scryptHash struct {
+type werkzeugScryptHash struct {
 	legacy
 	n, r, p   int
 	salt, key []byte
 }
 
-func parseWerkzeugScrypt(encoded string) (*scryptHash, error) {
+func parseWerkzeugScrypt(encoded string) (*werkzeugScryptHash, error) {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 3 || !validSalt(parts[1]) {
 		return nil, ErrMalformedHash
@@ -97,40 +93,37 @@ func parseWerkzeugScrypt(encoded string) (*scryptHash, error) {
 	if len(args) != 4 || args[0] != "scrypt" {
 		return nil, ErrMalformedHash
 	}
-	n, ok1 := parseDecimal(args[1], maxScryptWork)
-	r, ok2 := parseDecimal(args[2], maxScryptWork)
-	p, ok3 := parseDecimal(args[3], maxScryptWork)
+	n, ok1 := parseCanonicalDecimal(args[1], maxScryptWork)
+	r, ok2 := parseCanonicalDecimal(args[2], maxScryptWork)
+	p, ok3 := parseCanonicalDecimal(args[3], maxScryptWork)
 	if !ok1 || !ok2 || !ok3 || n < 2 || n&(n-1) != 0 || r == 0 || p == 0 ||
-		128*n*r > maxScryptMemory || n*r > maxScryptWork || n*r*p > maxScryptWork {
+		128*n*r > maxScryptMemoryBytes || n*r > maxScryptWork || n*r*p > maxScryptWork {
 		return nil, ErrMalformedHash
 	}
 	key, err := hex.DecodeString(parts[2])
 	if err != nil || hex.EncodeToString(key) != parts[2] || len(key) < minKeyLength || len(key) > maxLength {
 		return nil, ErrMalformedHash
 	}
-	return &scryptHash{n: n, r: r, p: p, salt: []byte(parts[1]), key: key}, nil
+	return &werkzeugScryptHash{n: n, r: r, p: p, salt: []byte(parts[1]), key: key}, nil
 }
 
-func (s *scryptHash) matches(password string) bool {
+func (s *werkzeugScryptHash) matches(password string) bool {
 	got, err := scrypt.Key([]byte(password), s.salt, s.n, s.r, s.p, len(s.key))
 	return err == nil && subtle.ConstantTimeCompare(got, s.key) == 1
 }
 
-// pbkdf2Hash is a hash in the format of Django's default password hasher:
-//
-//	pbkdf2_sha256$1000000$<salt>$<base64 key>
-type pbkdf2Hash struct {
+type djangoPBKDF2Hash struct {
 	legacy
 	iterations int
 	salt, key  []byte
 }
 
-func parseDjangoPBKDF2(encoded string) (*pbkdf2Hash, error) {
+func parseDjangoPBKDF2(encoded string) (*djangoPBKDF2Hash, error) {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 4 || parts[0] != "pbkdf2_sha256" || !validSalt(parts[2]) {
 		return nil, ErrMalformedHash
 	}
-	iterations, ok := parseDecimal(parts[1], maxPBKDF2Iterations)
+	iterations, ok := parseCanonicalDecimal(parts[1], maxPBKDF2Iterations)
 	if !ok || iterations == 0 {
 		return nil, ErrMalformedHash
 	}
@@ -138,10 +131,10 @@ func parseDjangoPBKDF2(encoded string) (*pbkdf2Hash, error) {
 	if err != nil || len(key) != sha256.Size {
 		return nil, ErrMalformedHash
 	}
-	return &pbkdf2Hash{iterations: iterations, salt: []byte(parts[2]), key: key}, nil
+	return &djangoPBKDF2Hash{iterations: iterations, salt: []byte(parts[2]), key: key}, nil
 }
 
-func (p *pbkdf2Hash) matches(password string) bool {
+func (p *djangoPBKDF2Hash) matches(password string) bool {
 	got, err := pbkdf2.Key(sha256.New, password, p.salt, p.iterations, len(p.key))
 	return err == nil && subtle.ConstantTimeCompare(got, p.key) == 1
 }
@@ -159,8 +152,7 @@ func validSalt(s string) bool {
 	return true
 }
 
-// parseDecimal parses a canonical decimal number no greater than max.
-func parseDecimal(s string, max int) (int, bool) {
+func parseCanonicalDecimal(s string, max int) (int, bool) {
 	v, err := strconv.ParseUint(s, 10, 63)
 	if err != nil || v > uint64(max) || strconv.FormatUint(v, 10) != s {
 		return 0, false

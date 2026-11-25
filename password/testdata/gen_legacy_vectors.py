@@ -10,8 +10,7 @@ and $2b$ vectors reuse the htpasswd output with the prefix swapped.
 The scrypt vectors use the Werkzeug format (scrypt:N:r:p$salt$hex) and the
 PBKDF2 vectors use the Django format (pbkdf2_sha256$iter$salt$base64). Both
 are computed with Python's hashlib, following werkzeug.security and
-django.contrib.auth.hashers: the password and salt are UTF-8 bytes, the
-scrypt key is 64 bytes and the PBKDF2 key is 32 bytes.
+django.contrib.auth.hashers: the password and salt are UTF-8 bytes.
 """
 import base64
 import hashlib
@@ -33,13 +32,13 @@ def htpasswd(password: str, cost: int) -> str:
 
 def werkzeug_scrypt(password: str, salt: str, n: int, r: int, p: int) -> str:
     key = hashlib.scrypt(
-        password.encode(), salt=salt.encode(), n=n, r=r, p=p, maxmem=132 * n * r * p
+        password.encode(), salt=salt.encode(), n=n, r=r, p=p, maxmem=132 * n * r * p, dklen=64
     )
     return f"scrypt:{n}:{r}:{p}${salt}${key.hex()}"
 
 
 def django_pbkdf2(password: str, salt: str, iterations: int) -> str:
-    key = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), iterations)
+    key = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), iterations, dklen=32)
     return f"pbkdf2_sha256${iterations}${salt}${base64.b64encode(key).decode()}"
 
 
@@ -59,7 +58,7 @@ def main():
             "password": pw,
             "hash": django_pbkdf2(pw, f"salt{i}Django{i}", 1000),
         })
-    # Library defaults: htpasswd cost 10 (bcrypt), Werkzeug 3 scrypt
+    # Production defaults: bcrypt cost 10 (PHP and Go), Werkzeug 3 scrypt
     # (N=2^15, r=8, p=1, 16-character salt), Django 5.2 PBKDF2 (1,000,000
     # iterations, 22-character salt).
     vectors.append({"source": "htpasswd -B", "password": "password", "hash": htpasswd("password", 10)})
