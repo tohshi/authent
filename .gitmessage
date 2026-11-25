@@ -5,7 +5,7 @@
 #
 # Fixes #
 #
-# Prefix: jwt, oidc, password, rebac, session, totp, webauthn,
-# authent, all,
+# Prefix: jwt, oidc, dpop, password, rebac, session, totp,
+# webauthn, authent, all,
 # or a file/directory such as README or .github.
 # See CONTRIBUTING.md.

@@ -61,7 +61,7 @@ Fixes #42
 ```
 
 - **First line:** `<prefix>: <summary>`
-  - The prefix is the package directory you changed (`jwt`, `oidc`,
+  - The prefix is the package directory you changed (`jwt`, `oidc`, `dpop`,
     `password`, `rebac`, `session`, `totp`, `webauthn`, or `authent` for
     the root package).
     Use a comma-separated list for a few packages (`jwt, oidc: ...`) and

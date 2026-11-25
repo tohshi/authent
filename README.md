@@ -20,7 +20,8 @@ go get github.com/tohshi/authent
 | `password` | Argon2id password hashing and verification, new-password policy, `Authenticator` |
 | `jwt` | JWS/JWT signing and verification, JWK/JWKS, `RemoteKeySet` with caching and key rotation |
 | `session` | Server-side sessions with idle and absolute timeouts, ID rotation and CSRF tokens |
-| `oidc` | OpenID Connect relying party (authorization code flow with PKCE S256) |
+| `oidc` | OpenID Connect relying party (authorization code flow with PKCE S256, PAR, DPoP) |
+| `dpop` | DPoP (RFC 9449): client proofs and transport, resource server verification |
 | `totp` | Time-based one-time passwords (RFC 6238) with replay protection |
 | `webauthn` | WebAuthn relying party: passkeys and security keys |
 | `rebac` | Zanzibar-style relationship-based access control (ReBAC) |
@@ -89,6 +90,9 @@ Safeguards enforced during verification:
     restricted to that algorithm.
 - **Claims and headers**
   - `exp` is required.
+  - Tokens with a `cnf` claim (sender-constrained, e.g. DPoP-bound) are
+    rejected unless `jwt.WithConfirmationClaim()` is set, so a stolen bound
+    token cannot be replayed as a bearer token (RFC 9449 §7.2).
   - Headers with `crit`, `b64` or `zip` are rejected.
   - `jku`, `x5u` and `jwk` headers are never used to find keys.
 - **Encoding**
@@ -149,6 +153,63 @@ is the provider issuer, as required by RFC 10070.
 rejects the response unless its `sub` exactly matches the ID token's. Only
 plain JSON responses are accepted, and redirects are not followed, so the
 access token is never sent anywhere but the advertised https endpoint.
+
+Pushed authorization requests (RFC 9126) send the parameters to the
+provider over the back channel, so the browser only sees a `request_uri`:
+```go
+req, err := client.PushAuthCodeURL(ctx) // redirect to req.URL before req.Expiry
+```
+`AuthCodeURL` returns `oidc.ErrPARRequired` when the provider sets
+`require_pushed_authorization_requests`. The client authenticates at the PAR
+endpoint as at the token endpoint, with its secret or `private_key_jwt`.
+
+With `Config.DPoP` set, tokens are bound to the client's key (RFC 9449):
+```go
+prover, _ := dpop.NewProver(jwt.ES256, key) // keep key as long as the tokens
+client, _ := oidc.NewClient(prov, oidc.Config{ /* ... */ DPoP: prover})
+res, err := client.Exchange(ctx, req, state, code)
+api := client.HTTPClient(ctx, res.Token) // sends "Authorization: DPoP" with a proof per request
+```
+- The authorization code is bound to the key: through `dpop_jkt`, or a DPoP
+  proof on the pushed request.
+- Token requests and refreshes carry proofs. `Exchange` fails unless the
+  provider issues a `DPoP` token, rather than silently falling back to
+  Bearer.
+- Server-provided nonces are remembered per origin, and a request rejected
+  with `use_dpop_nonce` is retried once with the new nonce. With
+  `private_key_jwt`, the retry carries a freshly signed client assertion.
+- `UserInfo` sends a DPoP token with the DPoP scheme and a proof.
+
+### DPoP resource server
+```go
+tokens, _ := jwt.NewVerifier(keys, jwt.WithAlgorithms(jwt.ES256), jwt.WithIssuer(iss),
+	jwt.WithAudience("api"), jwt.WithExpectedType("at+jwt"),
+	jwt.WithConfirmationClaim()) // the binding is checked by dpop.Authenticator
+proofs, _ := dpop.NewVerifier(dpop.WithAlgorithms(jwt.ES256),
+	dpop.WithReplayCache(dpop.NewMemoryReplayCache())) // or dpop.WithoutReplayCheck()
+auth, _ := dpop.NewAuthenticator(tokens, proofs)
+
+at, err := dpop.AccessToken(r.Header.Get("Authorization"))
+p, err := auth.Authenticate(ctx, dpop.Request{
+	Method: r.Method, URL: "https://api.example.com" + r.URL.RequestURI(), // the external URL
+	Proofs: r.Header.Values("DPoP"), AccessToken: at,
+})
+// on failure: 401 with WWW-Authenticate: proofs.Challenge(err)
+```
+Proof checks (RFC 9449 §4.3):
+- exactly one `DPoP` header; `typ` is `dpop+jwt`; an asymmetric `alg` from
+  the allow-list; the signature verifies with the embedded public key, which
+  must not contain private key material
+- `htm` equals the method and `htu` the request URI, compared after
+  RFC 3986 normalization and ignoring query and fragment
+- `iat` is at most `WithMaxAge` (default 1 minute) old and at most
+  `WithLeeway` (default 10 seconds) in the future
+- `ath` matches the access token, and the key's thumbprint matches the
+  token's `cnf.jkt`
+- `jti` has not been seen before (a replay cache, or an explicit opt-out, is
+  required); proofs that fail any other check are not recorded
+- optionally a server nonce (`WithNonce`); a missing or stale one returns
+  `dpop.ErrUseNonce`
 
 ### TOTP
 ```go

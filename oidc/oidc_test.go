@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/dpop"
 	"github.com/tohshi/authent/jwt"
 )
 
@@ -31,6 +32,7 @@ const (
 type grant struct {
 	challenge string
 	nonce     string
+	jkt       string // DPoP key the code is bound to
 }
 
 // fakeProvider is a minimal OpenID Provider.
@@ -54,6 +56,18 @@ type fakeProvider struct {
 	authAlgs          []string
 	assertionVerifier *jwt.Verifier
 	assertions        []jwt.Claims
+
+	// PAR (RFC 9126)
+	par        bool // advertise the PAR endpoint
+	requirePAR bool
+	pushed     map[string]url.Values // request_uri -> parameters
+	lastPush   *http.Request
+
+	// DPoP (RFC 9449)
+	dpopAlgs   []string
+	proofs     *dpop.Verifier
+	dpopNonce  string // if set, required in every proof
+	bearerOnly bool   // ignore DPoP proofs, as a provider without DPoP support would
 }
 
 func newFakeProvider(t *testing.T) *fakeProvider {
@@ -63,7 +77,13 @@ func newFakeProvider(t *testing.T) *fakeProvider {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &fakeProvider{signer: signer, grants: map[string]grant{}, accessTokens: map[string]bool{}}
+	proofs, err := dpop.NewVerifier(dpop.WithAlgorithms(jwt.ES256), dpop.WithReplayCache(dpop.NewMemoryReplayCache()),
+		dpop.WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &fakeProvider{signer: signer, grants: map[string]grant{}, accessTokens: map[string]bool{},
+		pushed: map[string]url.Values{}, proofs: proofs}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		iss := p.issuer
@@ -77,7 +97,7 @@ func newFakeProvider(t *testing.T) *fakeProvider {
 		case "-":
 			userinfo = ""
 		}
-		_ = json.MarshalWrite(w, Provider{
+		meta := Provider{
 			Issuer:                            iss,
 			AuthorizationEndpoint:             p.URL + "/authorize",
 			TokenEndpoint:                     p.URL + "/token",
@@ -86,13 +106,21 @@ func newFakeProvider(t *testing.T) *fakeProvider {
 			IDTokenSigningAlgValuesSupported:  []string{"ES256", "HS256"},
 			TokenEndpointAuthMethodsSupported: p.authMethods,
 			TokenEndpointAuthSigningAlgValuesSupported: p.authAlgs,
-		})
+			RequirePushedAuthorizationRequests:         p.requirePAR,
+			DPoPSigningAlgValuesSupported:              p.dpopAlgs,
+		}
+		if p.par || p.requirePAR {
+			meta.PushedAuthorizationRequestEndpoint = p.URL + "/par"
+		}
+		_ = json.MarshalWrite(w, meta)
 	})
 	mux.HandleFunc("GET /jwks", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.MarshalWrite(w, jwt.JWKSet{Keys: []jwt.JWK{p.signer.VerificationKey()}})
 	})
 	mux.HandleFunc("POST /token", p.token)
 	mux.HandleFunc("GET /userinfo", p.userinfoHandler)
+	mux.HandleFunc("POST /par", p.pushAuthorization)
+	mux.HandleFunc("GET /api", p.api)
 	p.Server = httptest.NewTLSServer(mux)
 	t.Cleanup(p.Close)
 	return p
@@ -107,6 +135,20 @@ func (p *fakeProvider) authorize(t *testing.T, authURL string) (state, code stri
 		t.Fatal(err)
 	}
 	q := u.Query()
+	if ru := q.Get("request_uri"); ru != "" {
+		if len(q) != 2 || q.Get("client_id") != clientID {
+			t.Fatalf("pushed authorization URL carries parameters: %v", q)
+		}
+		p.mu.Lock()
+		q = p.pushed[ru]
+		delete(p.pushed, ru) // request URIs are single use
+		p.mu.Unlock()
+		if q == nil {
+			t.Fatalf("unknown request_uri %q", ru)
+		}
+	} else if p.requirePAR {
+		t.Fatal("authorization request was not pushed")
+	}
 	if q.Get("client_id") != clientID || q.Get("redirect_uri") != redirectURL ||
 		q.Get("response_type") != "code" || q.Get("code_challenge_method") != "S256" {
 		t.Fatalf("bad authorization request: %v", q)
@@ -116,7 +158,7 @@ func (p *fakeProvider) authorize(t *testing.T, authURL string) (state, code stri
 	}
 	code = "code-" + q.Get("state")[:8]
 	p.mu.Lock()
-	p.grants[code] = grant{challenge: q.Get("code_challenge"), nonce: q.Get("nonce")}
+	p.grants[code] = grant{challenge: q.Get("code_challenge"), nonce: q.Get("nonce"), jkt: q.Get("dpop_jkt")}
 	p.mu.Unlock()
 	return q.Get("state"), code
 }
@@ -131,39 +173,27 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 		tokenError()
 		return
 	}
-	if p.assertionVerifier != nil {
-		_, _, basic := r.BasicAuth()
-		if basic || r.PostForm.Get("client_id") != clientID || r.PostForm.Has("client_secret") ||
-			r.PostForm.Get("client_assertion_type") != "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" ||
-			len(r.PostForm["client_assertion"]) != 1 {
-			w.WriteHeader(http.StatusUnauthorized)
+	if !p.clientAuthenticated(r) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	// The proof is checked before the code is looked up, so that a
+	// request rejected for a missing nonce does not consume the code.
+	var jkt string
+	if r.Header.Get(dpop.HeaderName) != "" && !p.bearerOnly {
+		proof, err := p.checkProof(r, "")
+		if err != nil {
+			p.dpopError(w, err)
 			return
 		}
-		claims, err := p.assertionVerifier.Verify(r.Context(), r.PostForm.Get("client_assertion"))
-		if err != nil || claims.Subject != clientID || claims.ID == "" ||
-			claims.IssuedAt.Time != now || claims.ExpiresAt.Time != now.Add(5*time.Minute) {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		p.mu.Lock()
-		p.assertions = append(p.assertions, *claims)
-		p.mu.Unlock()
-	} else {
-		id, secret, ok := r.BasicAuth()
-		if !ok {
-			id, secret = r.PostForm.Get("client_id"), r.PostForm.Get("client_secret")
-		}
-		if id != clientID || secret != clientSecret {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
+		jkt = proof.JKT
 	}
 	p.mu.Lock()
 	g, ok := p.grants[r.PostForm.Get("code")]
 	delete(p.grants, r.PostForm.Get("code")) // codes are single use
 	p.mu.Unlock()
 	sum := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
-	if !ok || base64.RawURLEncoding.EncodeToString(sum[:]) != g.challenge {
+	if !ok || base64.RawURLEncoding.EncodeToString(sum[:]) != g.challenge || g.jkt != "" && g.jkt != jkt {
 		tokenError()
 		return
 	}
@@ -193,7 +223,11 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	resp := map[string]any{"access_token": accessToken, "token_type": "Bearer", "expires_in": 300}
+	tokenType := "Bearer"
+	if jkt != "" {
+		tokenType = "DPoP"
+	}
+	resp := map[string]any{"access_token": accessToken, "token_type": tokenType, "expires_in": 300}
 	if !p.omitIDToken {
 		resp["id_token"] = idToken
 	}
@@ -201,21 +235,25 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 	_ = json.MarshalWrite(w, resp)
 }
 
-func newClient(t *testing.T, p *fakeProvider) *Client {
+func newClient(t *testing.T, p *fakeProvider, mods ...func(*Config)) *Client {
 	t.Helper()
 	ctx := context.Background()
 	meta, err := Discover(ctx, p.URL, p.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := NewClient(meta, Config{
+	cfg := Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
 		RedirectURL:  redirectURL,
 		Scopes:       []string{"email", "openid"},
 		HTTPClient:   p.Client(),
 		Now:          func() time.Time { return now },
-	})
+	}
+	for _, mod := range mods {
+		mod(&cfg)
+	}
+	c, err := NewClient(meta, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

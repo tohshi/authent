@@ -2,6 +2,7 @@ package jwt
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json/v2"
 	"errors"
 	"net/http"
@@ -286,6 +287,11 @@ func FuzzVerify(f *testing.F) {
 	s, _ := NewSigner(ES256, p256Key, WithKeyID("k"))
 	tok, _ := s.Sign(validClaims())
 	f.Add(tok)
+	// Ed25519 signatures are deterministic, so every fuzz worker process
+	// computes the same seed.
+	embedded, _ := NewSigner(EdDSA, ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)), WithJWKHeader())
+	selfSigned, _ := embedded.SignPayload([]byte(`{"jti":"x"}`))
+	f.Add(selfSigned)
 	f.Add("eyJhbGciOiJub25lIn0.e30.")
 	f.Add("a.b.c")
 	v, err := NewVerifier(NewStaticKeySet(s.VerificationKey()), WithAlgorithms(allAlgs...),
@@ -304,6 +310,16 @@ func FuzzVerify(f *testing.F) {
 			return
 		}
 		if !errors.Is(err, ErrInvalidToken) {
+			t.Fatalf("error %v does not wrap ErrInvalidToken", err)
+		}
+
+		// The same holds for tokens verified with their embedded key: the
+		// fuzzer cannot produce a new valid signature for any key.
+		if _, err := VerifyWithEmbeddedKey(token, ES256, RS256, EdDSA); err == nil {
+			if token != selfSigned {
+				t.Fatalf("accepted unexpected self-signed token %q", token)
+			}
+		} else if !errors.Is(err, ErrInvalidToken) {
 			t.Fatalf("error %v does not wrap ErrInvalidToken", err)
 		}
 	})

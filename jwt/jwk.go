@@ -1,6 +1,7 @@
 package jwt
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -193,6 +194,15 @@ func parseOKP(r rawJWK) (ed25519.PublicKey, error) {
 
 // MarshalJSON encodes the public key. HMAC keys cannot be marshaled.
 func (k JWK) MarshalJSON() ([]byte, error) {
+	r, err := k.raw()
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(r)
+}
+
+// raw returns the JSON members of a public key.
+func (k JWK) raw() (rawJWK, error) {
 	r := rawJWK{Kid: k.KeyID, Alg: string(k.Algorithm), Use: k.Use, KeyOps: k.KeyOps}
 	switch pub := k.Key.(type) {
 	case *rsa.PublicKey:
@@ -202,7 +212,7 @@ func (k JWK) MarshalJSON() ([]byte, error) {
 	case *ecdsa.PublicKey:
 		point, err := pub.Bytes()
 		if err != nil {
-			return nil, fmt.Errorf("jwt: %w", err)
+			return rawJWK{}, fmt.Errorf("jwt: %w", err)
 		}
 		size := curveByteSize(pub.Curve)
 		r.Kty = "EC"
@@ -214,9 +224,35 @@ func (k JWK) MarshalJSON() ([]byte, error) {
 		r.Crv = "Ed25519"
 		r.X = b64.EncodeToString(pub)
 	default:
-		return nil, fmt.Errorf("jwt: cannot marshal key of type %T", k.Key)
+		return rawJWK{}, fmt.Errorf("jwt: cannot marshal key of type %T", k.Key)
 	}
-	return json.Marshal(r)
+	return r, nil
+}
+
+// Thumbprint returns the JWK Thumbprint (RFC 7638) of the public key,
+// computed with h. DPoP (RFC 9449) uses the base64url encoding of the
+// SHA-256 thumbprint. HMAC keys have no thumbprint.
+func (k JWK) Thumbprint(h crypto.Hash) ([]byte, error) {
+	if !h.Available() {
+		return nil, fmt.Errorf("jwt: hash %v is not available", h)
+	}
+	r, err := k.raw()
+	if err != nil {
+		return nil, err
+	}
+	// RFC 7638 §3.2: only the required members, in lexicographic order,
+	// with no whitespace. The values are base64url strings and curve
+	// names, which need no JSON escaping.
+	var canonical string
+	switch r.Kty {
+	case "RSA":
+		canonical = `{"e":"` + r.E + `","kty":"RSA","n":"` + r.N + `"}`
+	case "EC":
+		canonical = `{"crv":"` + r.Crv + `","kty":"EC","x":"` + r.X + `","y":"` + r.Y + `"}`
+	case "OKP":
+		canonical = `{"crv":"` + r.Crv + `","kty":"OKP","x":"` + r.X + `"}`
+	}
+	return digest(h, []byte(canonical)), nil
 }
 
 // UnmarshalJSON parses a public JWK; see ParseJWK.
