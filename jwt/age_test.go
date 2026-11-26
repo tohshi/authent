@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"math"
 	"testing"
 	"time"
 )
@@ -51,6 +52,19 @@ func TestMaxTokenAge(t *testing.T) {
 	}
 }
 
+func TestMaxAgeDoesNotOverflow(t *testing.T) {
+	c := validClaims()
+	c.Extra = map[string]any{"auth_time": testNow.Add(-time.Hour).Unix()}
+	for name, opt := range map[string]VerifierOption{
+		"token age": WithMaxTokenAge(math.MaxInt64),
+		"auth age":  WithMaxAuthAge(math.MaxInt64),
+	} {
+		if err := verifyClaims(t, c, opt, WithLeeway(time.Minute)); err != nil {
+			t.Errorf("%s: unlimited age with leeway rejected a fresh token: %v", name, err)
+		}
+	}
+}
+
 func TestMaxAuthAge(t *testing.T) {
 	authAgo := func(d time.Duration) Claims {
 		c := validClaims()
@@ -75,6 +89,9 @@ func TestMaxAuthAge(t *testing.T) {
 		"past limit and leeway": {authAgo(time.Hour + 31*time.Second), time.Hour, 30 * time.Second, ErrAuthenticationTooOld},
 		"zero, just now":        {authAgo(0), 0, 0, nil},
 		"zero, a second ago":    {authAgo(time.Second), 0, 0, ErrAuthenticationTooOld},
+		"future within leeway":  {authAgo(-30 * time.Second), time.Hour, 30 * time.Second, nil},
+		"future beyond leeway":  {authAgo(-31 * time.Second), time.Hour, 30 * time.Second, ErrIssuedInFuture},
+		"zero, a day ahead":     {authAgo(-24 * time.Hour), 0, 0, ErrIssuedInFuture},
 		"no auth_time":          {validClaims(), time.Hour, 0, ErrMissingClaim},
 		"string auth_time":      {withAuthTime("1700000000"), time.Hour, 0, ErrMalformed},
 		"negative auth_time":    {withAuthTime(-1), time.Hour, 0, ErrMalformed},

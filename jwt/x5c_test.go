@@ -130,6 +130,21 @@ func TestCertificateRoots(t *testing.T) {
 	}
 }
 
+func TestCertificateRootsRecheckLeafKey(t *testing.T) {
+	pki := newPKI(t)
+	tok, err := ecSigner(t, "k").Sign(validClaims())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key := JWK{KeyID: "k", Key: &p256Key.PublicKey,
+		Certificates: []*x509.Certificate{pki.leaf(t, &other.PublicKey, nil), pki.inter}}
+	_, err = newVerifier(t, NewStaticKeySet(key), WithCertificateRoots(pki.roots)).Verify(context.Background(), tok)
+	if !errors.Is(err, ErrNoMatchingKey) {
+		t.Fatalf("chain for another key accepted: err = %v", err)
+	}
+}
+
 func TestX5CHeaderNeverUsed(t *testing.T) {
 	pki := newPKI(t)
 	trusted := reparse(t, JWK{KeyID: "k", Key: &p256Key.PublicKey,
