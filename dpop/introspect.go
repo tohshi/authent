@@ -30,7 +30,7 @@ type TokenVerifier interface {
 
 // IntrospectionConfig configures an Introspector.
 type IntrospectionConfig struct {
-	// Endpoint is the URL of the authorization server's token
+	// Endpoint is the https URL of the authorization server's token
 	// introspection endpoint (RFC 7662).
 	Endpoint string
 	// ClientID and ClientSecret authenticate the resource server with
@@ -38,8 +38,11 @@ type IntrospectionConfig struct {
 	ClientID     string
 	ClientSecret string
 	// Issuer, if set, must equal the "iss" member of every response that
-	// has one.
+	// has one. RFC 7662 makes "iss" optional.
 	Issuer string
+	// RequireIssuer rejects responses without an "iss" member. It needs
+	// Issuer.
+	RequireIssuer bool
 	// Audiences lists the accepted "aud" values; a response must contain
 	// one of them. Either Audiences or AnyAudience is required.
 	Audiences []string
@@ -49,7 +52,9 @@ type IntrospectionConfig struct {
 	// the caller checks the binding, as Authenticator does. Otherwise
 	// bound tokens fail with jwt.ErrSenderConstrained.
 	ConfirmationClaim bool
-	// HTTPClient sends the requests. The default is http.DefaultClient.
+	// HTTPClient sends the requests. The default is a client with a
+	// 10-second timeout. Redirects are never followed,
+	// whatever HTTPClient's CheckRedirect says.
 	HTTPClient *http.Client
 	// Now overrides the clock, for tests.
 	Now func() time.Time
@@ -58,14 +63,15 @@ type IntrospectionConfig struct {
 // Introspector checks opaque access tokens at a token introspection
 // endpoint (RFC 7662). It is safe for concurrent use.
 type Introspector struct {
-	cfg IntrospectionConfig
+	cfg    IntrospectionConfig
+	client *http.Client
 }
 
 // NewIntrospector returns an Introspector.
 func NewIntrospector(cfg IntrospectionConfig) (*Introspector, error) {
 	u, err := url.Parse(cfg.Endpoint)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-		return nil, errors.New("dpop: introspection endpoint must be an absolute http or https URL")
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return nil, errors.New("dpop: introspection endpoint must be an absolute https URL")
 	}
 	if cfg.ClientID == "" || cfg.ClientSecret == "" {
 		return nil, errors.New("dpop: introspection needs ClientID and ClientSecret")
@@ -73,13 +79,21 @@ func NewIntrospector(cfg IntrospectionConfig) (*Introspector, error) {
 	if len(cfg.Audiences) == 0 && !cfg.AnyAudience {
 		return nil, errors.New("dpop: Audiences or AnyAudience is required")
 	}
-	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = http.DefaultClient
+	if cfg.RequireIssuer && cfg.Issuer == "" {
+		return nil, errors.New("dpop: RequireIssuer needs Issuer")
 	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	if cfg.HTTPClient != nil {
+		c := *cfg.HTTPClient
+		client = &c
+	}
+	// A redirect could hand the decision to another server, and a 307 or
+	// 308 would resend the token to it.
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Introspector{cfg: cfg}, nil
+	return &Introspector{cfg: cfg, client: client}, nil
 }
 
 // Verify introspects token and returns the response members as claims.
@@ -126,7 +140,7 @@ func (in *Introspector) validate(c *jwt.Claims) error {
 	if !c.NotBefore.IsZero() && now.Add(DefaultLeeway).Before(c.NotBefore.Time) {
 		return fmt.Errorf("%w: not yet valid", ErrInactiveToken)
 	}
-	if in.cfg.Issuer != "" && c.Issuer != "" && c.Issuer != in.cfg.Issuer {
+	if in.cfg.Issuer != "" && (c.Issuer != "" || in.cfg.RequireIssuer) && c.Issuer != in.cfg.Issuer {
 		return fmt.Errorf("%w: iss %q", ErrInactiveToken, c.Issuer)
 	}
 	if !in.cfg.AnyAudience && !slices.ContainsFunc(c.Audience, func(a string) bool {
@@ -150,7 +164,7 @@ func (in *Introspector) post(ctx context.Context, token string) ([]byte, error) 
 	req.Header.Set("Accept", "application/json")
 	// RFC 6749 §2.3.1: both values are form-encoded first.
 	req.SetBasicAuth(url.QueryEscape(in.cfg.ClientID), url.QueryEscape(in.cfg.ClientSecret))
-	resp, err := in.cfg.HTTPClient.Do(req)
+	resp, err := in.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("dpop: introspection: %w", err)
 	}

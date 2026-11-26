@@ -402,9 +402,12 @@ auth, _ := dpop.NewAuthenticator(tokens, proofs)
 ```
 `"active": false`, an expired `exp`, a future `nbf`, an `aud` without an
 accepted audience, a different `iss` or a non-string `scope` fail with
-`dpop.ErrInactiveToken`. A failed request or an unparsable response, with
-no boolean `active`, is an error that does not wrap
-`authent.ErrUnauthenticated`.
+`dpop.ErrInactiveToken`. A failed request, a redirect, or an unparsable
+response, with no boolean `active`, is an error that does not wrap
+`authent.ErrUnauthenticated`. The endpoint must be https, redirects are
+never followed, and the default client times out after 10 seconds. `iss`
+is optional in RFC 7662; set `RequireIssuer` to reject responses without
+it.
 
 ### TOTP
 ```go

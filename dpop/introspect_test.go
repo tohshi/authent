@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,7 +25,7 @@ const (
 
 func fakeIntrospection(t *testing.T, responses map[string]string) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id, secret, ok := r.BasicAuth()
 		id, _ = url.QueryUnescape(id)
 		secret, _ = url.QueryUnescape(secret)
@@ -47,9 +49,10 @@ func fakeIntrospection(t *testing.T, responses map[string]string) *httptest.Serv
 	return srv
 }
 
-func introspectionConfig(endpoint string) IntrospectionConfig {
+func introspectionConfig(srv *httptest.Server) IntrospectionConfig {
 	return IntrospectionConfig{
-		Endpoint:          endpoint,
+		Endpoint:          srv.URL,
+		HTTPClient:        srv.Client(),
 		ClientID:          rsClientID,
 		ClientSecret:      rsClientSecret,
 		Issuer:            issuer,
@@ -113,7 +116,7 @@ func TestIntrospectionAuthenticator(t *testing.T) {
 		"scope array":   bound(func(m map[string]any) { m["scope"] = []string{"read"} }),
 		"no sub":        bound(func(m map[string]any) { delete(m, "sub") }),
 	})
-	a, err := NewAuthenticator(newIntrospector(t, introspectionConfig(srv.URL)), newVerifier(t))
+	a, err := NewAuthenticator(newIntrospector(t, introspectionConfig(srv)), newVerifier(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +167,7 @@ func TestIntrospectionAuthenticator(t *testing.T) {
 
 func TestIntrospectorRejectsBoundTokenAsBearer(t *testing.T) {
 	srv := fakeIntrospection(t, map[string]string{"bound": introspectionResponse(t, nil)})
-	cfg := introspectionConfig(srv.URL)
+	cfg := introspectionConfig(srv)
 	cfg.ConfirmationClaim = false
 	_, err := newIntrospector(t, cfg).Verify(context.Background(), "bound")
 	if !errors.Is(err, jwt.ErrSenderConstrained) {
@@ -174,7 +177,7 @@ func TestIntrospectorRejectsBoundTokenAsBearer(t *testing.T) {
 
 func TestIntrospectorAnyAudience(t *testing.T) {
 	srv := fakeIntrospection(t, map[string]string{"t": introspectionResponse(t, func(m map[string]any) { delete(m, "aud") })})
-	cfg := introspectionConfig(srv.URL)
+	cfg := introspectionConfig(srv)
 	cfg.Audiences, cfg.AnyAudience = nil, true
 	if _, err := newIntrospector(t, cfg).Verify(context.Background(), "t"); err != nil {
 		t.Fatalf("Verify = %v", err)
@@ -190,7 +193,7 @@ func TestIntrospectorServerFailures(t *testing.T) {
 		"duplicate active": `{"active":false,"active":true}`,
 		"too large":        big,
 	})
-	cfg := introspectionConfig(srv.URL)
+	cfg := introspectionConfig(srv)
 	cases := map[string]struct {
 		cfg   IntrospectionConfig
 		token string
@@ -202,7 +205,7 @@ func TestIntrospectorServerFailures(t *testing.T) {
 		"too large":          {cfg, "too large"},
 		"wrong client creds": {func() IntrospectionConfig { c := cfg; c.ClientSecret = "wrong"; return c }(), "good"},
 	}
-	closed := httptest.NewServer(http.NotFoundHandler())
+	closed := httptest.NewTLSServer(http.NotFoundHandler())
 	closed.Close()
 	unreachable := cfg
 	unreachable.Endpoint = closed.URL
@@ -222,13 +225,18 @@ func TestIntrospectorServerFailures(t *testing.T) {
 }
 
 func TestNewIntrospectorRequiresConfig(t *testing.T) {
-	good := introspectionConfig("https://as.example.com/introspect")
+	good := introspectionConfig(httptest.NewUnstartedServer(nil))
+	good.Endpoint = "https://as.example.com/introspect"
 	for name, edit := range map[string]func(*IntrospectionConfig){
 		"no endpoint":       func(c *IntrospectionConfig) { c.Endpoint = "" },
 		"relative endpoint": func(c *IntrospectionConfig) { c.Endpoint = "/introspect" },
 		"no client id":      func(c *IntrospectionConfig) { c.ClientID = "" },
 		"no client secret":  func(c *IntrospectionConfig) { c.ClientSecret = "" },
 		"no audience":       func(c *IntrospectionConfig) { c.Audiences = nil },
+		"http endpoint":     func(c *IntrospectionConfig) { c.Endpoint = "http://as.example.com/introspect" },
+		"issuer required, none set": func(c *IntrospectionConfig) {
+			c.Issuer, c.RequireIssuer = "", true
+		},
 	} {
 		cfg := good
 		edit(&cfg)
@@ -242,7 +250,9 @@ func FuzzIntrospectionResponse(f *testing.F) {
 	f.Add([]byte(`{"active":true,"aud":"api","exp":1780315500,"cnf":{"jkt":"x"}}`))
 	f.Add([]byte(`{"active":false}`))
 	f.Add([]byte(`{"active":true,"aud":["api"],"scope":"a b","nbf":1}`))
-	in, err := NewIntrospector(introspectionConfig("https://as.example.com/introspect"))
+	cfg := introspectionConfig(httptest.NewUnstartedServer(nil))
+	cfg.Endpoint = "https://as.example.com/introspect"
+	in, err := NewIntrospector(cfg)
 	if err != nil {
 		f.Fatal(err)
 	}
@@ -255,4 +265,79 @@ func FuzzIntrospectionResponse(f *testing.F) {
 			t.Fatalf("accepted %s", body)
 		}
 	})
+}
+
+func TestIntrospectorNeverFollowsRedirects(t *testing.T) {
+	p := newProver(t)
+	var evilHits atomic.Int32
+	evil := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		evilHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(introspectionResponse(t, func(m map[string]any) {
+			m["cnf"] = map[string]any{"jkt": p.Thumbprint()}
+		})))
+	}))
+	defer evil.Close()
+	for _, code := range []int{
+		http.StatusMultipleChoices, http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusNotModified, http.StatusUseProxy, http.StatusTemporaryRedirect, http.StatusPermanentRedirect,
+	} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			as := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, evil.URL, code)
+			}))
+			defer as.Close()
+			client := as.Client()
+			cfg := introspectionConfig(as)
+			cfg.HTTPClient = client
+			a, err := NewAuthenticator(newIntrospector(t, cfg), newVerifier(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			proof, err := p.Proof("GET", resourceURL, "tok")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = a.Authenticate(context.Background(), Request{Method: "GET", URL: resourceURL, Proofs: []string{proof}, AccessToken: "tok"})
+			if err == nil || errors.Is(err, authent.ErrUnauthenticated) {
+				t.Fatalf("err = %v, want a server error that is not ErrUnauthenticated", err)
+			}
+			if client.CheckRedirect != nil {
+				t.Fatal("the caller's HTTPClient was modified")
+			}
+		})
+	}
+	if n := evilHits.Load(); n != 0 {
+		t.Fatalf("the redirect target received %d requests", n)
+	}
+}
+
+func TestIntrospectorRequireIssuer(t *testing.T) {
+	srv := fakeIntrospection(t, map[string]string{
+		"no iss":    introspectionResponse(t, func(m map[string]any) { delete(m, "iss") }),
+		"empty iss": introspectionResponse(t, func(m map[string]any) { m["iss"] = "" }),
+		"good":      introspectionResponse(t, nil),
+	})
+	cfg := introspectionConfig(srv)
+	if _, err := newIntrospector(t, cfg).Verify(context.Background(), "no iss"); err != nil {
+		t.Fatalf("missing iss rejected without RequireIssuer: %v", err)
+	}
+	cfg.RequireIssuer = true
+	in := newIntrospector(t, cfg)
+	for _, tok := range []string{"no iss", "empty iss"} {
+		if _, err := in.Verify(context.Background(), tok); !errors.Is(err, ErrInactiveToken) {
+			t.Errorf("%s: err = %v, want ErrInactiveToken", tok, err)
+		}
+	}
+	if _, err := in.Verify(context.Background(), "good"); err != nil {
+		t.Errorf("matching iss rejected: %v", err)
+	}
+}
+
+func TestIntrospectorDefaultClientHasTimeout(t *testing.T) {
+	cfg := introspectionConfig(httptest.NewUnstartedServer(nil))
+	cfg.Endpoint, cfg.HTTPClient = "https://as.example.com/introspect", nil
+	if in := newIntrospector(t, cfg); in.client.Timeout <= 0 || in.client == http.DefaultClient {
+		t.Fatalf("default client = %+v", in.client)
+	}
 }

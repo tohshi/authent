@@ -85,10 +85,14 @@ func newFake(t *testing.T, dialect Dialect, opts ...Option) (*Cache, *fakeDB) {
 }
 
 func TestConformance(t *testing.T) {
-	replaytest.TestReplayCache(t, func(t *testing.T) jwt.ReplayCache {
-		c, _ := newFake(t, PostgreSQL)
-		return c
-	})
+	for _, d := range []Dialect{PostgreSQL, SQLite} {
+		t.Run(d.String(), func(t *testing.T) {
+			replaytest.TestReplayCache(t, func(t *testing.T) jwt.ReplayCache {
+				c, _ := newFake(t, d)
+				return c
+			})
+		})
+	}
 }
 
 func TestAddUsesClockAndMinimumTTL(t *testing.T) {
