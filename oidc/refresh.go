@@ -59,7 +59,7 @@ func (c *Client) Refresh(ctx context.Context, prev *Result) (*Result, error) {
 	if raw == "" {
 		return res, nil
 	}
-	claims, header, err := c.verifier.VerifyWithHeader(ctx, raw)
+	claims, header, err := c.idTokenVerifier.VerifyWithHeader(ctx, raw)
 	if err != nil {
 		return nil, err
 	}
@@ -76,8 +76,6 @@ func (c *Client) Refresh(ctx context.Context, prev *Result) (*Result, error) {
 	return res, nil
 }
 
-// checkRefreshedIDToken applies OpenID Connect Core §12.2: an ID token
-// from a refresh describes the original authentication.
 func checkRefreshedIDToken(prev, next *jwt.Claims) error {
 	mismatch := func(claim string) error {
 		return fmt.Errorf("%w: refreshed %s differs from the original", ErrInvalidIDToken, claim)

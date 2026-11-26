@@ -199,10 +199,10 @@ type Client struct {
 	oauth             oauth2.Config
 	keys              jwt.KeySet
 	idTokenOpts       []jwt.VerifierOption
-	verifier          *jwt.Verifier // ID tokens
-	userinfo          *jwt.Verifier // signed UserInfo responses
-	client            *http.Client  // for the token and PAR endpoints; see tokenEndpointClient
-	base              *http.Client  // Config.HTTPClient
+	idTokenVerifier   *jwt.Verifier
+	userInfoVerifier  *jwt.Verifier
+	client            *http.Client // for the token and PAR endpoints; see tokenEndpointClient
+	base              *http.Client // Config.HTTPClient
 	dpop              *dpop.Prover
 	assertionSigner   *jwt.Signer
 	assertionAudience string
@@ -301,8 +301,8 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 		},
 		keys:              keys,
 		idTokenOpts:       idTokenOpts,
-		verifier:          verifier,
-		userinfo:          userinfo,
+		idTokenVerifier:   verifier,
+		userInfoVerifier:  userinfo,
 		base:              cfg.HTTPClient,
 		dpop:              cfg.DPoP,
 		assertionSigner:   assertionSigner,
@@ -480,7 +480,6 @@ func (c *Client) newAuthRequest(opts []oauth2.AuthCodeOption) (AuthRequest, url.
 	return req, params, nil
 }
 
-// parseMaxAge parses the "max_age" parameter, a number of seconds.
 func parseMaxAge(v []string) (time.Duration, error) {
 	const maxSeconds = int64(math.MaxInt64 / time.Second)
 	if len(v) != 1 || v[0] == "" || strings.Trim(v[0], "0123456789") != "" {
@@ -493,8 +492,6 @@ func parseMaxAge(v []string) (time.Duration, error) {
 	return time.Duration(secs) * time.Second, nil
 }
 
-// authorizationURL returns the authorization endpoint with params added
-// to its query.
 func (c *Client) authorizationURL(params url.Values) (string, error) {
 	u, err := url.Parse(c.provider.AuthorizationEndpoint)
 	if err != nil {
@@ -669,7 +666,7 @@ func (c *Client) Exchange(ctx context.Context, req AuthRequest, state, code stri
 	if raw == "" {
 		return nil, fmt.Errorf("%w: missing id_token", ErrInvalidIDToken)
 	}
-	verifier := c.verifier
+	verifier := c.idTokenVerifier
 	if req.MaxAge != nil {
 		opts := append(slices.Clip(c.idTokenOpts), jwt.WithMaxAuthAge(*req.MaxAge))
 		if verifier, err = jwt.NewVerifier(c.keys, opts...); err != nil {
@@ -730,8 +727,8 @@ func (c *Client) HTTPClient(ctx context.Context, tok *oauth2.Token) *http.Client
 	return &hc
 }
 
-// checkIDToken applies the checks of OpenID Connect Core §3.1.3.7 that
-// go beyond generic JWT validation and do not depend on the request.
+// checkIDToken checks "azp" and "at_hash", which generic JWT validation
+// does not.
 func (c *Client) checkIDToken(claims *jwt.Claims, header jwt.Header, accessToken string) error {
 	azp, hasAzp := claims.Extra["azp"].(string)
 	if len(claims.Audience) > 1 && !hasAzp {

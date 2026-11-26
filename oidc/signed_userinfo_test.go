@@ -67,10 +67,10 @@ func TestSignedUserInfoRejections(t *testing.T) {
 	}
 	type tc struct {
 		name    string
-		signer  *jwt.Signer // nil: the provider's key
+		signer  *jwt.Signer
 		mutate  func(*jwt.Claims)
-		raw     string // served instead of a signed token
-		wantJWT error  // nil: only ErrInvalidUserInfo is asserted
+		raw     string
+		wantJWT error
 	}
 	for _, tc := range []tc{
 		{name: "wrong issuer", mutate: func(c *jwt.Claims) { c.Issuer = "https://evil.example" }, wantJWT: jwt.ErrInvalidIssuer},

@@ -91,7 +91,7 @@ func TestRefresh(t *testing.T) {
 			if p.assertionVerifier != nil {
 				want := 1
 				if tc.dpop {
-					want = 2 // the nonce retry carries a fresh assertion
+					want = 2
 				}
 				if got := p.assertionCount() - assertions; got != want {
 					t.Fatalf("%d client assertions accepted at refresh, want %d", got, want)
@@ -153,11 +153,10 @@ func TestRefreshedIDTokenChecks(t *testing.T) {
 	}
 	authTime := now.Add(-time.Hour).Unix()
 	for _, tc := range []struct {
-		name     string
-		original func(*jwt.Claims)
-		refresh  func(*jwt.Claims)
-		want     error // nil: accepted
-		// copyNonce gives the refreshed ID token the original's nonce.
+		name      string
+		original  func(*jwt.Claims)
+		refresh   func(*jwt.Claims)
+		want      error // nil: accepted
 		copyNonce bool
 	}{
 		{name: "nonce of the original", copyNonce: true},
@@ -250,8 +249,6 @@ func TestRefreshDPoP(t *testing.T) {
 		t.Fatalf("refresh token used with another key: err = %v", err)
 	}
 
-	// A provider that ignores the proof issues a Bearer token, which a
-	// DPoP client must not accept.
 	plain := newClient(t, p)
 	bearer := login(t, p, plain)
 	p.bearerOnly = true

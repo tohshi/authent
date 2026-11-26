@@ -119,7 +119,6 @@ func (c *Client) UserInfo(ctx context.Context, token *oauth2.Token, subject stri
 	return c.parseUserInfo(ctx, mediaType, body, subject)
 }
 
-// parseUserInfo checks a UserInfo response body of the given media type.
 func (c *Client) parseUserInfo(ctx context.Context, mediaType string, body []byte, subject string) (*UserInfo, error) {
 	var claims map[string]any
 	switch mediaType {
@@ -131,7 +130,7 @@ func (c *Client) parseUserInfo(ctx context.Context, mediaType string, body []byt
 			return nil, fmt.Errorf("%w: not a JSON object", ErrInvalidUserInfo)
 		}
 	case "application/jwt":
-		verified, err := c.userinfo.Verify(ctx, strings.TrimSpace(string(body)))
+		verified, err := c.userInfoVerifier.Verify(ctx, strings.TrimSpace(string(body)))
 		if errors.Is(err, jwt.ErrInvalidToken) {
 			return nil, fmt.Errorf("%w: %w", ErrInvalidUserInfo, err)
 		}

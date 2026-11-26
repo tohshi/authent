@@ -48,9 +48,8 @@ type fakeProvider struct {
 	issuer      string // advertised issuer; defaults to the server URL
 	// userinfoEndpoint overrides the advertised userinfo_endpoint; "-"
 	// omits it.
-	userinfoEndpoint string
-	accessTokens     map[string]bool // issued access tokens
-	// Refresh tokens (OpenID Connect Core §12).
+	userinfoEndpoint   string
+	accessTokens       map[string]bool // issued access tokens
 	refreshTokens      map[string]grant
 	rotateRefresh      bool
 	mutateRefresh      func(c *jwt.Claims)

@@ -168,8 +168,8 @@ func NewVerifier(keys KeySet, opts ...VerifierOption) (*Verifier, error) {
 // Rejections wrap ErrInvalidToken. Errors from the KeySet or the
 // ReplayCache, such as network failures, are returned as is.
 //
-// "exp" is required unless WithOptionalExpiration is set. Tokens with a "cnf" claim are rejected unless
-// WithConfirmationClaim is set.
+// "exp" is required unless WithOptionalExpiration is set. Tokens with a
+// "cnf" claim are rejected unless WithConfirmationClaim is set.
 func (v *Verifier) Verify(ctx context.Context, token string) (*Claims, error) {
 	claims, _, err := v.VerifyWithHeader(ctx, token)
 	return claims, err
