@@ -74,6 +74,8 @@ type Provider struct {
 	RequirePushedAuthorizationRequests bool   `json:"require_pushed_authorization_requests,omitempty"`
 	// RFC 9449 §5.1.
 	DPoPSigningAlgValuesSupported []string `json:"dpop_signing_alg_values_supported,omitempty"`
+	// OpenID Connect RP-Initiated Logout 1.0 §2.1.
+	EndSessionEndpoint string `json:"end_session_endpoint,omitempty"`
 }
 
 // Discover fetches the provider metadata for issuer. The issuer in the
@@ -133,6 +135,9 @@ func (p *Provider) validate() error {
 	if p.UserinfoEndpoint != "" {
 		errs = append(errs, requireHTTPS("userinfo_endpoint", p.UserinfoEndpoint))
 	}
+	if p.EndSessionEndpoint != "" {
+		errs = append(errs, requireHTTPS("end_session_endpoint", p.EndSessionEndpoint))
+	}
 	if p.PushedAuthorizationRequestEndpoint != "" || p.RequirePushedAuthorizationRequests {
 		errs = append(errs, requireHTTPS("pushed_authorization_request_endpoint", p.PushedAuthorizationRequestEndpoint))
 	}
@@ -177,6 +182,11 @@ type Config struct {
 	// DPoP-bound access token. Use HTTPClient to call resource servers
 	// with the token.
 	DPoP *dpop.Prover
+	// ReplayCache records the "jti" of back-channel logout tokens, so that
+	// each is accepted once. The default is an in-memory cache, which
+	// suits a single server; behind a load balancer, use a shared one such
+	// as jwt/sqlreplay.
+	ReplayCache jwt.ReplayCache
 	// Leeway tolerates clock skew when validating ID tokens. The default
 	// is 1 minute.
 	Leeway time.Duration
@@ -201,6 +211,7 @@ type Client struct {
 	idTokenOpts       []jwt.VerifierOption
 	idTokenVerifier   *jwt.Verifier
 	userInfoVerifier  *jwt.Verifier
+	logoutVerifier    *jwt.Verifier
 	client            *http.Client // for the token and PAR endpoints; see tokenEndpointClient
 	base              *http.Client // Config.HTTPClient
 	dpop              *dpop.Prover
@@ -279,6 +290,15 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	if cfg.ReplayCache == nil {
+		cfg.ReplayCache = jwt.NewMemoryReplayCache()
+	}
+	logout, err := jwt.NewVerifier(keys, append(slices.Clip(idTokenOpts),
+		jwt.WithExpectedType(logoutTokenType), jwt.WithMaxTokenAge(maxLogoutTokenAge),
+		jwt.WithReplayCache(cfg.ReplayCache))...)
+	if err != nil {
+		return nil, err
+	}
 	scopes := append([]string{"openid"}, slices.DeleteFunc(slices.Clone(cfg.Scopes), func(s string) bool { return s == "openid" })...)
 	authStyle := cfg.AuthStyle
 	if assertionSigner != nil {
@@ -303,6 +323,7 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 		idTokenOpts:       idTokenOpts,
 		idTokenVerifier:   verifier,
 		userInfoVerifier:  userinfo,
+		logoutVerifier:    logout,
 		base:              cfg.HTTPClient,
 		dpop:              cfg.DPoP,
 		assertionSigner:   assertionSigner,

@@ -93,7 +93,7 @@ Legend:
 | Calling APIs with the access token (`HTTPClient`) | ✅ | Bearer, or DPoP when configured |
 | `max_age`, `auth_time` and `acr` enforcement | ✅ | `max_age` and `acr_values` sent with the request are kept in `AuthRequest`; `Exchange` then requires a recent enough `auth_time` and an `acr` from the requested values |
 | `private_key_jwt` client authentication | ✅ | Asymmetric JWT assertion on each code exchange; issuer audience per RFC 10070 |
-| RP-initiated, front-channel and back-channel logout | ⬜ | |
+| RP-initiated, front-channel and back-channel logout | ✅ | `EndSessionURL` with `id_token_hint`, `post_logout_redirect_uri` and `state`; `FrontChannelLogout` requires `iss` and `sid`; `BackChannelLogout` checks `typ` `logout+jwt`, the event, `sub` or `sid`, no `nonce`, a fresh `iat` and a single-use `jti`. Both return a `Logout` that `Matches` the ID tokens of the ended sessions |
 | Pushed authorization requests (RFC 9126) | ✅ | `PushAuthCodeURL`; honors `require_pushed_authorization_requests`; client secret or `private_key_jwt` |
 | JWT-secured authorization requests (JAR, RFC 9101) | ⬜ | |
 | DPoP-bound tokens (RFC 9449) | ✅ | `dpop_jkt` or a proof on the pushed request; `Exchange` rejects a Bearer downgrade |

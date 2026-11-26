@@ -38,7 +38,8 @@ type grant struct {
 // fakeProvider is a minimal OpenID Provider.
 type fakeProvider struct {
 	*httptest.Server
-	signer *jwt.Signer
+	signer    *jwt.Signer
+	signerKey *ecdsa.PrivateKey
 
 	mu     sync.Mutex
 	grants map[string]grant // code -> grant
@@ -87,7 +88,7 @@ func newFakeProvider(t testing.TB) *fakeProvider {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &fakeProvider{signer: signer, grants: map[string]grant{}, accessTokens: map[string]bool{}, refreshTokens: map[string]grant{},
+	p := &fakeProvider{signer: signer, signerKey: key, grants: map[string]grant{}, accessTokens: map[string]bool{}, refreshTokens: map[string]grant{},
 		pushed: map[string]url.Values{}, proofs: proofs}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +114,7 @@ func newFakeProvider(t testing.TB) *fakeProvider {
 			TokenEndpointAuthSigningAlgValuesSupported: p.authAlgs,
 			RequirePushedAuthorizationRequests:         p.requirePAR,
 			DPoPSigningAlgValuesSupported:              p.dpopAlgs,
+			EndSessionEndpoint:                         p.URL + "/end_session?tenant=t1",
 		}
 		if p.par || p.requirePAR {
 			meta.PushedAuthorizationRequestEndpoint = p.URL + "/par"
