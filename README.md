@@ -784,7 +784,12 @@ ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("us
   through an allowed type such as `"user with office"`.
 - A tuple stores values for some parameters as a JSON object, which
   `Write` checks against the parameter types and stores in canonical
-  form. `WithContext` supplies the others; stored values win, so a request
+  form. Each value must be a JSON value of its type, never `null`: an int
+  is a number without fraction or exponent, a duration is a string as
+  `time.Duration.String` formats it (`"1h30m0s"`), and a timestamp is an
+  RFC 3339 string in UTC as `time.RFC3339Nano` formats it. Stored values
+  are read with the same rules, so a value that bypassed `Write` fails the
+  check. `WithContext` supplies the others; stored values win, so a request
   cannot override them.
 - A check that needs a parameter nobody supplied is conditional: it
   returns `false` with a `*MissingContextError` that names the parameters

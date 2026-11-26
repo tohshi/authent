@@ -5,14 +5,15 @@ import (
 	"errors"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
 
-// caveatEngine's caveat flag holds when its bool parameter v is true, and
-// office when ip is in one of cidrs. On doc, t is granted to bob, f is not,
+// caveatEngine's caveat flag holds when its bool parameter v is true,
+// active when suspended is false, and office when ip is in one of cidrs. On doc, t is granted to bob, f is not,
 // and c is granted only through flag.
-func caveatEngine(t *testing.T, tuples ...string) *Engine {
+func caveatEngine(t testing.TB, tuples ...string) *Engine {
 	t.Helper()
 	office := func(args map[string]any) (bool, error) {
 		ip, err := netip.ParseAddr(args["ip"].(string))
@@ -34,6 +35,10 @@ func caveatEngine(t *testing.T, tuples ...string) *Engine {
 		Caveat("flag", func(args map[string]any) (bool, error) { return args["v"].(bool), nil }, Param{"v", ParamBool}),
 		Caveat("other", func(args map[string]any) (bool, error) { return args["w"].(bool), nil }, Param{"w", ParamBool}),
 		Caveat("office", office, Param{"cidrs", ParamStringList}, Param{"ip", ParamString}),
+		Caveat("active", func(args map[string]any) (bool, error) { return !args["suspended"].(bool), nil }, Param{"suspended", ParamBool}),
+		Caveat("quota", func(args map[string]any) (bool, error) {
+			return args["n"].(int64) < 10 && args["d"].(time.Duration) < time.Hour, nil
+		}, Param{"d", ParamDuration}, Param{"n", ParamInt}),
 		Caveat("boom", func(map[string]any) (bool, error) { panic("boom") }),
 		Caveat("until", func(args map[string]any) (bool, error) {
 			return args["now"].(time.Time).Before(args["deadline"].(time.Time)), nil
@@ -48,6 +53,8 @@ func caveatEngine(t *testing.T, tuples ...string) *Engine {
 			Relation("parent", Direct("folder with flag")),
 			Relation("net", Direct("user with office")),
 			Relation("panics", Direct("user with boom")),
+			Relation("active", Direct("user with active")),
+			Relation("quota", Direct("user with quota")),
 			Relation("deadline", Direct("user with until")),
 			Relation("union_tc", Union(Computed("t"), Computed("c"))),
 			Relation("union_fc", Union(Computed("f"), Computed("c"))),
@@ -188,12 +195,44 @@ func TestCaveatWriteValidation(t *testing.T) {
 		{`doc:d#c@user:bob[flag:{"v":true,"v":false}]`, ErrInvalidTuple},
 		{`doc:d#deadline@user:bob[until:{"deadline":"tomorrow"}]`, ErrInvalidTuple},
 		{`doc:d#net@user:bob[office:{"cidrs":null}]`, ErrInvalidTuple},
+		// Every value must be a JSON value of its parameter's type, and
+		// null is a value of none of them.
+		{`doc:d#active@user:bob[active:{"suspended":null}]`, ErrInvalidTuple},
+		{`doc:d#active@user:bob[active:{"suspended":"false"}]`, ErrInvalidTuple},
+		{`doc:d#active@user:bob[active:{"suspended":0}]`, ErrInvalidTuple},
+		{`doc:d#quota@user:bob[quota:{"n":"3"}]`, ErrInvalidTuple},
+		{`doc:d#quota@user:bob[quota:{"n":null}]`, ErrInvalidTuple},
+		{`doc:d#quota@user:bob[quota:{"n":true}]`, ErrInvalidTuple},
+		{`doc:d#quota@user:bob[quota:{"n":3.0}]`, ErrInvalidTuple},
+		{`doc:d#quota@user:bob[quota:{"n":3e0}]`, ErrInvalidTuple},
+		{`doc:d#quota@user:bob[quota:{"n":9223372036854775808}]`, ErrInvalidTuple},
+		{`doc:d#quota@user:bob[quota:{"n":[3]}]`, ErrInvalidTuple},
+		{`doc:d#net@user:bob[office:{"ip":null}]`, ErrInvalidTuple},
+		{`doc:d#net@user:bob[office:{"ip":10}]`, ErrInvalidTuple},
+		{`doc:d#net@user:bob[office:{"ip":["10.0.0.1"]}]`, ErrInvalidTuple},
+		{"doc:d#net@user:bob[office:{\"ip\":\"\xff\"}]", ErrInvalidTuple},
+		{`doc:d#net@user:bob[office:{"cidrs":[null]}]`, ErrInvalidTuple},
+		{`doc:d#net@user:bob[office:{"cidrs":[1]}]`, ErrInvalidTuple},
+		{`doc:d#net@user:bob[office:{"cidrs":[["10.0.0.0/8"]]}]`, ErrInvalidTuple},
+		{`doc:d#net@user:bob[office:{"cidrs":"10.0.0.0/8"}]`, ErrInvalidTuple},
+		// Durations and timestamps have one form each.
+		{`doc:d#quota@user:bob[quota:{"d":null}]`, ErrInvalidTuple},
+		{`doc:d#quota@user:bob[quota:{"d":3600}]`, ErrInvalidTuple},
+		{`doc:d#quota@user:bob[quota:{"d":"1h"}]`, ErrInvalidTuple},
+		{`doc:d#quota@user:bob[quota:{"d":"60m0s"}]`, ErrInvalidTuple},
+		{`doc:d#deadline@user:bob[until:{"deadline":null}]`, ErrInvalidTuple},
+		{`doc:d#deadline@user:bob[until:{"deadline":"2030-01-01T00:00:00+00:00"}]`, ErrInvalidTuple},
+		{`doc:d#deadline@user:bob[until:{"deadline":"2030-01-01T09:00:00+09:00"}]`, ErrInvalidTuple},
+		{`doc:d#deadline@user:bob[until:{"deadline":"2030-01-01T00:00:00.500000000Z"}]`, ErrInvalidTuple},
+		{`doc:d#quota@user:bob[quota:{"d":"1h30m0s","n":-3}]`, nil},
+		{`doc:d#deadline@user:bob[until:{"deadline":"2030-01-01T00:00:00.5Z"}]`, nil},
+		{`doc:d#net@user:bob[office:{"cidrs":[],"ip":"10.0.0.1"}]`, nil},
 	} {
 		tp, err := ParseTuple(tc.tuple)
 		if err == nil {
 			_, err = e.Write(ctx, []Tuple{tp}, nil)
 		}
-		if !errors.Is(err, tc.want) {
+		if !errors.Is(err, tc.want) || tc.want == nil && err != nil {
 			t.Errorf("Write(%s) = %v, want %v", tc.tuple, err, tc.want)
 		}
 	}
@@ -210,6 +249,74 @@ func TestCaveatWriteValidation(t *testing.T) {
 	want := TupleCaveat{"office", `{"cidrs":["10.0.0.0/8"],"ip":"10.0.0.1"}`}
 	if len(set.Children) != 1 || set.Children[0].Caveat != want {
 		t.Fatalf("Expand = %+v, want a leaf with caveat %v", set, want)
+	}
+}
+
+// A stored value of the wrong type, written to the store without Write's
+// checks, fails the check closed: it neither grants nor falls back to the
+// request's value.
+func TestCaveatTamperedStoredContext(t *testing.T) {
+	e := caveatEngine(t)
+	ctx := context.Background()
+	request := WithContext(map[string]any{"suspended": false, "n": 1, "d": time.Minute, "cidrs": []string{"10.0.0.0/8"}})
+	for _, tc := range []struct{ rel, caveat, context string }{
+		{"active", "active", `{"suspended":null}`},
+		{"active", "active", `{"suspended":"false"}`},
+		{"quota", "quota", `{"d":"1m0s","n":"3"}`},
+		{"quota", "quota", `{"d":"1m","n":3}`},
+		{"net", "office", `{"cidrs":[null],"ip":"10.0.0.1"}`},
+	} {
+		tp := Tuple{Object: Obj("doc", "d"), Relation: tc.rel, Subject: Sub("user", "bob"), Caveat: TupleCaveat{tc.caveat, tc.context}}
+		if _, err := e.store.Write(ctx, []Tuple{tp}, nil); err != nil {
+			t.Fatal(err)
+		}
+		for _, opts := range [][]QueryOption{nil, {request}} {
+			ok, err := e.Check(ctx, Obj("doc", "d"), tc.rel, Sub("user", "bob"), opts...)
+			if ok || err == nil || errors.Is(err, ErrMissingContext) {
+				t.Errorf("Check with stored %s (%d options) = %v, %v; want an error", tc.context, len(opts), ok, err)
+			}
+		}
+	}
+}
+
+// The canonical context, not only the written one, fits the stored
+// context limit, so a stored tuple always formats and parses again.
+func TestCaveatContextLength(t *testing.T) {
+	e := caveatEngine(t)
+	ctx := context.Background()
+	context := func(ip string) string { return `{"ip":"` + ip + `"}` }
+	pad := strings.Repeat("<", maxContextLength-len(context("")))
+	for _, tc := range []struct {
+		context string
+		ok      bool
+	}{
+		{context(pad), true},
+		{context(pad + "<"), false},
+		{context(strings.Repeat(`\u003c`, len(pad)/6)), true},
+		// U+2028 is three bytes as written and six, escaped, in canonical
+		// form.
+		{context(strings.Repeat("\u2028", 1000)), false},
+	} {
+		tp := Tuple{Object: Obj("doc", "d"), Relation: "net", Subject: Sub("user", "bob"), Caveat: TupleCaveat{"office", tc.context}}
+		_, err := e.Write(ctx, []Tuple{tp}, nil)
+		if !tc.ok {
+			if !errors.Is(err, ErrInvalidTuple) {
+				t.Errorf("Write of a %d-byte context = %v, want ErrInvalidTuple", len(tc.context), err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("Write of a %d-byte context: %v", len(tc.context), err)
+		}
+		set, err := e.Expand(ctx, Obj("doc", "d"), "net")
+		if err != nil || len(set.Children) != 1 {
+			t.Fatalf("Expand = %+v, %v", set, err)
+		}
+		stored := tp
+		stored.Caveat = set.Children[0].Caveat
+		if again, err := ParseTuple(stored.String()); err != nil || again != stored {
+			t.Errorf("stored tuple with a %d-byte context does not parse again: %v", len(stored.Caveat.Context), err)
+		}
 	}
 }
 
@@ -301,6 +408,30 @@ func FuzzParseTuple(f *testing.F) {
 		again, err := ParseTuple(tp.String())
 		if err != nil || again != tp {
 			t.Fatalf("ParseTuple(%q) = %#v, which formats as %q and parses as %#v, %v", s, tp, tp.String(), again, err)
+		}
+	})
+}
+
+// Every context the caveats accept has one canonical form, which they
+// accept unchanged and which fits the stored context limit.
+func FuzzCaveatContext(f *testing.F) {
+	for _, s := range []string{
+		`{"cidrs":["10.0.0.0/8"],"ip":"10.0.0.1"}`, `{"d":"1h30m0s","n":-3}`, `{"suspended":null}`,
+		`{"deadline":"2030-01-01T00:00:00.5Z"}`, `{"n":"3"}`, `{"cidrs":[null]}`, "{\"ip\":\"< \"}",
+	} {
+		f.Add(s)
+	}
+	caveats := caveatEngine(f).schema.caveats
+	f.Fuzz(func(t *testing.T, context string) {
+		for name, def := range caveats {
+			c, err := def.canonical(context)
+			if err != nil {
+				continue
+			}
+			again, err := def.canonical(c)
+			if err != nil || again != c || len(c) > maxContextLength {
+				t.Fatalf("%s: canonical(%q) = %q, whose canonical form is %q, %v", name, context, c, again, err)
+			}
 		}
 	})
 }

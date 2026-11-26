@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ParamType is the type of a caveat parameter.
@@ -22,10 +23,12 @@ const (
 	ParamInt
 	// ParamBool values are bools.
 	ParamBool
-	// ParamTimestamp values are time.Time, stored as RFC 3339 strings.
+	// ParamTimestamp values are time.Time, stored as RFC 3339 strings in
+	// UTC as time.RFC3339Nano formats them, such as
+	// "2030-01-01T00:00:00.5Z".
 	ParamTimestamp
-	// ParamDuration values are time.Duration, stored as strings such as
-	// "1h30m".
+	// ParamDuration values are time.Duration, stored as strings as
+	// time.Duration.String formats them, such as "1h30m0s".
 	ParamDuration
 	// ParamStringList values are []string.
 	ParamStringList
@@ -104,8 +107,9 @@ func (c *CaveatDef) validate() error {
 	return nil
 }
 
-// decode parses a stored context into typed values. Every key must be a
-// parameter of the caveat.
+// decode parses a context, as written or as stored, into typed values.
+// Every key must be a parameter of the caveat and every value a JSON value
+// of its type, in the one form canonical writes.
 func (c *CaveatDef) decode(context string) (map[string]any, error) {
 	out := map[string]any{}
 	if context == "" {
@@ -128,7 +132,8 @@ func (c *CaveatDef) decode(context string) (map[string]any, error) {
 }
 
 // canonical returns context in canonical form: compact, with sorted keys
-// and values in the form decode reads.
+// and no escaping beyond what JSON requires. Only that form is bounded by
+// maxContextLength, since escaping can make it longer than the input.
 func (c *CaveatDef) canonical(context string) (string, error) {
 	vals, err := c.decode(context)
 	if err != nil || len(vals) == 0 {
@@ -145,13 +150,25 @@ func (c *CaveatDef) canonical(context string) (string, error) {
 			enc[k] = v
 		}
 	}
-	b, err := json.Marshal(enc)
-	return string(b), err
+	var b strings.Builder
+	je := json.NewEncoder(&b)
+	je.SetEscapeHTML(false)
+	if err := je.Encode(enc); err != nil {
+		return "", err
+	}
+	out := strings.TrimSuffix(b.String(), "\n")
+	if len(out) > maxContextLength {
+		return "", fmt.Errorf("canonical form is %d bytes, longer than %d", len(out), maxContextLength)
+	}
+	return out, nil
 }
 
 // parseObject parses a JSON object, rejecting duplicate keys and trailing
 // data, so that a context has exactly one meaning.
 func parseObject(s string) (map[string]json.RawMessage, error) {
+	if !utf8.ValidString(s) {
+		return nil, errors.New("not valid UTF-8")
+	}
 	dec := json.NewDecoder(strings.NewReader(s))
 	dec.UseNumber()
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
@@ -182,42 +199,88 @@ func parseObject(s string) (map[string]json.RawMessage, error) {
 	return out, nil
 }
 
+// decodeValue parses raw, a single JSON value, as typ. It reads JSON
+// tokens rather than unmarshaling into a Go value, because unmarshaling
+// coerces: null into false or "", and a quoted number into a json.Number.
 func decodeValue(typ ParamType, raw json.RawMessage) (any, error) {
-	var s string
-	switch typ {
-	case ParamInt:
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.UseNumber()
-		var n json.Number
-		if err := dec.Decode(&n); err != nil {
-			return nil, err
-		}
-		return strconv.ParseInt(string(n), 10, 64)
-	case ParamBool:
-		var b bool
-		err := json.Unmarshal(raw, &b)
-		return b, err
-	case ParamStringList:
-		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-			return nil, errors.New("null is not a list")
-		}
-		var l []string
-		err := json.Unmarshal(raw, &l)
-		return l, err
-	}
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, errors.New("null is not a string")
-	}
-	if err := json.Unmarshal(raw, &s); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	tok, err := dec.Token()
+	if err != nil {
 		return nil, err
 	}
-	switch typ {
-	case ParamTimestamp:
-		return time.Parse(time.RFC3339Nano, s)
-	case ParamDuration:
-		return time.ParseDuration(s)
+	if typ != ParamStringList {
+		return decodeScalar(typ, tok)
 	}
-	return s, nil
+	if tok != json.Delim('[') {
+		return nil, fmt.Errorf("want %v, got %s", typ, tokenKind(tok))
+	}
+	l := []string{}
+	for dec.More() {
+		if tok, err = dec.Token(); err != nil {
+			return nil, err
+		}
+		s, ok := tok.(string)
+		if !ok {
+			return nil, fmt.Errorf("want %v, got an element of %s", typ, tokenKind(tok))
+		}
+		l = append(l, s)
+	}
+	return l, nil
+}
+
+func decodeScalar(typ ParamType, tok json.Token) (any, error) {
+	switch v := tok.(type) {
+	case bool:
+		if typ == ParamBool {
+			return v, nil
+		}
+	case json.Number:
+		if typ == ParamInt {
+			return strconv.ParseInt(string(v), 10, 64)
+		}
+	case string:
+		switch typ {
+		case ParamString:
+			return v, nil
+		case ParamTimestamp:
+			t, err := time.Parse(time.RFC3339Nano, v)
+			if err != nil {
+				return nil, err
+			}
+			if c := t.UTC().Format(time.RFC3339Nano); c != v {
+				return nil, fmt.Errorf("timestamp %q is not in canonical form %q", v, c)
+			}
+			return t.UTC(), nil
+		case ParamDuration:
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return nil, err
+			}
+			if c := d.String(); c != v {
+				return nil, fmt.Errorf("duration %q is not in canonical form %q", v, c)
+			}
+			return d, nil
+		}
+	}
+	return nil, fmt.Errorf("want %v, got %s", typ, tokenKind(tok))
+}
+
+func tokenKind(tok json.Token) string {
+	switch tok.(type) {
+	case nil:
+		return "null"
+	case bool:
+		return "a bool"
+	case json.Number:
+		return "a number"
+	case string:
+		return "a string"
+	}
+	if tok == json.Delim('[') {
+		return "an array"
+	}
+	return "an object"
 }
 
 // checkValue returns v, a value passed with WithContext, as the Go type of
