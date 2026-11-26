@@ -34,8 +34,6 @@ func TestMemoryReplayCacheExpiry(t *testing.T) {
 	}
 }
 
-// recordingCache wraps a MemoryReplayCache and records each TTL it is
-// given.
 type recordingCache struct {
 	*MemoryReplayCache
 	mu   sync.Mutex
@@ -71,9 +69,7 @@ func TestReplayCacheRejectsReplays(t *testing.T) {
 	if !errors.Is(err, ErrReplayed) || !errors.Is(err, authent.ErrUnauthenticated) {
 		t.Fatalf("replay: err = %v", err)
 	}
-	// The entry lives until exp plus the leeway, when the token stops
-	// being accepted anyway.
-	if want := time.Hour + 30*time.Second; len(cache.ttls) == 0 || cache.ttls[0] != want {
+	if want := validClaims().ExpiresAt.Add(30 * time.Second).Sub(testNow); len(cache.ttls) == 0 || cache.ttls[0] != want {
 		t.Fatalf("ttl = %v, want %v", cache.ttls, want)
 	}
 }
@@ -104,8 +100,6 @@ func TestReplayCacheScopesJTIByIssuer(t *testing.T) {
 	}
 }
 
-// A token that fails any other check must not burn its jti: the valid
-// token with the same jti is still accepted afterwards.
 func TestReplayRecordedOnlyAfterAllChecks(t *testing.T) {
 	ctx := context.Background()
 	signer := ecSigner(t, "k")

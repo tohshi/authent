@@ -86,8 +86,6 @@ type rawJWK struct {
 	Y      string   `json:"y,omitempty"`
 	X5C    []string `json:"x5c,omitempty"`
 
-	// Private or symmetric key material (RFC 7518 §6.2.2, §6.3.2, §6.4,
-	// RFC 8037 §2). Only ParsePrivateJWK accepts it.
 	D   jsontext.Value `json:"d,omitzero"`
 	P   jsontext.Value `json:"p,omitzero"`
 	Q   jsontext.Value `json:"q,omitzero"`
@@ -105,9 +103,8 @@ func (r rawJWK) hasPrivate() bool {
 
 var errUnsupportedKey = errors.New("jwt: unsupported key type")
 
-// ParseJWK parses a single public JWK. Keys containing any private or
-// symmetric key member are rejected, so a private key never ends up being
-// used, logged or republished as a public one.
+// ParseJWK parses a single public JWK. Keys with any private or symmetric
+// key member are rejected.
 func ParseJWK(data []byte) (JWK, error) {
 	var r rawJWK
 	if err := json.Unmarshal(data, &r); err != nil {
@@ -123,7 +120,6 @@ func (r rawJWK) toJWK() (JWK, error) {
 	return r.publicJWK()
 }
 
-// publicJWK parses the public members of r, ignoring private ones.
 func (r rawJWK) publicJWK() (JWK, error) {
 	k := JWK{KeyID: r.Kid, Algorithm: Algorithm(r.Alg), Use: r.Use, KeyOps: r.KeyOps}
 	if k.Algorithm != "" {
@@ -158,8 +154,6 @@ func (r rawJWK) publicJWK() (JWK, error) {
 	return k, nil
 }
 
-// parseX5C parses an "x5c" chain and checks that its leaf certifies key
-// (RFC 7517 §4.7).
 func parseX5C(chain []string, key any) ([]*x509.Certificate, error) {
 	var certs []*x509.Certificate
 	for _, s := range chain {
@@ -183,8 +177,6 @@ func parseX5C(chain []string, key any) ([]*x509.Certificate, error) {
 	return certs, nil
 }
 
-// verifyChain checks that k's x5c chain leads to roots at time now and
-// that the leaf may make digital signatures.
 func (k JWK) verifyChain(roots *x509.CertPool, now time.Time) error {
 	if len(k.Certificates) == 0 {
 		return errors.New("no x5c certificate chain")
@@ -287,12 +279,9 @@ type PrivateJWK struct {
 }
 
 // ParsePrivateJWK parses a private RSA, EC (P-256, P-384, P-521) or OKP
-// (Ed25519) JWK. The private key must match the public members: RSA keys
-// need all CRT parameters, which are validated, EC keys need a scalar in
-// range for the curve, and the Ed25519 seed must produce "x". A "use"
-// other than "sig", or "key_ops" without "sign", is rejected, as are
-// symmetric and multi-prime RSA keys.
-//
+// (Ed25519) JWK. The private key must match the public members, and RSA
+// keys need all CRT parameters. A "use" other than "sig", "key_ops"
+// without "sign", symmetric keys and multi-prime RSA keys are rejected.
 // Private keys cannot be marshaled back to JSON.
 func ParsePrivateJWK(data []byte) (PrivateJWK, error) {
 	var r rawJWK
@@ -330,7 +319,6 @@ func ParsePrivateJWK(data []byte) (PrivateJWK, error) {
 	return PrivateJWK{KeyID: pub.KeyID, Algorithm: pub.Algorithm, Key: priv}, nil
 }
 
-// privateParam decodes a base64url private key member.
 func privateParam(v jsontext.Value) ([]byte, error) {
 	var s string
 	if err := json.Unmarshal(v, &s); err != nil {

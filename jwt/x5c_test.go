@@ -59,7 +59,6 @@ func newPKI(t *testing.T) testPKI {
 	return testPKI{root: root, inter: inter, interKey: interKey, roots: roots}
 }
 
-// leaf issues a signing certificate for pub; edit adjusts the template.
 func (p testPKI) leaf(t *testing.T, pub any, edit func(*x509.Certificate)) *x509.Certificate {
 	t.Helper()
 	tmpl := &x509.Certificate{
@@ -131,8 +130,6 @@ func TestCertificateRoots(t *testing.T) {
 	}
 }
 
-// A chain in the token's own x5c header must not make an unknown key
-// trusted, even if it leads to the configured roots.
 func TestX5CHeaderNeverUsed(t *testing.T) {
 	pki := newPKI(t)
 	trusted := reparse(t, JWK{KeyID: "k", Key: &p256Key.PublicKey,

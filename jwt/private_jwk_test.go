@@ -96,7 +96,6 @@ func TestParsePrivateJWKRFC7517EC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The token must verify with the public members of the same JWK.
 	pub := mustParseJWK(t, withoutMembers(t, rfc7517ECKey, "d"))
 	if _, err := newVerifier(t, NewStaticKeySet(pub)).Verify(context.Background(), tok); err != nil {
 		t.Fatal(err)
@@ -182,8 +181,6 @@ func TestParsePrivateJWKRejections(t *testing.T) {
 	}
 }
 
-// Private material must never be accepted where a public key is
-// expected: ParseJWK rejects it and ParseJWKSet drops the key.
 func TestPublicParsersRejectPrivateMembers(t *testing.T) {
 	public := withoutMembers(t, rfc8037Ed25519Key, "d")
 	inputs := map[string]string{

@@ -56,12 +56,9 @@ func hasKeyID(keys []JWK, kid string) bool {
 
 // RemoteKeySet fetches a JWK Set over HTTPS and caches it.
 //
-// The set is refreshed when it is no longer fresh, or when a token names
-// a kid that is not cached (key rotation), but at most once per minimum
-// refresh interval. A fetched set stays fresh for the max-age of the
-// response's Cache-Control header, clamped between the minimum and maximum
-// refresh intervals; no-store and no-cache make it fresh for the minimum
-// interval only, and without max-age the refresh interval applies. If a
+// The set is refreshed when it is no longer fresh (see
+// WithMaxRefreshInterval), or when a token names a kid that is not cached
+// (key rotation), but at most once per minimum refresh interval. If a
 // refresh fails while cached keys exist, the cached keys keep being used.
 type RemoteKeySet struct {
 	url             string
@@ -76,9 +73,9 @@ type RemoteKeySet struct {
 
 	mu        sync.RWMutex
 	keys      []JWK
-	fetchedAt time.Time     // zero until the first successful fetch
-	freshFor  time.Duration // freshness lifetime of keys
-	attempted time.Time     // last fetch attempt, successful or not
+	fetchedAt time.Time // zero until the first successful fetch
+	freshFor  time.Duration
+	attempted time.Time // last fetch attempt, successful or not
 }
 
 // RemoteKeySetOption configures a RemoteKeySet.
@@ -103,8 +100,8 @@ func WithMinRefreshInterval(d time.Duration) RemoteKeySetOption {
 }
 
 // WithMaxRefreshInterval caps the freshness lifetime taken from a
-// Cache-Control max-age, so that a removed key does not stay trusted for
-// long. The default is 24 hours.
+// Cache-Control max-age, which is raised to at least the minimum refresh
+// interval; no-store and no-cache count as zero. The default is 24 hours.
 func WithMaxRefreshInterval(d time.Duration) RemoteKeySetOption {
 	return func(r *RemoteKeySet) { r.maxInterval = d }
 }
@@ -232,10 +229,9 @@ func (r *RemoteKeySet) fetch(ctx context.Context) ([]JWK, time.Duration, error) 
 	return set.Keys, freshFor, nil
 }
 
-// cacheLifetime returns the freshness lifetime that Cache-Control header
-// values give a response, and false when they set none. no-store and
-// no-cache give zero, as do a repeated or invalid max-age, which RFC 9111
-// §4.2.1 says to treat as stale.
+// cacheLifetime returns the freshness lifetime set by Cache-Control
+// values, if any. A repeated or invalid max-age counts as stale (RFC 9111
+// §4.2.1).
 func cacheLifetime(values []string) (time.Duration, bool) {
 	var maxAge time.Duration
 	found := false

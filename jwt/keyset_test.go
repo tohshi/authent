@@ -15,12 +15,11 @@ import (
 
 type jwksServer struct {
 	*httptest.Server
-	mu    sync.Mutex
-	set   JWKSet
-	fail  bool
-	hits  atomic.Int32
-	delay time.Duration
-	// cacheControl holds the Cache-Control header lines of each response.
+	mu           sync.Mutex
+	set          JWKSet
+	fail         bool
+	hits         atomic.Int32
+	delay        time.Duration
 	cacheControl []string
 }
 

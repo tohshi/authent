@@ -107,8 +107,7 @@ func WithCertificateRoots(roots *x509.CertPool) VerifierOption {
 // WithReplayCache accepts each token only once. "jti" becomes required,
 // and the pair of "iss" and "jti" is recorded in c until "exp" (plus the
 // leeway) once every other check has passed. A replayed token fails with
-// ErrReplayed; an error from c is returned as is, and the token is not
-// accepted.
+// ErrReplayed. Errors from c reject the token and are returned as is.
 func WithReplayCache(c ReplayCache) VerifierOption { return func(v *Verifier) { v.replay = c } }
 
 // WithClock overrides the clock, for tests.
@@ -187,8 +186,7 @@ func (v *Verifier) verifyToken(ctx context.Context, token string, requireSubject
 	if requireSubject && claims.Subject == "" {
 		return nil, Header{}, fmt.Errorf("%w: sub", ErrMissingClaim)
 	}
-	// Recorded last, so that a token failing any other check is not
-	// burned.
+	// Last, so a token failing other checks does not burn its jti.
 	if err := v.checkReplay(ctx, &claims); err != nil {
 		return nil, Header{}, err
 	}
