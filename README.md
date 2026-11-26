@@ -127,7 +127,8 @@ Safeguards enforced during verification:
     prevents algorithm-confusion attacks. If a JWK has an `alg`, the key is
     restricted to that algorithm.
 - **Claims and headers**
-  - `exp` is required.
+  - `exp` is required, unless `jwt.WithOptionalExpiration()` is set for a
+    JWT that is consumed on arrival, such as a signed UserInfo response.
   - Tokens with a `cnf` claim (sender-constrained, e.g. DPoP-bound) are
     rejected unless `jwt.WithConfirmationClaim()` is set, so a stolen bound
     token cannot be replayed as a bearer token (RFC 9449 §7.2).
@@ -327,11 +328,32 @@ is the provider issuer, as required by RFC 10070.
 - the ID token's signature, `iss`, `aud` and `exp`
 - `azp`
 - `at_hash`
+- `auth_time` and `acr`, when the request asked for them:
+```go
+req, _ := client.AuthCodeURL(
+	oauth2.SetAuthURLParam("max_age", "300"),
+	oauth2.SetAuthURLParam("acr_values", "urn:example:mfa"))
+```
+  With `max_age`, the ID token must carry an `auth_time` at most that many
+  seconds old. With `acr_values`, its `acr` must be one of the requested
+  values, as for an essential claim. Both are kept in the `AuthRequest`.
 
 `UserInfo` calls the provider's UserInfo endpoint with the access token and
-rejects the response unless its `sub` exactly matches the ID token's. Only
-plain JSON responses are accepted, and redirects are not followed, so the
+rejects the response unless its `sub` exactly matches the ID token's. A
+signed response (`application/jwt`) must also verify with the provider's
+keys and carry the provider as `iss` and the client in `aud`; it needs no
+`exp`. Encrypted responses are rejected. Redirects are not followed, so the
 access token is never sent anywhere but the advertised https endpoint.
+
+`Refresh` uses a `Result`'s refresh token and returns the next `Result`:
+```go
+res, err = client.Refresh(ctx, res) // store res again: the refresh token may have rotated
+```
+It authenticates the client as `Exchange` does, including with
+`private_key_jwt`, and sends DPoP proofs when configured. A new ID token
+must verify like the first one and describe the same authentication: the
+same `iss`, `sub`, `aud` and `azp`, and the same `auth_time` and `nonce`
+when it has them. A rejected refresh token wraps `oidc.ErrRefreshRejected`.
 
 Pushed authorization requests (RFC 9126) send the parameters to the
 provider over the back channel, so the browser only sees a `request_uri`:

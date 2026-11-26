@@ -37,7 +37,7 @@ Legend:
 | Strict parsing | ✅ | Case-sensitive, no duplicate members, canonical base64url, size limit |
 | Rejection of `crit`, `b64`, `zip` and `enc` headers | ✅ | |
 | Never fetching keys from `jku`, `x5u` or `jwk` headers | ✅ | These headers are ignored |
-| Claim validation: `exp` (required), `nbf`, `iat`, `iss`, `aud` | ✅ | `iss` and `aud` checks must be opted out of explicitly |
+| Claim validation: `exp` (required), `nbf`, `iat`, `iss`, `aud` | ✅ | `iss` and `aud` checks must be opted out of explicitly; `WithOptionalExpiration` accepts a missing `exp`, for signed UserInfo responses |
 | Clock skew leeway | ✅ | |
 | `typ` check | ✅ | For example `at+jwt` (RFC 9068) |
 | Conversion to `authent.Principal` | ✅ | Uses `auth_time` when present |
@@ -88,10 +88,10 @@ Legend:
 | `client_secret_basic` / `client_secret_post` | ✅ | Through `x/oauth2` |
 | Distinguishing rejected exchanges from network errors | ✅ | |
 | UserInfo endpoint | ✅ | `sub` must match the ID token; https only; redirects are not followed; Bearer or DPoP tokens |
-| Signed UserInfo responses (`application/jwt`) | ⬜ | Currently rejected; needs JWT verification without `exp`. Encrypted responses are out of scope along with JWE |
-| Refresh token helper | ⬜ | `HTTPClient` refreshes through `x/oauth2`, but refreshed ID tokens are not verified and `private_key_jwt` clients cannot refresh |
+| Signed UserInfo responses (`application/jwt`) | ✅ | Signature, `iss` and `aud` verified like an ID token, `exp` optional, `sub` must match. Encrypted responses are rejected; JWE is out of scope |
+| Refresh token helper | ✅ | `Refresh` works with every client authentication method, including `private_key_jwt`, and with DPoP; it keeps a rotated refresh token and checks a new ID token against the original (OpenID Connect Core §12.2). `HTTPClient` refreshes the same way but discards new ID tokens |
 | Calling APIs with the access token (`HTTPClient`) | ✅ | Bearer, or DPoP when configured |
-| `max_age`, `auth_time` and `acr` enforcement | ⬜ | |
+| `max_age`, `auth_time` and `acr` enforcement | ✅ | `max_age` and `acr_values` sent with the request are kept in `AuthRequest`; `Exchange` then requires a recent enough `auth_time` and an `acr` from the requested values |
 | `private_key_jwt` client authentication | ✅ | Asymmetric JWT assertion on each code exchange; issuer audience per RFC 10070 |
 | RP-initiated, front-channel and back-channel logout | ⬜ | |
 | Pushed authorization requests (RFC 9126) | ✅ | `PushAuthCodeURL`; honors `require_pushed_authorization_requests`; client secret or `private_key_jwt` |
