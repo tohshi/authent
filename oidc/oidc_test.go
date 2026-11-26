@@ -70,7 +70,7 @@ type fakeProvider struct {
 	bearerOnly bool   // ignore DPoP proofs, as a provider without DPoP support would
 }
 
-func newFakeProvider(t *testing.T) *fakeProvider {
+func newFakeProvider(t testing.TB) *fakeProvider {
 	t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	signer, err := jwt.NewSigner(jwt.ES256, key, jwt.WithKeyID("k1"))
@@ -235,7 +235,7 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 	_ = json.MarshalWrite(w, resp)
 }
 
-func newClient(t *testing.T, p *fakeProvider, mods ...func(*Config)) *Client {
+func newClient(t testing.TB, p *fakeProvider, mods ...func(*Config)) *Client {
 	t.Helper()
 	ctx := context.Background()
 	meta, err := Discover(ctx, p.URL, p.Client())

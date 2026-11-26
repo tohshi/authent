@@ -14,6 +14,7 @@ import (
 
 	"github.com/tohshi/authent"
 	"github.com/tohshi/authent/dpop"
+	"github.com/tohshi/authent/jwt"
 )
 
 var (
@@ -25,8 +26,9 @@ var (
 	// lacks the openid scope. It wraps authent.ErrUnauthenticated.
 	ErrUserInfoRejected = fmt.Errorf("oidc: userinfo request rejected: %w", authent.ErrUnauthenticated)
 	// ErrInvalidUserInfo means the UserInfo response must not be used: it
-	// is malformed, has an unsupported content type, or its "sub" does not
-	// match the ID token. It wraps authent.ErrUnauthenticated.
+	// is malformed, has an unsupported content type, fails signature or
+	// claim verification, or its "sub" does not match the ID token. It
+	// wraps authent.ErrUnauthenticated.
 	ErrInvalidUserInfo = fmt.Errorf("oidc: invalid userinfo response: %w", authent.ErrUnauthenticated)
 )
 
@@ -50,9 +52,12 @@ const maxUserInfoSize = 1 << 20
 // subject is rejected with ErrInvalidUserInfo, which prevents token
 // substitution (OpenID Connect Core §5.3.2).
 //
-// Only plain JSON responses are supported; signed or encrypted responses
-// (application/jwt) are rejected. Redirects are not followed, so the
-// access token is only ever sent to the advertised endpoint.
+// A signed response (application/jwt) is verified like an ID token, with
+// the same keys and algorithms, except that "exp" is optional: its "iss"
+// must be the provider and its "aud" must contain the client ID (OpenID
+// Connect Core §5.3.2). Encrypted responses are rejected. Redirects are
+// not followed, so the access token is only ever sent to the advertised
+// endpoint.
 //
 // Errors from the network, or statuses other than 200, 401 and 403, are
 // not authentication failures and do not wrap authent.ErrUnauthenticated.
@@ -84,7 +89,7 @@ func (c *Client) UserInfo(ctx context.Context, token *oauth2.Token, subject stri
 	if token.Type() == "Bearer" {
 		token.SetAuthHeader(req)
 	}
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", "application/json, application/jwt")
 
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := hc.Do(req)
@@ -101,15 +106,9 @@ func (c *Client) UserInfo(ctx context.Context, token *oauth2.Token, subject stri
 	}
 
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	switch {
-	case err != nil:
+	if err != nil {
 		return nil, fmt.Errorf("%w: content type: %v", ErrInvalidUserInfo, err)
-	case mediaType == "application/jwt":
-		return nil, fmt.Errorf("%w: signed or encrypted responses are not supported", ErrInvalidUserInfo)
-	case mediaType != "application/json":
-		return nil, fmt.Errorf("%w: content type %q", ErrInvalidUserInfo, mediaType)
 	}
-
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxUserInfoSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("oidc: userinfo: %w", err)
@@ -117,12 +116,33 @@ func (c *Client) UserInfo(ctx context.Context, token *oauth2.Token, subject stri
 	if len(body) > maxUserInfoSize {
 		return nil, errors.New("oidc: userinfo response too large")
 	}
+	return c.parseUserInfo(ctx, mediaType, body, subject)
+}
+
+// parseUserInfo checks a UserInfo response body of the given media type.
+func (c *Client) parseUserInfo(ctx context.Context, mediaType string, body []byte, subject string) (*UserInfo, error) {
 	var claims map[string]any
-	if err := json.Unmarshal(body, &claims); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidUserInfo, err)
-	}
-	if claims == nil {
-		return nil, fmt.Errorf("%w: not a JSON object", ErrInvalidUserInfo)
+	switch mediaType {
+	case "application/json":
+		if err := json.Unmarshal(body, &claims); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidUserInfo, err)
+		}
+		if claims == nil {
+			return nil, fmt.Errorf("%w: not a JSON object", ErrInvalidUserInfo)
+		}
+	case "application/jwt":
+		verified, err := c.userinfo.Verify(ctx, strings.TrimSpace(string(body)))
+		if errors.Is(err, jwt.ErrInvalidToken) {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidUserInfo, err)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("oidc: userinfo: %w", err)
+		}
+		if claims, err = verified.AsMap(); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidUserInfo, err)
+		}
+	default:
+		return nil, fmt.Errorf("%w: content type %q", ErrInvalidUserInfo, mediaType)
 	}
 	sub, _ := claims["sub"].(string)
 	if sub != subject {

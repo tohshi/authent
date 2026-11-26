@@ -156,8 +156,9 @@ type Config struct {
 	RedirectURL   string
 	// Scopes requested in addition to "openid".
 	Scopes []string
-	// Algorithms accepted for ID tokens. The default is the asymmetric
-	// algorithms the provider advertises, or RS256 if it advertises none.
+	// Algorithms accepted for ID tokens and signed UserInfo responses.
+	// The default is the asymmetric algorithms the provider advertises for
+	// ID tokens, or RS256 if it advertises none.
 	Algorithms []jwt.Algorithm
 	// HTTPClient is used for the token, pushed authorization request,
 	// UserInfo and JWK Set endpoints. The default is http.DefaultClient.
@@ -194,10 +195,11 @@ type PrivateKeyJWTConfig struct {
 type Client struct {
 	provider          *Provider
 	oauth             oauth2.Config
-	verifier          *jwt.Verifier
-	client            *http.Client // for the token and PAR endpoints; adds DPoP proofs if configured
-	singleShot        *http.Client // client, without the DPoP transport's nonce retry
-	base              *http.Client // Config.HTTPClient
+	verifier          *jwt.Verifier // ID tokens
+	userinfo          *jwt.Verifier // signed UserInfo responses
+	client            *http.Client  // for the token and PAR endpoints; adds DPoP proofs if configured
+	singleShot        *http.Client  // client, without the DPoP transport's nonce retry
+	base              *http.Client  // Config.HTTPClient
 	dpop              *dpop.Prover
 	assertionSigner   *jwt.Signer
 	assertionAudience string
@@ -255,7 +257,7 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	verifier, err := jwt.NewVerifier(keys,
+	idTokenOpts := []jwt.VerifierOption{
 		jwt.WithAlgorithms(algs...),
 		jwt.WithIssuer(p.Issuer),
 		jwt.WithAudience(cfg.ClientID),
@@ -264,7 +266,13 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 		// The ID token is consumed here, never presented as a bearer
 		// credential, so a "cnf" claim in it is harmless.
 		jwt.WithConfirmationClaim(),
-	)
+	}
+	verifier, err := jwt.NewVerifier(keys, idTokenOpts...)
+	if err != nil {
+		return nil, err
+	}
+	userinfo, err := jwt.NewVerifier(keys, append(idTokenOpts,
+		jwt.WithOptionalExpiration(), jwt.WithMaxTokenSize(maxUserInfoSize))...)
 	if err != nil {
 		return nil, err
 	}
@@ -298,6 +306,7 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 			},
 		},
 		verifier:          verifier,
+		userinfo:          userinfo,
 		client:            client,
 		singleShot:        singleShot,
 		base:              cfg.HTTPClient,

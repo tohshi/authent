@@ -327,8 +327,10 @@ is the provider issuer, as required by RFC 10070.
 - `at_hash`
 
 `UserInfo` calls the provider's UserInfo endpoint with the access token and
-rejects the response unless its `sub` exactly matches the ID token's. Only
-plain JSON responses are accepted, and redirects are not followed, so the
+rejects the response unless its `sub` exactly matches the ID token's. A
+signed response (`application/jwt`) must also verify with the provider's
+keys and carry the provider as `iss` and the client in `aud`; it needs no
+`exp`. Encrypted responses are rejected. Redirects are not followed, so the
 access token is never sent anywhere but the advertised https endpoint.
 
 Pushed authorization requests (RFC 9126) send the parameters to the
