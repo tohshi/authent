@@ -82,8 +82,8 @@ func TestSpecVectors(t *testing.T) {
 	// The error each registration is expected to fail with; nil means the
 	// registration and the following login must succeed.
 	want := map[string]error{
-		"16.4":  ErrOrigin,      // crossOrigin: true
-		"16.5":  ErrOrigin,      // crossOrigin: true with topOrigin
+		"16.4":  ErrOrigin,      // crossOrigin without topOrigin
+		"16.5":  ErrOrigin,      // cross-origin iframe, but TopOrigins is empty
 		"16.12": ErrAlgorithm,   // Ed448
 		"16.13": ErrAttestation, // tpm
 		"16.14": ErrAttestation, // android-key
@@ -98,7 +98,8 @@ func TestSpecVectors(t *testing.T) {
 				Ceremony: ceremonyCreate, Value: unhex(t, v.Registration["challenge"]),
 				ExpiresAt: testNow.Add(time.Minute), Subject: "u-1", UserHandle: []byte("handle-1"),
 			}
-			cred, err := rp.FinishRegistration(ctx, reg, specRegistrationJSON(t, v.Registration))
+			r, err := rp.FinishRegistration(ctx, reg, specRegistrationJSON(t, v.Registration))
+			cred := r.Credential
 			if w := want[v.Section]; w != nil {
 				if !errors.Is(err, w) || !errors.Is(err, authent.ErrUnauthenticated) {
 					t.Fatalf("%s: FinishRegistration = %v, want %v", v.Title, err, w)
@@ -118,7 +119,8 @@ func TestSpecVectors(t *testing.T) {
 				ExpiresAt: testNow.Add(time.Minute), Subject: "u-1", UserHandle: []byte("handle-1"),
 				AllowedCredentials: [][]byte{cred.ID},
 			}
-			p, _, err := rp.FinishLogin(ctx, login, specAuthenticationJSON(t, cred.ID, v.Authentication))
+			l, err := rp.FinishLogin(ctx, login, specAuthenticationJSON(t, cred.ID, v.Authentication))
+			p := l.Principal
 			if err != nil {
 				t.Fatalf("%s: FinishLogin = %v", v.Title, err)
 			}
@@ -128,7 +130,7 @@ func TestSpecVectors(t *testing.T) {
 
 			// The login signature must not verify for another challenge.
 			login.Value = unhex(t, v.Registration["challenge"])
-			if _, _, err := rp.FinishLogin(ctx, login, specAuthenticationJSON(t, cred.ID, v.Authentication)); !errors.Is(err, ErrChallenge) {
+			if _, err := rp.FinishLogin(ctx, login, specAuthenticationJSON(t, cred.ID, v.Authentication)); !errors.Is(err, ErrChallenge) {
 				t.Fatalf("FinishLogin with another challenge = %v, want ErrChallenge", err)
 			}
 		})
@@ -165,7 +167,8 @@ func TestSpecVectorsAttestationRoots(t *testing.T) {
 				Ceremony: ceremonyCreate, Value: unhex(t, v.Registration["challenge"]),
 				ExpiresAt: testNow.Add(time.Minute), Subject: "u-1", UserHandle: []byte("handle-1"),
 			}
-			cred, err := rp.FinishRegistration(context.Background(), ch, specRegistrationJSON(t, v.Registration))
+			r, err := rp.FinishRegistration(context.Background(), ch, specRegistrationJSON(t, v.Registration))
+			cred := r.Credential
 			if w == "" {
 				if !errors.Is(err, ErrAttestation) {
 					t.Fatalf("%s: FinishRegistration = %v, want ErrAttestation", v.Title, err)

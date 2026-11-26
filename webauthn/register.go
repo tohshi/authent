@@ -47,12 +47,13 @@ type CreationOptions struct {
 	ExcludeCredentials     []CredentialDescriptor `json:"excludeCredentials"`
 	AuthenticatorSelection AuthenticatorSelection `json:"authenticatorSelection"`
 	Attestation            Conveyance             `json:"attestation"`
+	Extensions             ExtensionInputs        `json:"extensions,omitzero"`
 }
 
 // BeginRegistration starts registering a new credential for user. Pass
 // the user's existing credentials as exclude, so that an authenticator
 // that already holds one of them is not registered twice.
-func (rp *RelyingParty) BeginRegistration(user User, exclude []Credential) (CreationOptions, Challenge, error) {
+func (rp *RelyingParty) BeginRegistration(user User, exclude []Credential, opts ...CeremonyOption) (CreationOptions, Challenge, error) {
 	if user.Subject == "" {
 		return CreationOptions{}, Challenge{}, errors.New("webauthn: user subject is required")
 	}
@@ -62,7 +63,7 @@ func (rp *RelyingParty) BeginRegistration(user User, exclude []Credential) (Crea
 	if user.Name == "" {
 		return CreationOptions{}, Challenge{}, errors.New("webauthn: user name is required")
 	}
-	ch, err := rp.newChallenge(ceremonyCreate)
+	ch, ext, err := rp.newChallenge(ceremonyCreate, nil, opts)
 	if err != nil {
 		return CreationOptions{}, Challenge{}, err
 	}
@@ -73,7 +74,7 @@ func (rp *RelyingParty) BeginRegistration(user User, exclude []Credential) (Crea
 	for _, a := range rp.cfg.Algorithms {
 		params = append(params, CredentialParameters{Type: "public-key", Alg: a})
 	}
-	opts := CreationOptions{
+	options := CreationOptions{
 		RP:                 RPEntity{ID: rp.cfg.RPID, Name: rp.cfg.RPName},
 		User:               UserEntity{ID: ch.UserHandle, Name: user.Name, DisplayName: user.DisplayName},
 		Challenge:          ch.Value,
@@ -86,8 +87,9 @@ func (rp *RelyingParty) BeginRegistration(user User, exclude []Credential) (Crea
 			UserVerification:   rp.cfg.UserVerification,
 		},
 		Attestation: rp.cfg.Attestation,
+		Extensions:  ext,
 	}
-	return opts, ch, nil
+	return options, ch, nil
 }
 
 // registrationResponse is RegistrationResponseJSON.
@@ -102,71 +104,82 @@ type registrationResponse struct {
 
 var knownTransports = []string{"ble", "hybrid", "internal", "nfc", "smart-card", "usb"}
 
+// Registration is the result of FinishRegistration.
+type Registration struct {
+	// Credential is the new credential. The caller stores it for
+	// Challenge.Subject.
+	Credential Credential
+	Extensions ExtensionOutputs
+}
+
 // FinishRegistration verifies the browser's response to the options from
-// BeginRegistration (WebAuthn §7.1) and returns the new credential. The
-// caller stores it for ch.Subject. Responses that fail verification return
-// an error wrapping ErrVerificationFailed.
-func (rp *RelyingParty) FinishRegistration(ctx context.Context, ch Challenge, response []byte) (Credential, error) {
+// BeginRegistration (WebAuthn §7.1). Responses that fail verification
+// return an error wrapping ErrVerificationFailed.
+func (rp *RelyingParty) FinishRegistration(ctx context.Context, ch Challenge, response []byte) (Registration, error) {
 	var r registrationResponse
 	if err := unmarshalResponse(response, &r); err != nil {
-		return Credential{}, err
+		return Registration{}, err
 	}
 	if err := r.check(); err != nil {
-		return Credential{}, err
+		return Registration{}, err
 	}
 	if ch.Subject == "" || len(ch.UserHandle) == 0 {
-		return Credential{}, fmt.Errorf("%w: challenge has no user", ErrChallenge)
+		return Registration{}, fmt.Errorf("%w: challenge has no user", ErrChallenge)
 	}
 	cdHash, err := rp.verifyClientData(r.Response.ClientDataJSON, ch, ceremonyCreate)
 	if err != nil {
-		return Credential{}, err
+		return Registration{}, err
+	}
+	ext, err := parseClientOutputs(r.ClientExtensionResults, ch)
+	if err != nil {
+		return Registration{}, err
 	}
 
 	v, err := cborDecodeAll(r.Response.AttestationObject)
 	if err != nil {
-		return Credential{}, fmt.Errorf("%w: attestation object: %v", ErrMalformed, err)
+		return Registration{}, fmt.Errorf("%w: attestation object: %v", ErrMalformed, err)
 	}
 	obj, _ := v.(cborMap)
 	format, ok1 := obj.text("fmt")
 	rawAuthData, ok2 := obj.bytes("authData")
 	stmt, ok3 := obj["attStmt"].(cborMap)
 	if !ok1 || !ok2 || !ok3 {
-		return Credential{}, fmt.Errorf("%w: attestation object lacks fmt, authData or attStmt", ErrMalformed)
+		return Registration{}, fmt.Errorf("%w: attestation object lacks fmt, authData or attStmt", ErrMalformed)
 	}
 	ad, err := parseAuthData(rawAuthData)
 	if err != nil {
-		return Credential{}, fmt.Errorf("%w: %v", ErrMalformed, err)
+		return Registration{}, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
-	if err := rp.verifyAuthData(ad); err != nil {
-		return Credential{}, err
+	if err := rp.verifyAuthData(ad, rp.rpIDHash[:], !ch.Conditional); err != nil {
+		return Registration{}, err
 	}
 	if !ad.has(flagAT) {
-		return Credential{}, fmt.Errorf("%w: no attested credential data", ErrMalformed)
+		return Registration{}, fmt.Errorf("%w: no attested credential data", ErrMalformed)
 	}
 	if !bytes.Equal(ad.credentialID, r.RawID) {
-		return Credential{}, fmt.Errorf("%w: credential ID differs from rawId", ErrMalformed)
+		return Registration{}, fmt.Errorf("%w: credential ID differs from rawId", ErrMalformed)
 	}
 	alg, pub, err := parseCOSEKey(ad.publicKey)
 	if err != nil {
-		return Credential{}, fmt.Errorf("%w: credential public key: %v", ErrAlgorithm, err)
+		return Registration{}, fmt.Errorf("%w: credential public key: %v", ErrAlgorithm, err)
 	}
 	if !slices.Contains(rp.cfg.Algorithms, alg) {
-		return Credential{}, fmt.Errorf("%w: %v", ErrAlgorithm, alg)
+		return Registration{}, fmt.Errorf("%w: %v", ErrAlgorithm, alg)
 	}
 
 	att, err := verifyAttestation(format, stmt, ad, cdHash[:], alg, pub)
 	if err != nil {
-		return Credential{}, fmt.Errorf("%w: %v", ErrAttestation, err)
+		return Registration{}, fmt.Errorf("%w: %v", ErrAttestation, err)
 	}
 	if err := rp.trustAttestation(att); err != nil {
-		return Credential{}, err
+		return Registration{}, err
 	}
 
 	switch _, err := rp.store.LookupCredential(ctx, ad.credentialID); {
 	case err == nil:
-		return Credential{}, ErrCredentialExists
+		return Registration{}, ErrCredentialExists
 	case !errors.Is(err, ErrCredentialNotFound):
-		return Credential{}, fmt.Errorf("webauthn: looking up credential: %w", err)
+		return Registration{}, fmt.Errorf("webauthn: looking up credential: %w", err)
 	}
 
 	var transports []string
@@ -175,7 +188,8 @@ func (rp *RelyingParty) FinishRegistration(ctx context.Context, ch Challenge, re
 			transports = append(transports, t)
 		}
 	}
-	return Credential{
+	ext.Authenticator = ad.extensions
+	return Registration{Credential: Credential{
 		ID:                slices.Clone(ad.credentialID),
 		Subject:           ch.Subject,
 		UserHandle:        slices.Clone(ch.UserHandle),
@@ -189,7 +203,7 @@ func (rp *RelyingParty) FinishRegistration(ctx context.Context, ch Challenge, re
 		UserVerified:      ad.has(flagUV),
 		AttestationFormat: format,
 		AttestationType:   att.typ,
-	}, nil
+	}, Extensions: ext}, nil
 }
 
 // trustAttestation enforces Config.AttestationRoots.

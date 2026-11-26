@@ -173,6 +173,7 @@ func TestParseAuthData(t *testing.T) {
 		"ED without extensions":   append(bytes.Clone(raw[:32]), raw[32]|flagED, 0, 0, 0, 0),
 		"extensions not a map":    append(append(bytes.Clone(raw[:32]), flagUP|flagED, 0, 0, 0, 0), 0x01),
 		"trailing":                append(bytes.Clone(raw), 0),
+		"extension key not text":  append(append(bytes.Clone(raw[:32]), flagUP|flagED, 0, 0, 0, 0), cborEnc(cborPairs{{1, 2}})...),
 	} {
 		if _, err := parseAuthData(b); !errors.Is(err, errAuthData) {
 			t.Errorf("%s: err = %v, want errAuthData", name, err)
