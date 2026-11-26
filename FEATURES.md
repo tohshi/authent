@@ -113,7 +113,7 @@ Legend:
 | `WWW-Authenticate` challenges | ✅ | `Challenge` with `algs` and error codes |
 | Opaque tokens (introspection, RFC 9449 §6.2) | ✅ | `Introspector` (RFC 7662, `client_secret_basic`) as the token verifier of `Authenticator`; the proof key must match `cnf.jkt` |
 | Authorization server side (issuing bound tokens) | ➖ | Same reason as the OAuth 2.0 authorization server below |
-| Shared replay cache stores (Redis, SQL) | ⬜ | |
+| Shared replay cache stores (Redis, SQL) | ⬜ | SQL done: `jwt/sqlreplay` for PostgreSQL and SQLite, with the `jwt/replaytest` conformance suite. Redis pending |
 
 ## rebac
 

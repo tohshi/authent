@@ -151,6 +151,17 @@ Optional checks:
   takes the same `jwt.ReplayCache` interface. Use it for single-use
   tokens (ID tokens, logout tokens, client assertions, request objects),
   not for access tokens, which clients send many times.
+- Behind a load balancer, share one cache between servers.
+  `sqlreplay.New(db, sqlreplay.PostgreSQL)` from `jwt/sqlreplay` stores
+  entries in PostgreSQL or SQLite through `database/sql`, with no driver
+  import. `CreateTable` (or `CreateTableStatements` for a migration tool)
+  creates the table. `Add` is one `INSERT ... ON CONFLICT DO UPDATE ...
+  WHERE` statement, so concurrent servers agree on which one saw an id
+  first, and an expired row is taken over. Call `DeleteExpired`
+  periodically. MySQL is not supported, because its affected-row count
+  cannot tell an unchanged duplicate from an update when
+  `CLIENT_FOUND_ROWS` is set. `replaytest.TestReplayCache` (in
+  `jwt/replaytest`) is a conformance suite for your own `jwt.ReplayCache`.
 - `jwt.WithMaxTokenAge(d)` rejects tokens issued more than `d` ago and
   makes `iat` required. `jwt.WithMaxAuthAge(d)` does the same for
   `auth_time`, as OpenID Connect `max_age` requires, and rejects an
