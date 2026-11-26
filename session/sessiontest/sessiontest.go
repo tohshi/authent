@@ -516,7 +516,7 @@ func testManagerListAndRevoke(t *testing.T, s session.Store) {
 	got := map[string]string{}
 	for _, sess := range list {
 		name, _, err := device.Get(sess)
-		if err != nil || sess.Subject() != "alice" || sess.Handle() == laptopToken || sess.Handle() == phoneToken {
+		if err != nil || sess.Subject() != "alice" || sess.CSRFToken() != "" || sess.Handle() == laptopToken || sess.Handle() == phoneToken {
 			t.Fatalf("listed session %q: %q, %v", sess.Handle(), name, err)
 		}
 		got[sess.Handle()] = name

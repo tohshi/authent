@@ -216,7 +216,7 @@ the `amr` claim and the most recent authentication as `AuthTime`.
 Stores index sessions by subject, so a subject's sessions can be listed
 and revoked:
 ```go
-list, err := m.List(ctx, s.Subject())  // for an account page; no tokens
+list, err := m.List(ctx, s.Subject())  // for an account page; no tokens or CSRF tokens
 err = m.Revoke(ctx, s.Subject(), handle) // handle from Session.Handle()
 err = m.RevokeAll(ctx, s.Subject())      // log out everywhere
 ```
