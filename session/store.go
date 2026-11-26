@@ -18,6 +18,9 @@ var (
 // Record is the stored form of a session. Data is encoded by the Manager;
 // a Store keeps it opaque.
 type Record struct {
+	// Subject is the session's subject, which the store indexes. It never
+	// changes after a key's first Save.
+	Subject string
 	// Version starts at 1 and grows by one with every save.
 	Version uint64
 	// ExpiresAt is when the store may discard the record. The Manager
@@ -28,8 +31,9 @@ type Record struct {
 
 // Store persists sessions. Keys are opaque, already-hashed identifiers.
 // Implementations must be safe for concurrent use, must not retain or
-// modify the Data slices they are passed or return, and must treat a
-// record as deleted once its ExpiresAt is not after the current time.
+// modify the Data slices they are passed or return, must compare subjects
+// byte by byte, and must treat a record as deleted once its ExpiresAt is
+// not after the current time.
 //
 // The sessiontest package provides a conformance suite.
 type Store interface {
@@ -43,4 +47,9 @@ type Store interface {
 	// holds that version, and returns ErrConflict otherwise. Deleting an
 	// unknown key with version 0 is not an error.
 	Delete(ctx context.Context, key string, version uint64) error
+	// List returns the unexpired records of subject, by key.
+	List(ctx context.Context, subject string) (map[string]Record, error)
+	// DeleteSubject atomically removes every record of subject. A Save
+	// that completed before DeleteSubject started does not survive it.
+	DeleteSubject(ctx context.Context, subject string) error
 }

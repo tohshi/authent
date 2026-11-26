@@ -442,18 +442,32 @@ func TestStoreErrorIsNotUnauthenticated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ctx := context.Background()
 	tok, _ := newToken()
-	_, err = m.Get(context.Background(), tok)
-	if !errors.Is(err, boom) || errors.Is(err, authent.ErrUnauthenticated) {
-		t.Fatalf("err = %v", err)
+	handle, _ := storeKey(tok)
+	for name, call := range map[string]func() error{
+		"Create":    func() error { _, _, err := m.Create(ctx, alice); return err },
+		"Get":       func() error { _, err := m.Get(ctx, tok); return err },
+		"Rotate":    func() error { _, _, err := m.Rotate(ctx, tok); return err },
+		"StepUp":    func() error { _, _, err := m.StepUp(ctx, tok, alice); return err },
+		"Destroy":   func() error { return m.Destroy(ctx, tok) },
+		"List":      func() error { _, err := m.List(ctx, "alice"); return err },
+		"Revoke":    func() error { return m.Revoke(ctx, "alice", handle) },
+		"RevokeAll": func() error { return m.RevokeAll(ctx, "alice") },
+	} {
+		if err := call(); !errors.Is(err, boom) || errors.Is(err, authent.ErrUnauthenticated) {
+			t.Errorf("%s: err = %v, want the store error", name, err)
+		}
 	}
 }
 
 type failingStore struct{ err error }
 
-func (f failingStore) Load(context.Context, string) (Record, error) { return Record{}, f.err }
-func (f failingStore) Save(context.Context, string, Record) error   { return f.err }
-func (f failingStore) Delete(context.Context, string, uint64) error { return f.err }
+func (f failingStore) Load(context.Context, string) (Record, error)            { return Record{}, f.err }
+func (f failingStore) Save(context.Context, string, Record) error              { return f.err }
+func (f failingStore) Delete(context.Context, string, uint64) error            { return f.err }
+func (f failingStore) List(context.Context, string) (map[string]Record, error) { return nil, f.err }
+func (f failingStore) DeleteSubject(context.Context, string) error             { return f.err }
 
 func TestNewManagerValidates(t *testing.T) {
 	for _, opts := range [][]Option{
@@ -581,6 +595,80 @@ func TestRotateRacingDestroy(t *testing.T) {
 	if store.Len() != 0 {
 		t.Fatalf("store holds %d sessions; the rotated copy outlived Destroy", store.Len())
 	}
+}
+
+func TestRevokeAllRacingStepUp(t *testing.T) {
+	m, store, _ := setup(t)
+	ctx := context.Background()
+	token, _, _ := m.Create(ctx, alice)
+	store.beforeDelete = func(string, uint64) {
+		if err := m.RevokeAll(ctx, "alice"); err != nil {
+			t.Error(err)
+		}
+	}
+	if _, _, err := m.StepUp(ctx, token, authent.Principal{Subject: "alice", Method: authent.MethodTOTP}); err == nil {
+		t.Fatal("StepUp of a session revoked meanwhile succeeded")
+	}
+	if store.Len() != 0 {
+		t.Fatalf("store holds %d sessions; the stepped-up copy outlived RevokeAll", store.Len())
+	}
+}
+
+func TestListOrderAndHandles(t *testing.T) {
+	m, _, c := setup(t)
+	ctx := context.Background()
+	var tokens []string
+	for range 3 {
+		tok, _, _ := m.Create(ctx, alice)
+		tokens = append(tokens, tok)
+		c.advance(time.Second)
+	}
+	list, err := m.List(ctx, "alice")
+	if err != nil || len(list) != 3 {
+		t.Fatalf("List = %d sessions, %v", len(list), err)
+	}
+	for i, s := range list {
+		if key, _ := storeKey(tokens[i]); s.Handle() != key || s.Handle() == tokens[i] {
+			t.Errorf("session %d: handle %q does not identify token %d without revealing it", i, s.Handle(), i)
+		}
+	}
+}
+
+// FuzzRevoke checks that no handle a client sends can end another
+// subject's session or reach the store unless it is well formed.
+func FuzzRevoke(f *testing.F) {
+	ctx := context.Background()
+	store := &countingStore{MemoryStore: NewMemoryStore()}
+	m, _ := NewManager(store)
+	victim, s, _ := m.Create(ctx, alice)
+	f.Add(s.Handle())
+	f.Add(victim)
+	f.Add(s.Handle() + "=")
+	f.Add("")
+	f.Fuzz(func(t *testing.T, handle string) {
+		loads := 0
+		wrapped := &loadCounter{Store: store, loads: &loads}
+		mm, _ := NewManager(wrapped)
+		if err := mm.Revoke(ctx, "mallory", handle); err != nil {
+			t.Fatalf("Revoke(%q) = %v", handle, err)
+		}
+		if _, err := m.Get(ctx, victim); err != nil {
+			t.Fatalf("Revoke(mallory, %q) ended alice's session: %v", handle, err)
+		}
+		if _, ok := decodeToken(handle); !ok && loads != 0 {
+			t.Fatalf("malformed handle %q reached the store", handle)
+		}
+	})
+}
+
+type loadCounter struct {
+	Store
+	loads *int
+}
+
+func (l *loadCounter) Load(ctx context.Context, key string) (Record, error) {
+	*l.loads++
+	return l.Store.Load(ctx, key)
 }
 
 func TestCorruptRecordIsNotUnauthenticated(t *testing.T) {

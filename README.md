@@ -210,6 +210,17 @@ session's, and rotates the token like `Rotate`. Factors change only
 through `Create` and `StepUp`. `Session.Principal` reports the methods in
 the `amr` claim and the most recent authentication as `AuthTime`.
 
+Stores index sessions by subject, so a subject's sessions can be listed
+and revoked:
+```go
+list, err := m.List(ctx, s.Subject())  // for an account page; no tokens
+err = m.Revoke(ctx, s.Subject(), handle) // handle from Session.Handle()
+err = m.RevokeAll(ctx, s.Subject())      // log out everywhere
+```
+`Revoke` ends a session only if it belongs to the given subject, so pass
+the subject of the session making the request. A session that is rotated
+or stepped up while `RevokeAll` runs does not survive under its new token.
+
 Every stored session has a version, and stores save it with a
 compare-and-swap. `Save` returns an error wrapping `session.ErrConflict`
 when another request saved, rotated or destroyed the session after it was

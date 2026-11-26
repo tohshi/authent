@@ -69,8 +69,8 @@ Legend:
 | Per-session CSRF token | ✅ | Synchronizer token pattern; compared in constant time |
 | Pluggable store and `MemoryStore` | ✅ | |
 | Redis or SQL stores | ⬜ | |
-| Revoking all sessions of a subject ("log out everywhere") | ⬜ | Needs a subject index in the store |
-| Listing a subject's active sessions | ⬜ | |
+| Revoking all sessions of a subject ("log out everywhere") | ✅ | `RevokeAll`; every `Store` keeps a subject index. A concurrent rotation does not survive it |
+| Listing a subject's active sessions | ✅ | `List` returns sessions without tokens; `Revoke` ends one by its handle, only for its own subject |
 | Conflict detection on concurrent saves | ✅ | Versioned records with compare-and-swap in every store; `ErrConflict` on a lost race |
 | Structured session values | ✅ | `Key[T]` stores typed values as JSON |
 | Cookie helpers | ➖ | The core does not depend on HTTP; planned for an adapter package |

@@ -17,6 +17,9 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"maps"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,7 +30,9 @@ import (
 
 // TestStore runs the conformance suite as subtests of t. newStore must
 // return a new, empty store on every call; it may use t.Cleanup to release
-// it. The suite uses the real clock and takes a few seconds.
+// it. The suite uses the real clock and takes a few seconds. Subjects in
+// the suite are valid UTF-8 without NUL bytes and at most 255 bytes long,
+// the limit OpenID Connect sets for "sub".
 func TestStore(t *testing.T, newStore func(t *testing.T) session.Store) {
 	tests := []struct {
 		name string
@@ -40,8 +45,12 @@ func TestStore(t *testing.T, newStore func(t *testing.T) session.Store) {
 		{"Delete", testDelete},
 		{"Expiry", testExpiry},
 		{"ConcurrentSaves", testConcurrentSaves},
+		{"Subjects", testSubjects},
+		{"SubjectExactMatch", testSubjectExactMatch},
 		{"Manager", testManager},
 		{"ManagerConcurrentGets", testManagerConcurrentGets},
+		{"ManagerStepUp", testManagerStepUp},
+		{"ManagerListAndRevoke", testManagerListAndRevoke},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -61,7 +70,7 @@ func newKey() string {
 }
 
 func record(version uint64, data string) session.Record {
-	return session.Record{Version: version, ExpiresAt: time.Now().Add(time.Hour), Data: []byte(data)}
+	return session.Record{Subject: "alice", Version: version, ExpiresAt: time.Now().Add(time.Hour), Data: []byte(data)}
 }
 
 func save(t *testing.T, s session.Store, key string, r session.Record) {
@@ -84,9 +93,34 @@ func wantRecord(t *testing.T, s session.Store, key string, want session.Record) 
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got.Version != want.Version || !got.ExpiresAt.Equal(want.ExpiresAt) || !bytes.Equal(got.Data, want.Data) {
-		t.Errorf("Load = {%d %v %q}, want {%d %v %q}",
-			got.Version, got.ExpiresAt, got.Data, want.Version, want.ExpiresAt, want.Data)
+	if !equal(got, want) {
+		t.Errorf("Load = %s, want %s", describe(got), describe(want))
+	}
+}
+
+func equal(a, b session.Record) bool {
+	return a.Subject == b.Subject && a.Version == b.Version && a.ExpiresAt.Equal(b.ExpiresAt) && bytes.Equal(a.Data, b.Data)
+}
+
+func describe(r session.Record) string {
+	return fmt.Sprintf("{%q %d %v %q}", r.Subject, r.Version, r.ExpiresAt, r.Data)
+}
+
+func wantList(t *testing.T, s session.Store, subject string, want map[string]session.Record) {
+	t.Helper()
+	got, err := s.List(ctx, subject)
+	if err != nil {
+		t.Fatalf("List(%q): %v", subject, err)
+	}
+	for key, r := range got {
+		if w, ok := want[key]; !ok || !equal(r, w) {
+			t.Errorf("List(%q) has %s, want %s", subject, describe(r), describe(w))
+		}
+	}
+	for key, w := range want {
+		if _, ok := got[key]; !ok {
+			t.Errorf("List(%q) misses %s", subject, describe(w))
+		}
 	}
 }
 
@@ -110,8 +144,8 @@ func testEmpty(t *testing.T, s session.Store) {
 func testSaveAndLoad(t *testing.T, s session.Store) {
 	a, b := newKey(), newKey()
 	// Data is opaque bytes, not necessarily text.
-	ra := session.Record{Version: 1, ExpiresAt: time.Now().Add(time.Hour), Data: []byte("{\"a\":1}\x00\xff\xfe")}
-	rb := session.Record{Version: 1, ExpiresAt: time.Now().Add(2 * time.Hour), Data: bytes.Repeat([]byte("b"), 1<<16)}
+	ra := session.Record{Subject: "alice", Version: 1, ExpiresAt: time.Now().Add(time.Hour), Data: []byte("{\"a\":1}\x00\xff\xfe")}
+	rb := session.Record{Subject: "alice", Version: 1, ExpiresAt: time.Now().Add(2 * time.Hour), Data: bytes.Repeat([]byte("b"), 1<<16)}
 	save(t, s, a, ra)
 	save(t, s, b, rb)
 	wantRecord(t, s, a, ra)
@@ -121,7 +155,7 @@ func testSaveAndLoad(t *testing.T, s session.Store) {
 func testDataIsCopied(t *testing.T, s session.Store) {
 	key := newKey()
 	data := []byte("original")
-	save(t, s, key, session.Record{Version: 1, ExpiresAt: time.Now().Add(time.Hour), Data: data})
+	save(t, s, key, session.Record{Subject: "alice", Version: 1, ExpiresAt: time.Now().Add(time.Hour), Data: data})
 	copy(data, "mutated!")
 	got, err := s.Load(ctx, key)
 	if err != nil {
@@ -181,18 +215,18 @@ func testDelete(t *testing.T, s session.Store) {
 
 func testExpiry(t *testing.T, s session.Store) {
 	past := newKey()
-	save(t, s, past, session.Record{Version: 1, ExpiresAt: time.Now().Add(-time.Second), Data: []byte("x")})
+	save(t, s, past, session.Record{Subject: "alice", Version: 1, ExpiresAt: time.Now().Add(-time.Second), Data: []byte("x")})
 	wantNotFound(t, s, past)
 	wantConflict(t, s.Delete(ctx, past, 1), "Delete of an expired record")
 
 	updated := newKey()
 	save(t, s, updated, record(1, "v1"))
-	save(t, s, updated, session.Record{Version: 2, ExpiresAt: time.Now().Add(-time.Second), Data: []byte("v2")})
+	save(t, s, updated, session.Record{Subject: "alice", Version: 2, ExpiresAt: time.Now().Add(-time.Second), Data: []byte("v2")})
 	wantNotFound(t, s, updated)
 
 	timed := newKey()
 	exp := time.Now().Add(time.Second)
-	save(t, s, timed, session.Record{Version: 1, ExpiresAt: exp, Data: []byte("x")})
+	save(t, s, timed, session.Record{Subject: "alice", Version: 1, ExpiresAt: exp, Data: []byte("x")})
 	if _, err := s.Load(ctx, timed); err != nil {
 		t.Fatalf("Load before expiry: %v", err)
 	}
@@ -250,6 +284,79 @@ func testConcurrentSaves(t *testing.T, s session.Store) {
 	}
 	if len(wins) != int(final.Version-1) || len(final.Data) != len("start")+len(wins) {
 		t.Errorf("final version %d with %d bytes after %d successful saves", final.Version, len(final.Data), len(wins))
+	}
+}
+
+func testSubjects(t *testing.T, s session.Store) {
+	alice := map[string]session.Record{}
+	keys := []string{newKey(), newKey(), newKey()}
+	for i, key := range keys {
+		r := session.Record{Subject: "alice", Version: 1, ExpiresAt: time.Now().Add(time.Duration(i+1) * time.Hour), Data: []byte{byte(i)}}
+		save(t, s, key, r)
+		alice[key] = r
+	}
+	bobKey := newKey()
+	bob := session.Record{Subject: "bob", Version: 1, ExpiresAt: time.Now().Add(time.Hour), Data: []byte("bob")}
+	save(t, s, bobKey, bob)
+	wantList(t, s, "alice", alice)
+	wantList(t, s, "carol", nil)
+
+	r := alice[keys[0]]
+	r.Version, r.Data = 2, []byte("v2")
+	save(t, s, keys[0], r)
+	alice[keys[0]] = r
+	if err := s.Delete(ctx, keys[1], 0); err != nil {
+		t.Fatal(err)
+	}
+	delete(alice, keys[1])
+	save(t, s, newKey(), session.Record{Subject: "alice", Version: 1, ExpiresAt: time.Now().Add(-time.Second), Data: []byte("expired")})
+	wantList(t, s, "alice", alice)
+
+	if err := s.DeleteSubject(ctx, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	wantList(t, s, "alice", nil)
+	for _, key := range keys {
+		wantNotFound(t, s, key)
+	}
+	wantList(t, s, "bob", map[string]session.Record{bobKey: bob})
+	wantRecord(t, s, bobKey, bob)
+
+	// A session created after DeleteSubject is kept and indexed.
+	fresh := newKey()
+	r = session.Record{Subject: "alice", Version: 1, ExpiresAt: time.Now().Add(time.Hour), Data: []byte("fresh")}
+	save(t, s, fresh, r)
+	wantList(t, s, "alice", map[string]session.Record{fresh: r})
+	if err := s.DeleteSubject(ctx, "nobody"); err != nil {
+		t.Errorf("DeleteSubject(unknown) = %v", err)
+	}
+}
+
+func testSubjectExactMatch(t *testing.T, s session.Store) {
+	// Stores must compare subjects byte by byte: no case folding, Unicode
+	// normalization, trimming or pattern matching.
+	subjects := []string{
+		"alice", "Alice", "ALICE", "alice ", " alice", "alic", "alice_",
+		"al%", "al_ce", "a*", "a?", "[a]", "{alice}", "alice:1", "alice\\",
+		"café", "cafe\u0301", "ß", "ss", "\u212a", "k",
+		strings.Repeat("é", 127) + "x",
+	}
+	records := map[string]map[string]session.Record{}
+	for _, sub := range subjects {
+		r := session.Record{Subject: sub, Version: 1, ExpiresAt: time.Now().Add(time.Hour), Data: []byte(sub)}
+		key := newKey()
+		save(t, s, key, r)
+		records[sub] = map[string]session.Record{key: r}
+	}
+	for _, sub := range subjects {
+		wantList(t, s, sub, records[sub])
+	}
+	if err := s.DeleteSubject(ctx, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	wantList(t, s, "alice", nil)
+	for _, sub := range subjects[1:] {
+		wantList(t, s, sub, records[sub])
 	}
 }
 
@@ -355,4 +462,100 @@ func testManagerConcurrentGets(t *testing.T, s session.Store) {
 		})
 	}
 	wg.Wait()
+}
+
+func testManagerStepUp(t *testing.T, s session.Store) {
+	m := newManager(t, s)
+	token, _, err := m.Create(ctx, alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newToken, _, err := m.StepUp(ctx, token, authent.Principal{Subject: "alice", Method: authent.MethodTOTP})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Get(ctx, token); !errors.Is(err, session.ErrInvalidSession) {
+		t.Fatalf("Get(old token) after StepUp: err = %v", err)
+	}
+	got, err := m.Get(ctx, newToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := got.Factors()
+	if len(f) != 2 || f[0].Method != authent.MethodPassword || f[1].Method != authent.MethodTOTP ||
+		!got.AuthenticatedSince(time.Now().Add(-time.Minute), authent.MethodPassword, authent.MethodTOTP) {
+		t.Fatalf("Factors = %+v", f)
+	}
+}
+
+func testManagerListAndRevoke(t *testing.T, s session.Store) {
+	m := newManager(t, s)
+	device := session.Key[string]("device")
+	create := func(p authent.Principal, name string) (string, *session.Session) {
+		t.Helper()
+		token, sess, err := m.Create(ctx, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := device.Set(sess, name); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Save(ctx, sess); err != nil {
+			t.Fatal(err)
+		}
+		return token, sess
+	}
+	laptopToken, laptop := create(alice, "laptop")
+	phoneToken, phone := create(authent.Principal{Subject: "alice", Method: authent.MethodWebAuthn}, "phone")
+	bobToken, _ := create(authent.Principal{Subject: "bob", Method: authent.MethodPassword}, "bob's")
+
+	list, err := m.List(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, sess := range list {
+		name, _, err := device.Get(sess)
+		if err != nil || sess.Subject() != "alice" || sess.Handle() == laptopToken || sess.Handle() == phoneToken {
+			t.Fatalf("listed session %q: %q, %v", sess.Handle(), name, err)
+		}
+		got[sess.Handle()] = name
+	}
+	if want := map[string]string{laptop.Handle(): "laptop", phone.Handle(): "phone"}; !maps.Equal(got, want) {
+		t.Fatalf("List(alice) = %v, want %v", got, want)
+	}
+
+	alive := func(token string, want bool) {
+		t.Helper()
+		_, err := m.Get(ctx, token)
+		if want && err != nil || !want && !errors.Is(err, session.ErrInvalidSession) {
+			t.Fatalf("Get after revocation: err = %v, want alive=%v", err, want)
+		}
+	}
+	for _, h := range []string{laptop.Handle(), "garbage", ""} {
+		if err := m.Revoke(ctx, "bob", h); err != nil {
+			t.Fatalf("Revoke(bob, %q) = %v", h, err)
+		}
+	}
+	alive(laptopToken, true)
+	if err := m.Revoke(ctx, "alice", laptop.Handle()); err != nil {
+		t.Fatal(err)
+	}
+	alive(laptopToken, false)
+	alive(phoneToken, true)
+	if list, _ := m.List(ctx, "alice"); len(list) != 1 || list[0].Handle() != phone.Handle() {
+		t.Fatalf("List after Revoke = %d sessions", len(list))
+	}
+
+	if err := m.RevokeAll(ctx, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	alive(phoneToken, false)
+	alive(bobToken, true)
+	if list, err := m.List(ctx, "alice"); err != nil || len(list) != 0 {
+		t.Fatalf("List after RevokeAll = %d sessions, %v", len(list), err)
+	}
+	if err := m.Save(ctx, phone); !errors.Is(err, session.ErrConflict) {
+		t.Fatalf("Save of a revoked session: err = %v, want ErrConflict", err)
+	}
 }

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/tohshi/authent"
@@ -44,9 +45,10 @@ type Session struct {
 	version uint64 // version of the stored record s was loaded from
 }
 
-// state is the part of a session encoded into Record.Data.
+// state is the part of a session encoded into Record.Data, except for
+// Subject, which is Record.Subject.
 type state struct {
-	Subject    string                    `json:"sub"`
+	Subject    string                    `json:"-"`
 	Issuer     string                    `json:"iss,omitempty"`
 	Factors    []Factor                  `json:"factors"`
 	CSRFToken  string                    `json:"csrf"`
@@ -57,6 +59,11 @@ type state struct {
 
 // Subject returns the authenticated subject.
 func (s *Session) Subject() string { return s.st.Subject }
+
+// Handle identifies the session without revealing its token, for showing
+// a subject's sessions and revoking one with Manager.Revoke. It changes
+// when the token does.
+func (s *Session) Handle() string { return s.key }
 
 // Issuer returns who vouched for the subject when the session was created.
 func (s *Session) Issuer() string { return s.st.Issuer }
@@ -137,6 +144,7 @@ func decode(key string, r Record) (*Session, error) {
 	if err := json.Unmarshal(r.Data, &s.st); err != nil {
 		return nil, fmt.Errorf("session: decoding stored session: %w", err)
 	}
+	s.st.Subject = r.Subject
 	if s.st.Subject == "" || len(s.st.Factors) == 0 {
 		return nil, errors.New("session: stored session has no subject or factors")
 	}
@@ -207,11 +215,21 @@ func newToken() (string, error) {
 	return b64.EncodeToString(b), nil
 }
 
-// storeKey maps a token to its store key, rejecting malformed tokens
-// before they reach the store.
+// decodeToken returns the bytes of a token or store key, which are
+// canonical unpadded base64url of 32 bytes. It rejects anything else
+// before it reaches the store.
+func decodeToken(s string) ([]byte, bool) {
+	raw, err := b64.DecodeString(s)
+	if err != nil || len(raw) != tokenBytes || b64.EncodeToString(raw) != s {
+		return nil, false
+	}
+	return raw, true
+}
+
+// storeKey maps a token to its store key.
 func storeKey(token string) (string, bool) {
-	raw, err := b64.DecodeString(token)
-	if err != nil || len(raw) != tokenBytes || b64.EncodeToString(raw) != token {
+	raw, ok := decodeToken(token)
+	if !ok {
 		return "", false
 	}
 	sum := sha256.Sum256(raw)
@@ -342,7 +360,7 @@ func (m *Manager) save(ctx context.Context, s *Session) error {
 	if err != nil {
 		return fmt.Errorf("session: encoding: %w", err)
 	}
-	r := Record{Version: s.version + 1, ExpiresAt: expiresAt, Data: data}
+	r := Record{Subject: s.st.Subject, Version: s.version + 1, ExpiresAt: expiresAt, Data: data}
 	if err := m.store.Save(ctx, s.key, r); err != nil {
 		return fmt.Errorf("session: saving: %w", err)
 	}
@@ -420,6 +438,72 @@ func (m *Manager) Destroy(ctx context.Context, token string) error {
 	}
 	if err := m.store.Delete(ctx, key, 0); err != nil {
 		return fmt.Errorf("session: deleting: %w", err)
+	}
+	return nil
+}
+
+// List returns the unexpired sessions of subject, oldest first, for
+// example to show them to the subject. The sessions carry no tokens; use
+// Session.Handle to tell them apart and to revoke one.
+func (m *Manager) List(ctx context.Context, subject string) ([]*Session, error) {
+	records, err := m.store.List(ctx, subject)
+	if err != nil {
+		return nil, fmt.Errorf("session: listing: %w", err)
+	}
+	now := m.now()
+	out := make([]*Session, 0, len(records))
+	for key, r := range records {
+		if r.Subject != subject {
+			continue
+		}
+		s, err := decode(key, r)
+		if err != nil {
+			return nil, err
+		}
+		if now.Before(m.expiresAt(s)) {
+			out = append(out, s)
+		}
+	}
+	slices.SortFunc(out, func(a, b *Session) int {
+		if c := a.st.CreatedAt.Compare(b.st.CreatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.key, b.key)
+	})
+	return out, nil
+}
+
+// Revoke ends the session with the given handle if it belongs to subject.
+// Pass the subject of the session making the request, so that one subject
+// cannot end another's sessions. An unknown, malformed or foreign handle is
+// not an error and changes nothing.
+func (m *Manager) Revoke(ctx context.Context, subject, handle string) error {
+	if _, ok := decodeToken(handle); !ok {
+		return nil
+	}
+	r, err := m.store.Load(ctx, handle)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("session: loading: %w", err)
+	}
+	if r.Subject != subject {
+		return nil
+	}
+	// The subject of a key never changes, so the check above still holds.
+	if err := m.store.Delete(ctx, handle, 0); err != nil {
+		return fmt.Errorf("session: deleting: %w", err)
+	}
+	return nil
+}
+
+// RevokeAll ends every session of subject ("log out everywhere"), for
+// example after a password change. A session being rotated or stepped up
+// at the same time does not survive under its new token.
+func (m *Manager) RevokeAll(ctx context.Context, subject string) error {
+	if err := m.store.DeleteSubject(ctx, subject); err != nil {
+		return fmt.Errorf("session: deleting sessions of subject: %w", err)
 	}
 	return nil
 }
