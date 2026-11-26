@@ -68,6 +68,42 @@ p, err := auth.Authenticate(ctx, username, pw)
   reveal whether a username exists.
 - If `store` also implements `CredentialUpdater`, hashes created with
   outdated parameters are upgraded after a successful login.
+- A pepper is a server-side secret that a stolen credential database does
+  not contain. Keep it in a secret manager, not next to the hashes:
+  ```go
+  hasher, _ := password.NewHasher(password.DefaultParams,
+      password.WithPepper("2026", pepper),           // at least 32 bytes
+      password.WithRetiredPepper("2025", oldPepper)) // verify only
+  ```
+  The password is normalized (for NFC-tagged hashes), keyed with
+  HMAC-SHA-256 under the pepper, then hashed with Argon2id. The hash records
+  the key ID as `keyid=2026`. Hashes with a retired pepper or no pepper still
+  verify and report `NeedsRehash`, so logins move them to the current pepper.
+  A hash whose key ID is not configured fails with `ErrUnknownPepper`, which
+  `Authenticate` returns as a server error rather than a login failure.
+- Password reset tokens are single use and expire after 30 minutes by
+  default:
+  ```go
+  resets, _ := password.NewResetManager(password.NewMemoryResetStore())
+  token, err := resets.Issue(ctx, subject) // send it to the user, e.g. in a link
+  subject, err := resets.Redeem(ctx, token) // then set the new password with policy.Hash
+  ```
+  The store keeps only the token's SHA-256 hash, the subject and the expiry.
+  `ResetTokenStore.TakeResetToken` must remove and return a token in one
+  atomic step (in SQL, `DELETE ... RETURNING` or a locking transaction), so
+  a token cannot be redeemed twice. Issuing a token invalidates the
+  subject's earlier ones, so only the most recent link works. Expired,
+  unknown and reused tokens return `ErrInvalidResetToken`, which wraps
+  `authent.ErrUnauthenticated`.
+- To migrate users from another system, store their existing hashes as they
+  are. `Verify` accepts bcrypt (`$2a$`, `$2b$`, `$2y$`), Werkzeug scrypt
+  (`scrypt:32768:8:1$salt$hex`, the Flask default) and Django PBKDF2
+  (`pbkdf2_sha256$1000000$salt$base64`, the Django default). It never creates
+  them. `NeedsRehash` always reports them, so `Authenticate` replaces each one
+  with Argon2id at the user's next login. They are compared byte for byte,
+  without NFC normalization, as the original system did. Hashes above bcrypt
+  cost 16, 256 MiB of scrypt memory or 10,000,000 PBKDF2 iterations are
+  rejected as malformed.
 
 ### JWT
 ```go
@@ -96,7 +132,7 @@ Safeguards enforced during verification:
     rejected unless `jwt.WithConfirmationClaim()` is set, so a stolen bound
     token cannot be replayed as a bearer token (RFC 9449 §7.2).
   - Headers with `crit`, `b64` or `zip` are rejected.
-  - `jku`, `x5u` and `jwk` headers are never used to find keys.
+  - `jku`, `x5u`, `x5c` and `jwk` headers are never used to find keys.
 - **Encoding**
   - JSON is decoded with `encoding/json/v2`: member names are matched
     case-sensitively and duplicate members are rejected.
@@ -106,6 +142,38 @@ Safeguards enforced during verification:
   - ECDSA signatures must use the fixed-width R‖S form.
   - RSA keys must be at least 2048 bits.
   - HMAC keys must be at least as long as the hash output.
+
+Optional checks:
+- `jwt.WithReplayCache(jwt.NewMemoryReplayCache())` accepts each token
+  once. `jti` becomes required, and the `iss` and `jti` pair is recorded
+  until `exp` once every other check has passed. A cache error rejects the
+  token but does not wrap `authent.ErrUnauthenticated`. `dpop.Verifier`
+  takes the same `jwt.ReplayCache` interface.
+- `jwt.WithMaxTokenAge(d)` rejects tokens issued more than `d` ago and
+  makes `iat` required. `jwt.WithMaxAuthAge(d)` does the same for
+  `auth_time`, as OpenID Connect `max_age` requires. Both allow the
+  leeway on top of `d`. `Claims.AuthTime` reads `auth_time` for
+  per-request checks.
+- `jwt.WithCertificateRoots(pool)` only uses JWKs whose `x5c` chain
+  verifies to `pool` at the verifier's clock, with a leaf allowed to make
+  digital signatures. Keys without `x5c` are not used. Independently of
+  this option, a JWK whose `x5c` leaf certifies a different key is
+  rejected when parsed.
+
+A signing key can come from a private JWK:
+```go
+k, _ := jwt.ParsePrivateJWK(data) // RSA with CRT values, EC or Ed25519; checked against the public members
+signer, _ := jwt.NewSigner(jwt.ES256, k.Key, jwt.WithKeyID(k.KeyID))
+```
+`ParseJWK` rejects any JWK with private members, and `ParseJWKSet` drops
+such keys, so a leaked private key is never used to verify tokens.
+
+`RemoteKeySet` keeps a fetched set for the `max-age` of its
+`Cache-Control` header, clamped between `WithMinRefreshInterval` (default
+1 minute) and `WithMaxRefreshInterval` (default 24 hours). `no-store` and
+`no-cache` keep it for the minimum interval. Without `max-age`,
+`WithRefreshInterval` (default 1 hour) applies. A token with an unknown
+`kid` triggers an early refetch, at most once per minimum interval.
 
 ### Sessions
 ```go
@@ -205,7 +273,7 @@ tokens, _ := jwt.NewVerifier(keys, jwt.WithAlgorithms(jwt.ES256), jwt.WithIssuer
 	jwt.WithAudience("api"), jwt.WithExpectedType("at+jwt"),
 	jwt.WithConfirmationClaim()) // the binding is checked by dpop.Authenticator
 proofs, _ := dpop.NewVerifier(dpop.WithAlgorithms(jwt.ES256),
-	dpop.WithReplayCache(dpop.NewMemoryReplayCache())) // or dpop.WithoutReplayCheck()
+	dpop.WithReplayCache(jwt.NewMemoryReplayCache())) // or dpop.WithoutReplayCheck()
 auth, _ := dpop.NewAuthenticator(tokens, proofs)
 
 at, err := dpop.AccessToken(r.Header.Get("Authorization"))
@@ -481,7 +549,8 @@ go test ./apikey -run '^$' -fuzz FuzzParse -fuzztime 30s
 go test ./totp -run '^$' -fuzz FuzzParseURI -fuzztime 30s
 ```
 `jwt/testdata/gen_openssl_vectors.py` generates `jwt/testdata/openssl_vectors.json`
-with OpenSSL. `webauthn/testdata/extract_spec_vectors.py` extracts
+and `jwt/testdata/gen_openssl_x5c.py` generates the certificate chain in
+`jwt/testdata/openssl_x5c.json` with OpenSSL. `webauthn/testdata/extract_spec_vectors.py` extracts
 `webauthn/testdata/spec_vectors.json` from the test vectors in the WebAuthn
 Level 3 specification. The TOTP tests use the RFC 4226 and RFC 6238
 vectors. These vectors come from sources independent of this library.

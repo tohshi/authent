@@ -1,0 +1,92 @@
+[
+  {
+    "source": "htpasswd -B",
+    "password": "password",
+    "hash": "$2y$05$Prdz0770Nsm/lnTairfMbOWYXKWxntmriGMhQ1QtqW0EPWeiSrJre"
+  },
+  {
+    "source": "htpasswd -B",
+    "password": "password",
+    "hash": "$2a$05$Prdz0770Nsm/lnTairfMbOWYXKWxntmriGMhQ1QtqW0EPWeiSrJre"
+  },
+  {
+    "source": "htpasswd -B",
+    "password": "password",
+    "hash": "$2b$05$Prdz0770Nsm/lnTairfMbOWYXKWxntmriGMhQ1QtqW0EPWeiSrJre"
+  },
+  {
+    "source": "hashlib.scrypt, Werkzeug format",
+    "password": "password",
+    "hash": "scrypt:1024:8:1$salt0Werkzeug0$1eb96390101198058fabc823c2828ec6bb16f20367ace5825029b0df37add0f9eddd1289e16f1150b09f87e13ebf8efc4b34054a1d160535f3dd08a5363d1444"
+  },
+  {
+    "source": "hashlib.pbkdf2_hmac, Django format",
+    "password": "password",
+    "hash": "pbkdf2_sha256$1000$salt0Django0$Lb+TCkRNEJYd+JofL7BseXb3wBrVS2/o9XKL1RHIUf8="
+  },
+  {
+    "source": "htpasswd -B",
+    "password": "correct horse battery staple",
+    "hash": "$2y$05$KHnKT6somhz61fB42OAdLuTcMFUQfdqMxVSTmMPruOrxaF3rhQ2q6"
+  },
+  {
+    "source": "htpasswd -B",
+    "password": "correct horse battery staple",
+    "hash": "$2a$05$KHnKT6somhz61fB42OAdLuTcMFUQfdqMxVSTmMPruOrxaF3rhQ2q6"
+  },
+  {
+    "source": "htpasswd -B",
+    "password": "correct horse battery staple",
+    "hash": "$2b$05$KHnKT6somhz61fB42OAdLuTcMFUQfdqMxVSTmMPruOrxaF3rhQ2q6"
+  },
+  {
+    "source": "hashlib.scrypt, Werkzeug format",
+    "password": "correct horse battery staple",
+    "hash": "scrypt:1024:8:1$salt1Werkzeug1$34628589a931b6a2a1e504b58d2788968bcf8a0d96c45453bd8e27f761186d4536cac8956bc0ec94b5e8ad32cc51bb0d36dece6f123fd16798e699fad7cb312a"
+  },
+  {
+    "source": "hashlib.pbkdf2_hmac, Django format",
+    "password": "correct horse battery staple",
+    "hash": "pbkdf2_sha256$1000$salt1Django1$lkKmJatRO4Ajlkaunwei90qbKi3xZzbKTfm2RyU7d7Q="
+  },
+  {
+    "source": "htpasswd -B",
+    "password": "cafe\u0301",
+    "hash": "$2y$05$5VORaOzuGGl8H5/g9bDn.evS1WEur5CoOcYyeWWcV.mbIA6xpg0S6"
+  },
+  {
+    "source": "htpasswd -B",
+    "password": "cafe\u0301",
+    "hash": "$2a$05$5VORaOzuGGl8H5/g9bDn.evS1WEur5CoOcYyeWWcV.mbIA6xpg0S6"
+  },
+  {
+    "source": "htpasswd -B",
+    "password": "cafe\u0301",
+    "hash": "$2b$05$5VORaOzuGGl8H5/g9bDn.evS1WEur5CoOcYyeWWcV.mbIA6xpg0S6"
+  },
+  {
+    "source": "hashlib.scrypt, Werkzeug format",
+    "password": "cafe\u0301",
+    "hash": "scrypt:1024:8:1$salt2Werkzeug2$e7d0bb66de6cbe828347a0b42bf54b791cb4c49f9eb7ee80101f715fdb0ba42a943cb3763ac19ca0883f779302dbadb775341ccc0e570e737d449fe0bb85871d"
+  },
+  {
+    "source": "hashlib.pbkdf2_hmac, Django format",
+    "password": "cafe\u0301",
+    "hash": "pbkdf2_sha256$1000$salt2Django2$cjW568OpowBSamRGPISBu/Qy7SA/sqy7J7KAetXwvlM="
+  },
+  {
+    "source": "htpasswd -B",
+    "password": "password",
+    "hash": "$2y$10$9B6HoLADRWi20waecgcrj.HUaS3l9Hg10XEzZWNZaHXvMf47PtmNi"
+  },
+  {
+    "source": "hashlib.scrypt, Werkzeug format",
+    "password": "password",
+    "hash": "scrypt:32768:8:1$s4ltS4ltS4ltS4lt$e8ee8e1de9de92569fd92aa4f2fde772a0b5dda0ed8f3d19dc38a9c3171c2bac3547c05932082b24584db9efdc5bbfe7f899053c2b26beaf17700c099870c32a"
+  },
+  {
+    "source": "hashlib.pbkdf2_hmac, Django format",
+    "password": "password",
+    "hash": "pbkdf2_sha256$1000000$s4ltS4ltS4ltS4ltS4ltS4$gQjI1o6gGqtmDdTFjImtuC0TbD9w4pjc/xSjqXYAIrE="
+  }
+]
