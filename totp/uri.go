@@ -94,21 +94,25 @@ func parseURI(s string) (ProvisioningURI, error) {
 		case "algorithm":
 			p.Key.Algorithm = Algorithm(v)
 		case "digits":
-			var n uint64
-			n, err = parseCanonicalDecimal(v, 8)
+			n, perr := parseCanonicalDecimal(v)
+			if perr != nil || n > 8 {
+				return ProvisioningURI{}, fmt.Errorf("digits: invalid number %q", v)
+			}
 			p.Key.Digits = int(n)
 		case "period":
-			var n uint64
 			if p.Type != TypeTOTP {
 				return ProvisioningURI{}, errors.New("period in a HOTP URI")
 			}
-			n, err = parseCanonicalDecimal(v, math.MaxInt64/uint64(time.Second))
+			n, perr := parseCanonicalDecimal(v)
+			if perr != nil || n > math.MaxInt64/uint64(time.Second) {
+				return ProvisioningURI{}, fmt.Errorf("period: invalid number %q", v)
+			}
 			p.Key.Period = time.Duration(n) * time.Second
 		case "counter":
 			if p.Type != TypeHOTP {
 				return ProvisioningURI{}, errors.New("counter in a TOTP URI")
 			}
-			p.Counter, err = parseCanonicalDecimal(v, math.MaxUint64)
+			p.Counter, err = parseCanonicalDecimal(v)
 		default:
 			return ProvisioningURI{}, fmt.Errorf("unknown parameter %q", name)
 		}
@@ -185,9 +189,9 @@ func parseParams(query string) (map[string]string, error) {
 	return params, nil
 }
 
-func parseCanonicalDecimal(s string, max uint64) (uint64, error) {
+func parseCanonicalDecimal(s string) (uint64, error) {
 	n, err := strconv.ParseUint(s, 10, 64)
-	if err != nil || n > max || strconv.FormatUint(n, 10) != s {
+	if err != nil || strconv.FormatUint(n, 10) != s {
 		return 0, fmt.Errorf("invalid number %q", s)
 	}
 	return n, nil
