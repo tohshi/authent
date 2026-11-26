@@ -276,6 +276,16 @@ p, err := recovery.Authenticate(ctx, "u1", code)     // p.Method is authent.Meth
 - `RecoveryStore.ConsumeRecoveryCode` must check and remove the hash
   atomically, so a code works only once.
 
+`totp.ParseURI` reads an `otpauth://totp` or `otpauth://hotp` URI back into
+a `Key`, for example to import keys from another system:
+```go
+p, err := totp.ParseURI(uri) // p.Key, p.Issuer, p.Account, p.Counter (HOTP)
+```
+The parser is strict. It rejects unknown, repeated or empty parameters,
+non-canonical base32 and numbers, an `issuer` parameter that differs from
+the label, and keys that fail validation. Missing `algorithm`, `digits` and
+`period` default to SHA1, 6 and 30 seconds.
+
 ### WebAuthn
 ```go
 rp, _ := webauthn.New(webauthn.Config{
@@ -464,6 +474,7 @@ go test -race ./...
 go test ./jwt -run '^$' -fuzz FuzzVerify -fuzztime 30s
 go test ./webauthn -run '^$' -fuzz FuzzCBOR -fuzztime 30s
 go test ./apikey -run '^$' -fuzz FuzzParse -fuzztime 30s
+go test ./totp -run '^$' -fuzz FuzzParseURI -fuzztime 30s
 ```
 `jwt/testdata/gen_openssl_vectors.py` generates `jwt/testdata/openssl_vectors.json`
 with OpenSSL. `webauthn/testdata/extract_spec_vectors.py` extracts

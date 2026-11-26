@@ -149,7 +149,9 @@ const (
 
 // URI returns the otpauth:// URI that authenticator apps read from a QR
 // code. issuer names the service and account names the user within it;
-// neither may contain a colon. issuer may be empty but should be set.
+// neither may contain a colon, and account may not start with a space,
+// which the format does not distinguish from the separator. issuer may be
+// empty but should be set.
 func (k Key) URI(issuer, account string) (string, error) {
 	if err := k.Validate(); err != nil {
 		return "", err
@@ -169,6 +171,9 @@ func (k Key) HOTPURI(issuer, account string, counter uint64) (string, error) {
 func (k Key) uri(typ URIType, issuer, account, last string) (string, error) {
 	if account == "" {
 		return "", errors.New("totp: account is required")
+	}
+	if account[0] == ' ' {
+		return "", errors.New("totp: account must not start with a space")
 	}
 	if strings.Contains(issuer, ":") || strings.Contains(account, ":") {
 		return "", errors.New("totp: issuer and account must not contain a colon")

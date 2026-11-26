@@ -157,7 +157,7 @@ Legend:
 | Pluggable store | ✅ | `Store` interface |
 | Recovery codes | ✅ | 120-bit single-use codes stored as SHA-256; `RecoveryStore.ConsumeRecoveryCode` removes a code atomically |
 | HOTP counter-based authentication | ✅ | `HOTPAuthenticator`: look-ahead window, resynchronization with two consecutive codes (RFC 4226 §7.4), atomic counter advance; `Key.HOTPURI` |
-| Parsing `otpauth://` URIs | ⬜ | |
+| Parsing `otpauth://` URIs | ✅ | `ParseURI` for TOTP and HOTP; strict about parameters, encoding and the label; fuzzed |
 | Encrypting secrets at rest | ➖ | Depends on the deployment's key management; belongs in the store |
 | Rate limiting | ➖ | Depends on deployment; belongs in the caller |
 
