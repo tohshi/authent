@@ -60,7 +60,6 @@ const DefaultSQLTable = "authent_sessions"
 // sizes the MySQL column.
 const maxSQLSubject = 1024
 
-// sqlColumns are the columns every SELECT returns, in this order.
 const sqlColumns = "token_hash, subject, version, expires_at, data"
 
 // SQLStore is a Store backed by a SQL database through database/sql. It

@@ -129,7 +129,6 @@ func (s *Session) VerifyCSRF(token string) bool {
 	return token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.st.CSRFToken)) == 1
 }
 
-// addFactor records that the subject passed f.Method at f.Time.
 func (s *Session) addFactor(f Factor) {
 	i := slices.IndexFunc(s.st.Factors, func(g Factor) bool { return g.Method == f.Method })
 	if i < 0 {
@@ -226,7 +225,6 @@ func decodeToken(s string) ([]byte, bool) {
 	return raw, true
 }
 
-// storeKey maps a token to its store key.
 func storeKey(token string) (string, bool) {
 	raw, ok := decodeToken(token)
 	if !ok {
@@ -315,7 +313,6 @@ func (m *Manager) Get(ctx context.Context, token string) (*Session, error) {
 	return s, nil
 }
 
-// load returns the unexpired session stored under key.
 func (m *Manager) load(ctx context.Context, key string) (*Session, error) {
 	r, err := m.store.Load(ctx, key)
 	if errors.Is(err, ErrNotFound) {
@@ -350,7 +347,6 @@ func (m *Manager) Save(ctx context.Context, s *Session) error {
 	return m.save(ctx, s)
 }
 
-// save writes s as the next version of its record.
 func (m *Manager) save(ctx context.Context, s *Session) error {
 	expiresAt := m.expiresAt(s)
 	if !m.now().Before(expiresAt) {
