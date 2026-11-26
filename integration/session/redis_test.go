@@ -9,6 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/tohshi/authent"
 	"github.com/tohshi/authent/integration/testenv"
 	"github.com/tohshi/authent/redis/redissession"
 	"github.com/tohshi/authent/session"
@@ -77,5 +78,66 @@ func TestRedisStoreServerDown(t *testing.T) {
 	_, err = m.Get(context.Background(), "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 	if err == nil || errors.Is(err, session.ErrInvalidSession) {
 		t.Fatalf("Get with Redis down: err = %v, want a connection error", err)
+	}
+}
+
+func TestRedisStoreIndexHoldsOnlyLiveSessions(t *testing.T) {
+	s, client, prefix := newRedisStore(t)
+	m, err := session.NewManager(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	alice := authent.Principal{Subject: "alice", Method: authent.MethodPassword}
+	indexSize := func() int64 {
+		t.Helper()
+		n, err := client.ZCard(ctx, prefix+"s:alice").Result()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	for range 20 {
+		tok, _, err := m.Create(ctx, alice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Destroy(ctx, tok); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := indexSize(); n != 0 {
+		t.Fatalf("after Create+Destroy: index holds %d entries, want 0", n)
+	}
+	for i := range 20 {
+		tok, _, err := m.Create(ctx, alice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := m.Rotate(ctx, tok); err != nil {
+			t.Fatal(err)
+		}
+		if n := indexSize(); n != int64(i+1) {
+			t.Fatalf("after %d Create+Rotate: index holds %d entries, want %d", i+1, n, i+1)
+		}
+	}
+}
+
+func TestRedisStoreDeleteSubjectSparesOtherSubjects(t *testing.T) {
+	s, _, _ := newRedisStore(t)
+	ctx := context.Background()
+	exp := time.Now().Add(time.Minute)
+	if err := s.Save(ctx, "k", session.Record{Subject: "old", Version: 1, ExpiresAt: exp, Data: []byte("{}")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(ctx, "k", session.Record{Subject: "new", Version: 2, ExpiresAt: exp, Data: []byte("{}")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteSubject(ctx, "old"); err != nil {
+		t.Fatal(err)
+	}
+	r, err := s.Load(ctx, "k")
+	if err != nil || r.Subject != "new" {
+		t.Fatalf("DeleteSubject(old) removed a session of another subject: %+v, %v", r, err)
 	}
 }
