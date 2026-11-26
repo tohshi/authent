@@ -16,7 +16,7 @@ type Key[T any] string
 // value that does not decode into T, for example one stored by an older
 // version of the application, is an error.
 func (k Key[T]) Get(s *Session) (v T, ok bool, err error) {
-	raw, ok := s.values[string(k)]
+	raw, ok := s.st.Values[string(k)]
 	if !ok {
 		return v, false, nil
 	}
@@ -32,14 +32,14 @@ func (k Key[T]) Set(s *Session, v T) error {
 	if err != nil {
 		return fmt.Errorf("session: encoding value %q: %w", string(k), err)
 	}
-	if s.values == nil {
-		s.values = map[string]jsontext.Value{}
+	if s.st.Values == nil {
+		s.st.Values = map[string]jsontext.Value{}
 	}
-	s.values[string(k)] = raw
+	s.st.Values[string(k)] = raw
 	return nil
 }
 
 // Delete removes the value under k. Call Manager.Save to persist it.
 func (k Key[T]) Delete(s *Session) {
-	delete(s.values, string(k))
+	delete(s.st.Values, string(k))
 }

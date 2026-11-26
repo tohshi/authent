@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -100,8 +101,8 @@ func TestCreateAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(token) != 43 || s.CSRFToken == "" || s.CSRFToken == token {
-		t.Fatalf("token %q csrf %q", token, s.CSRFToken)
+	if len(token) != 43 || s.CSRFToken() == "" || s.CSRFToken() == token {
+		t.Fatalf("token %q csrf %q", token, s.CSRFToken())
 	}
 	for _, k := range store.keys {
 		if strings.Contains(k, token) {
@@ -117,8 +118,176 @@ func TestCreateAndGet(t *testing.T) {
 	if p.Subject != "alice" || p.Method != authent.MethodSession || !p.AuthTime.Equal(c.now()) {
 		t.Fatalf("principal = %+v", p)
 	}
-	if p.Claims["auth_method"] != "password" {
+	if amr, _ := p.Claims["amr"].([]string); !slices.Equal(amr, []string{"password"}) {
 		t.Fatalf("claims = %v", p.Claims)
+	}
+	if f := got.Factors(); len(f) != 1 || f[0].Method != authent.MethodPassword || !f[0].Time.Equal(c.now()) {
+		t.Fatalf("Factors = %+v", f)
+	}
+}
+
+func TestCreateRejectsIncompletePrincipal(t *testing.T) {
+	m, store, _ := setup(t)
+	for _, p := range []authent.Principal{
+		{Method: authent.MethodPassword},
+		{Subject: "alice"},
+	} {
+		if _, _, err := m.Create(context.Background(), p); err == nil {
+			t.Errorf("Create(%+v) succeeded", p)
+		}
+	}
+	if store.Len() != 0 {
+		t.Fatal("a rejected Create stored a session")
+	}
+}
+
+func TestCreateFactorTime(t *testing.T) {
+	m, _, c := setup(t)
+	ctx := context.Background()
+	earlier := c.now().Add(-time.Hour)
+	for _, tc := range []struct {
+		authTime, want time.Time
+	}{
+		{earlier, earlier},
+		{time.Time{}, c.now()},
+		// An authenticator's clock ahead of ours must not make the
+		// authentication look fresher than it can be.
+		{c.now().Add(time.Hour), c.now()},
+	} {
+		_, s, err := m.Create(ctx, authent.Principal{Subject: "alice", Method: authent.MethodOIDC, AuthTime: tc.authTime})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f := s.Factors(); !f[0].Time.Equal(tc.want) || !s.Principal().AuthTime.Equal(tc.want) {
+			t.Errorf("AuthTime %v: factor time %v, want %v", tc.authTime, f[0].Time, tc.want)
+		}
+	}
+}
+
+func TestStepUp(t *testing.T) {
+	m, _, c := setup(t)
+	ctx := context.Background()
+	t0 := c.now()
+	token, s, _ := m.Create(ctx, alice)
+	set(t, s, "k", "v")
+	_ = m.Save(ctx, s)
+
+	c.advance(10 * time.Minute)
+	t1 := c.now()
+	if s.AuthenticatedSince(t1.Add(-5*time.Minute), authent.MethodTOTP) {
+		t.Fatal("TOTP required before step-up, but AuthenticatedSince reported true")
+	}
+	newTok, up, err := m.StepUp(ctx, token, authent.Principal{Subject: "alice", Method: authent.MethodTOTP})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newTok == token || up.CSRFToken() == s.CSRFToken() {
+		t.Fatal("StepUp did not rotate the token and CSRF token")
+	}
+	if _, err := m.Get(ctx, token); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("token from before the step-up still valid: %v", err)
+	}
+	got, err := m.Get(ctx, newTok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Factor{{authent.MethodPassword, t0}, {authent.MethodTOTP, t1}}
+	if f := got.Factors(); len(f) != 2 || f[0].Method != want[0].Method || !f[0].Time.Equal(t0) ||
+		f[1].Method != want[1].Method || !f[1].Time.Equal(t1) {
+		t.Fatalf("Factors = %+v, want %+v", f, want)
+	}
+	p := got.Principal()
+	if amr, _ := p.Claims["amr"].([]string); !slices.Equal(amr, []string{"password", "totp"}) || !p.AuthTime.Equal(t1) {
+		t.Fatalf("Principal = %+v", p)
+	}
+	if !got.AuthenticatedSince(t1.Add(-5*time.Minute), authent.MethodTOTP) ||
+		!got.AuthenticatedSince(time.Time{}, authent.MethodPassword, authent.MethodTOTP) {
+		t.Fatal("AuthenticatedSince does not see the step-up")
+	}
+	if get(got, "k") != "v" || !got.CreatedAt().Equal(t0) {
+		t.Fatal("StepUp lost the values or reset the absolute timeout")
+	}
+
+	// Passing a method again refreshes its time without duplicating it.
+	c.advance(time.Minute)
+	newTok, again, err := m.StepUp(ctx, newTok, authent.Principal{Subject: "alice", Method: authent.MethodPassword})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := again.Factors(); len(f) != 2 || f[0].Method != authent.MethodPassword || !f[0].Time.Equal(c.now()) {
+		t.Fatalf("Factors after re-authentication = %+v", f)
+	}
+	if _, err := m.Get(ctx, newTok); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStepUpRejectsOtherPrincipal(t *testing.T) {
+	m, store, _ := setup(t)
+	ctx := context.Background()
+	token, _, _ := m.Create(ctx, authent.Principal{Subject: "alice", Issuer: "https://idp.example", Method: authent.MethodOIDC})
+	for _, p := range []authent.Principal{
+		{Subject: "mallory", Issuer: "https://idp.example", Method: authent.MethodTOTP},
+		{Subject: "alice", Method: authent.MethodTOTP},
+		{Subject: "alice", Issuer: "https://other.example", Method: authent.MethodTOTP},
+		{Subject: "Alice", Issuer: "https://idp.example", Method: authent.MethodTOTP},
+		{Subject: "alice", Issuer: "https://idp.example"},
+	} {
+		if _, _, err := m.StepUp(ctx, token, p); !errors.Is(err, authent.ErrUnauthenticated) {
+			t.Errorf("StepUp(%+v): err = %v, want ErrUnauthenticated", p, err)
+		}
+	}
+	s, err := m.Get(ctx, token)
+	if err != nil {
+		t.Fatalf("session after rejected step-ups: %v", err)
+	}
+	if f := s.Factors(); len(f) != 1 || store.Len() != 1 {
+		t.Fatalf("rejected step-ups changed the session: %+v, %d stored", f, store.Len())
+	}
+	if _, _, err := m.StepUp(ctx, "garbage", alice); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("StepUp(garbage): err = %v", err)
+	}
+}
+
+func TestAuthenticatedSince(t *testing.T) {
+	m, _, c := setup(t)
+	ctx := context.Background()
+	t0 := c.now()
+	token, _, _ := m.Create(ctx, alice)
+	c.advance(20 * time.Minute)
+	t1 := c.now()
+	_, s, err := m.StepUp(ctx, token, authent.Principal{Subject: "alice", Method: authent.MethodWebAuthn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		since   time.Time
+		methods []authent.Method
+		want    bool
+	}{
+		{time.Time{}, nil, true},
+		{t1, nil, true},
+		{t1.Add(time.Nanosecond), nil, false},
+		{t0, []authent.Method{authent.MethodPassword}, true},
+		{t0.Add(time.Nanosecond), []authent.Method{authent.MethodPassword}, false},
+		{t1, []authent.Method{authent.MethodWebAuthn}, true},
+		{t0, []authent.Method{authent.MethodPassword, authent.MethodWebAuthn}, true},
+		{t1, []authent.Method{authent.MethodPassword, authent.MethodWebAuthn}, false},
+		{time.Time{}, []authent.Method{authent.MethodTOTP}, false},
+		{time.Time{}, []authent.Method{authent.MethodWebAuthn, authent.MethodTOTP}, false},
+	} {
+		if got := s.AuthenticatedSince(tc.since, tc.methods...); got != tc.want {
+			t.Errorf("AuthenticatedSince(%v, %v) = %v, want %v", tc.since.Sub(t0), tc.methods, got, tc.want)
+		}
+	}
+}
+
+func TestFactorsReturnsCopy(t *testing.T) {
+	m, _, _ := setup(t)
+	_, s, _ := m.Create(context.Background(), alice)
+	s.Factors()[0].Method = authent.MethodWebAuthn
+	if s.AuthenticatedSince(time.Time{}, authent.MethodWebAuthn) {
+		t.Fatal("modifying the result of Factors added a factor")
 	}
 }
 
@@ -214,14 +383,14 @@ func TestRotate(t *testing.T) {
 	token, s, _ := m.Create(ctx, alice)
 	set(t, s, "k", "v")
 	_ = m.Save(ctx, s)
-	created := s.CreatedAt
+	created := s.CreatedAt()
 
 	c.advance(time.Minute)
 	newTok, rotated, err := m.Rotate(ctx, token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if newTok == token || rotated.CSRFToken == s.CSRFToken {
+	if newTok == token || rotated.CSRFToken() == s.CSRFToken() {
 		t.Fatal("token or CSRF token not replaced")
 	}
 	if _, err := m.Get(ctx, token); !errors.Is(err, ErrInvalidSession) {
@@ -231,7 +400,7 @@ func TestRotate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if get(got, "k") != "v" || !got.CreatedAt.Equal(created) {
+	if get(got, "k") != "v" || !got.CreatedAt().Equal(created) {
 		t.Fatalf("rotated session lost data: %+v", got)
 	}
 }
@@ -254,10 +423,10 @@ func TestDestroy(t *testing.T) {
 func TestVerifyCSRF(t *testing.T) {
 	m, _, _ := setup(t)
 	_, s, _ := m.Create(context.Background(), alice)
-	if !s.VerifyCSRF(s.CSRFToken) {
+	if !s.VerifyCSRF(s.CSRFToken()) {
 		t.Fatal("valid CSRF token rejected")
 	}
-	for _, bad := range []string{"", "x", s.CSRFToken + "x"} {
+	for _, bad := range []string{"", "x", s.CSRFToken() + "x"} {
 		if s.VerifyCSRF(bad) {
 			t.Errorf("VerifyCSRF(%q) = true", bad)
 		}

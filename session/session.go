@@ -18,6 +18,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/tohshi/authent"
@@ -27,82 +28,119 @@ import (
 // expired. It wraps authent.ErrUnauthenticated.
 var ErrInvalidSession = fmt.Errorf("session: invalid session: %w", authent.ErrUnauthenticated)
 
-// Session is the state stored for a session.
-type Session struct {
-	Subject    string
-	Issuer     string
-	AuthMethod authent.Method
-	AuthTime   time.Time
-	// CSRFToken is a per-session synchronizer token. Embed it in forms or
-	// headers and check it with VerifyCSRF on state-changing requests.
-	CSRFToken  string
-	CreatedAt  time.Time
-	LastSeenAt time.Time
-
-	values  map[string]jsontext.Value // application data; see Key
-	key     string                    // store key of the session; set by the Manager
-	version uint64                    // version of the stored record s was loaded from
+// Factor is an authentication method the session's subject passed, and
+// when it last did.
+type Factor struct {
+	Method authent.Method `json:"method"`
+	Time   time.Time      `json:"time"`
 }
 
-// Principal returns the authenticated subject of the session.
+// Session is the state stored for a session. Its authentication state
+// changes only through the Manager; application data is read and written
+// with Key.
+type Session struct {
+	st      state
+	key     string // store key of the session; set by the Manager
+	version uint64 // version of the stored record s was loaded from
+}
+
+// state is the part of a session encoded into Record.Data.
+type state struct {
+	Subject    string                    `json:"sub"`
+	Issuer     string                    `json:"iss,omitempty"`
+	Factors    []Factor                  `json:"factors"`
+	CSRFToken  string                    `json:"csrf"`
+	CreatedAt  time.Time                 `json:"created"`
+	LastSeenAt time.Time                 `json:"last_seen"`
+	Values     map[string]jsontext.Value `json:"values,omitempty"`
+}
+
+// Subject returns the authenticated subject.
+func (s *Session) Subject() string { return s.st.Subject }
+
+// Issuer returns who vouched for the subject when the session was created.
+func (s *Session) Issuer() string { return s.st.Issuer }
+
+// Factors returns the authentication methods the subject passed in this
+// session, each once, in the order they were first passed.
+func (s *Session) Factors() []Factor { return slices.Clone(s.st.Factors) }
+
+// CSRFToken returns the per-session synchronizer token. Embed it in forms
+// or headers and check it with VerifyCSRF on state-changing requests.
+func (s *Session) CSRFToken() string { return s.st.CSRFToken }
+
+// CreatedAt returns when the session was created; the absolute timeout
+// counts from it.
+func (s *Session) CreatedAt() time.Time { return s.st.CreatedAt }
+
+// LastSeenAt returns the last recorded activity; the idle timeout counts
+// from it.
+func (s *Session) LastSeenAt() time.Time { return s.st.LastSeenAt }
+
+// Principal returns the authenticated subject of the session. AuthTime is
+// the most recent authentication, and the "amr" claim lists the methods
+// of Factors as a []string.
 func (s *Session) Principal() authent.Principal {
-	return authent.Principal{
-		Subject:  s.Subject,
-		Issuer:   s.Issuer,
-		Method:   authent.MethodSession,
-		AuthTime: s.AuthTime,
-		Claims:   map[string]any{"auth_method": string(s.AuthMethod)},
+	amr := make([]string, len(s.st.Factors))
+	var last time.Time
+	for i, f := range s.st.Factors {
+		amr[i] = string(f.Method)
+		if f.Time.After(last) {
+			last = f.Time
+		}
 	}
+	return authent.Principal{
+		Subject:  s.st.Subject,
+		Issuer:   s.st.Issuer,
+		Method:   authent.MethodSession,
+		AuthTime: last,
+		Claims:   map[string]any{"amr": amr},
+	}
+}
+
+// AuthenticatedSince reports whether the subject passed every listed
+// method at or after t. With no methods, it reports whether the most recent
+// authentication, by any method, was at or after t. Use it before
+// sensitive actions, and call Manager.StepUp when it reports false. A zero
+// t places no limit on the age.
+func (s *Session) AuthenticatedSince(t time.Time, methods ...authent.Method) bool {
+	if len(methods) == 0 {
+		return slices.ContainsFunc(s.st.Factors, func(f Factor) bool { return !f.Time.Before(t) })
+	}
+	for _, m := range methods {
+		i := slices.IndexFunc(s.st.Factors, func(f Factor) bool { return f.Method == m })
+		if i < 0 || s.st.Factors[i].Time.Before(t) {
+			return false
+		}
+	}
+	return true
 }
 
 // VerifyCSRF reports whether token equals the session's CSRF token, in
 // constant time.
 func (s *Session) VerifyCSRF(token string) bool {
-	return token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.CSRFToken)) == 1
+	return token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.st.CSRFToken)) == 1
 }
 
-// storedSession is the encoding of a session in Record.Data.
-type storedSession struct {
-	Subject    string                    `json:"sub"`
-	Issuer     string                    `json:"iss,omitempty"`
-	AuthMethod authent.Method            `json:"method"`
-	AuthTime   time.Time                 `json:"auth_time"`
-	Values     map[string]jsontext.Value `json:"values,omitempty"`
-	CSRFToken  string                    `json:"csrf"`
-	CreatedAt  time.Time                 `json:"created"`
-	LastSeenAt time.Time                 `json:"last_seen"`
-}
-
-func (s *Session) encode() ([]byte, error) {
-	return json.Marshal(storedSession{
-		Subject:    s.Subject,
-		Issuer:     s.Issuer,
-		AuthMethod: s.AuthMethod,
-		AuthTime:   s.AuthTime,
-		Values:     s.values,
-		CSRFToken:  s.CSRFToken,
-		CreatedAt:  s.CreatedAt,
-		LastSeenAt: s.LastSeenAt,
-	})
+// addFactor records that the subject passed f.Method at f.Time.
+func (s *Session) addFactor(f Factor) {
+	i := slices.IndexFunc(s.st.Factors, func(g Factor) bool { return g.Method == f.Method })
+	if i < 0 {
+		s.st.Factors = append(s.st.Factors, f)
+	} else if f.Time.After(s.st.Factors[i].Time) {
+		s.st.Factors[i].Time = f.Time
+	}
 }
 
 func decode(key string, r Record) (*Session, error) {
-	var d storedSession
-	if err := json.Unmarshal(r.Data, &d); err != nil {
+	s := &Session{key: key, version: r.Version}
+	if err := json.Unmarshal(r.Data, &s.st); err != nil {
 		return nil, fmt.Errorf("session: decoding stored session: %w", err)
 	}
-	return &Session{
-		Subject:    d.Subject,
-		Issuer:     d.Issuer,
-		AuthMethod: d.AuthMethod,
-		AuthTime:   d.AuthTime,
-		values:     d.Values,
-		CSRFToken:  d.CSRFToken,
-		CreatedAt:  d.CreatedAt,
-		LastSeenAt: d.LastSeenAt,
-		key:        key,
-		version:    r.Version,
-	}, nil
+	if s.st.Subject == "" || len(s.st.Factors) == 0 {
+		return nil, errors.New("session: stored session has no subject or factors")
+	}
+	return s, nil
 }
 
 // Manager creates, validates, rotates and destroys sessions.
@@ -183,19 +221,19 @@ func storeKey(token string) (string, bool) {
 // Create starts a session for p and returns its token, which the caller
 // must transport to the client. Call it after every successful login so
 // that a session ID set before login is never reused (session fixation).
+// The session records p.Method as its first factor.
 func (m *Manager) Create(ctx context.Context, p authent.Principal) (string, *Session, error) {
+	if p.Subject == "" || p.Method == "" {
+		return "", nil, errors.New("session: principal without subject or method")
+	}
 	now := m.now()
-	s := &Session{
+	s := &Session{st: state{
 		Subject:    p.Subject,
 		Issuer:     p.Issuer,
-		AuthMethod: p.Method,
-		AuthTime:   p.AuthTime,
+		Factors:    []Factor{m.factor(p)},
 		CreatedAt:  now,
 		LastSeenAt: now,
-	}
-	if s.AuthTime.IsZero() {
-		s.AuthTime = now
-	}
+	}}
 	token, err := m.assignToken(s)
 	if err != nil {
 		return "", nil, err
@@ -217,8 +255,18 @@ func (m *Manager) assignToken(s *Session) (string, error) {
 		return "", err
 	}
 	s.key, _ = storeKey(token)
-	s.CSRFToken = csrf
+	s.st.CSRFToken = csrf
 	return token, nil
+}
+
+// factor returns the factor p authenticated with. An AuthTime in the
+// future, or none, counts as now.
+func (m *Manager) factor(p authent.Principal) Factor {
+	now := m.now()
+	if p.AuthTime.IsZero() || p.AuthTime.After(now) {
+		return Factor{Method: p.Method, Time: now}
+	}
+	return Factor{Method: p.Method, Time: p.AuthTime}
 }
 
 // Get returns the session for token. It returns ErrInvalidSession if the
@@ -233,10 +281,10 @@ func (m *Manager) Get(ctx context.Context, token string) (*Session, error) {
 		return nil, err
 	}
 	now := m.now()
-	if now.Sub(s.LastSeenAt) < m.touchInterval {
+	if now.Sub(s.st.LastSeenAt) < m.touchInterval {
 		return s, nil
 	}
-	s.LastSeenAt = now
+	s.st.LastSeenAt = now
 	err = m.save(ctx, s)
 	if errors.Is(err, ErrConflict) {
 		// A concurrent request saved the session first. Its copy is at
@@ -271,7 +319,8 @@ func (m *Manager) load(ctx context.Context, key string) (*Session, error) {
 	return s, nil
 }
 
-// Save persists changes to s, which must come from Create, Get or Rotate.
+// Save persists changes to the values of s, which must come from the
+// Manager.
 // If the session was saved, rotated or destroyed since s was obtained, Save
 // returns an error wrapping ErrConflict and stores nothing; get the session
 // again and reapply the change. A session past its timeout returns
@@ -289,7 +338,7 @@ func (m *Manager) save(ctx context.Context, s *Session) error {
 	if !m.now().Before(expiresAt) {
 		return ErrInvalidSession
 	}
-	data, err := s.encode()
+	data, err := json.Marshal(s.st)
 	if err != nil {
 		return fmt.Errorf("session: encoding: %w", err)
 	}
@@ -302,8 +351,8 @@ func (m *Manager) save(ctx context.Context, s *Session) error {
 }
 
 func (m *Manager) expiresAt(s *Session) time.Time {
-	idle := s.LastSeenAt.Add(m.idleTimeout)
-	abs := s.CreatedAt.Add(m.absoluteTimeout)
+	idle := s.st.LastSeenAt.Add(m.idleTimeout)
+	abs := s.st.CreatedAt.Add(m.absoluteTimeout)
 	if idle.Before(abs) {
 		return idle
 	}
@@ -321,6 +370,24 @@ func (m *Manager) Rotate(ctx context.Context, token string) (string, *Session, e
 	return m.rotate(ctx, s)
 }
 
+// StepUp records that the session's subject passed another authentication
+// factor, p.Method, and rotates the session like Rotate. p must come from
+// an authenticator and name the session's Subject and Issuer; otherwise
+// StepUp returns an error wrapping authent.ErrUnauthenticated and leaves
+// the session unchanged. Passing a method again updates its time, which
+// is how a caller records a fresh re-authentication.
+func (m *Manager) StepUp(ctx context.Context, token string, p authent.Principal) (string, *Session, error) {
+	s, err := m.Get(ctx, token)
+	if err != nil {
+		return "", nil, err
+	}
+	if p.Method == "" || p.Subject != s.st.Subject || p.Issuer != s.st.Issuer {
+		return "", nil, fmt.Errorf("session: step-up principal does not match the session: %w", authent.ErrUnauthenticated)
+	}
+	s.addFactor(m.factor(p))
+	return m.rotate(ctx, s)
+}
+
 // rotate moves s to a new token. The new record is written before the old
 // one is deleted, and the old one is deleted only if it is unchanged, so
 // that neither a concurrent save nor a concurrent destroy is lost.
@@ -331,7 +398,7 @@ func (m *Manager) rotate(ctx context.Context, s *Session) (string, *Session, err
 		return "", nil, err
 	}
 	s.version = 0
-	s.LastSeenAt = m.now()
+	s.st.LastSeenAt = m.now()
 	if err := m.save(ctx, s); err != nil {
 		return "", nil, err
 	}

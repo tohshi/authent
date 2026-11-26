@@ -294,7 +294,7 @@ func testManager(t *testing.T, s session.Store) {
 		t.Fatal(err)
 	}
 	b, _ := m.Get(ctx, token)
-	if a.Subject != "alice" || cart(a) != "42" || a.CSRFToken != created.CSRFToken {
+	if a.Subject() != "alice" || cart(a) != "42" || a.CSRFToken() != created.CSRFToken() {
 		t.Fatalf("Get = %+v", a)
 	}
 	set(t, a, "a")
@@ -320,7 +320,7 @@ func testManager(t *testing.T, s session.Store) {
 	if err := m.Save(ctx, a); !errors.Is(err, session.ErrConflict) {
 		t.Fatalf("Save of a rotated-away copy: err = %v, want ErrConflict", err)
 	}
-	if got, err := m.Get(ctx, newToken); err != nil || cart(got) != "a" || got.CSRFToken != rotated.CSRFToken {
+	if got, err := m.Get(ctx, newToken); err != nil || cart(got) != "a" || got.CSRFToken() != rotated.CSRFToken() {
 		t.Fatalf("Get(new token) = %+v, %v", got, err)
 	}
 

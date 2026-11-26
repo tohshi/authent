@@ -197,6 +197,19 @@ cart, ok, err := cartKey.Get(s)
 A stored value that no longer decodes into the key's type is an error, not
 a zero value.
 
+A session records each authentication factor with its time. Require a
+second factor, or a recent authentication, before sensitive actions:
+```go
+if !s.AuthenticatedSince(time.Now().Add(-10*time.Minute), authent.MethodTOTP) {
+	// ask for a TOTP code, verify it with totp.Authenticator, then:
+	token, s, err = m.StepUp(ctx, token, p) // p is the TOTP Principal
+}
+```
+`StepUp` rejects a Principal whose subject or issuer differs from the
+session's, and rotates the token like `Rotate`. Factors change only
+through `Create` and `StepUp`. `Session.Principal` reports the methods in
+the `amr` claim and the most recent authentication as `AuthTime`.
+
 Every stored session has a version, and stores save it with a
 compare-and-swap. `Save` returns an error wrapping `session.ErrConflict`
 when another request saved, rotated or destroyed the session after it was
@@ -404,7 +417,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
   `csrf_token` form field. Change where it is read with
   `httpauth.WithCSRFToken`, or pass `nil` to turn the check off. To embed
   the token in a page, load the session with `sessions.Get` and use
-  `s.CSRFToken`.
+  `s.CSRFToken()`.
 - `authent.NewContext` and `authent.FromContext` carry the Principal for
   any transport.
 
