@@ -221,6 +221,26 @@ err = m.RevokeAll(ctx, s.Subject())      // log out everywhere
 the subject of the session making the request. A session that is rotated
 or stepped up while `RevokeAll` runs does not survive under its new token.
 
+#### Persistent session storage
+```go
+import _ "github.com/jackc/pgx/v5/stdlib" // or any database/sql driver
+
+db, _ := sql.Open("pgx", dsn)
+store, _ := session.NewSQLStore(db, session.PostgreSQL) // also session.MySQL, session.SQLite
+store.CreateTable(ctx) // or apply store.CreateTableStatements() with your migration tool
+m, _ := session.NewManager(store)
+// periodically: store.DeleteExpired(ctx)
+```
+- `SQLStore` works through `database/sql` and imports no driver; you
+  choose one.
+- Each session is one row keyed by the token hash, with an expiry column.
+  `Load` and `List` ignore expired rows, and `DeleteExpired` removes them.
+  The Manager still enforces the timeouts itself.
+- Every operation is a single statement, and versions are compared in its
+  `WHERE` clause, so concurrent saves are detected without transactions.
+- Token hashes and subjects are compared byte by byte (`COLLATE "C"` on
+  PostgreSQL, `VARBINARY` on MySQL). Subjects may be up to 1024 bytes.
+
 Every stored session has a version, and stores save it with a
 compare-and-swap. `Save` returns an error wrapping `session.ErrConflict`
 when another request saved, rotated or destroyed the session after it was
