@@ -111,7 +111,7 @@ Legend:
 | Server nonce validation | ✅ | Pluggable `WithNonce`; issuing nonces is up to the caller |
 | Resource server `Authenticator` for JWT access tokens | ✅ | Checks `cnf.jkt` against the proof key |
 | `WWW-Authenticate` challenges | ✅ | `Challenge` with `algs` and error codes |
-| Opaque tokens (introspection, RFC 9449 §6.2) | ⬜ | Use `Verifier` with `Request.JKT` from the introspection response |
+| Opaque tokens (introspection, RFC 9449 §6.2) | ✅ | `Introspector` (RFC 7662, `client_secret_basic`) as the token verifier of `Authenticator`; the proof key must match `cnf.jkt` |
 | Authorization server side (issuing bound tokens) | ➖ | Same reason as the OAuth 2.0 authorization server below |
 | Shared replay cache stores (Redis, SQL) | ⬜ | |
 

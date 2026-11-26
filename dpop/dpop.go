@@ -10,8 +10,9 @@
 // to outgoing requests and handles server-provided nonces. The oidc package
 // uses both when its Config.DPoP is set.
 //
-// Resource servers use an [Authenticator] to accept DPoP-bound JWT access
-// tokens, or a [Verifier] to check proofs on their own. The package does
+// Resource servers use an [Authenticator] to accept DPoP-bound access
+// tokens, JWTs through a jwt.Verifier or opaque tokens through an
+// [Introspector], or a [Verifier] to check proofs on their own. The package does
 // not depend on an HTTP framework: the caller passes the method, the
 // absolute request URI and the header values in a [Request].
 package dpop

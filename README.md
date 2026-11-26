@@ -376,6 +376,25 @@ Proof checks (RFC 9449 §4.3):
 - optionally a server nonce (`WithNonce`); a missing or stale one returns
   `dpop.ErrUseNonce`
 
+For opaque access tokens, pass an `Introspector` instead of a
+`jwt.Verifier`. It asks the authorization server's RFC 7662 introspection
+endpoint, authenticating with `client_secret_basic`, and the proof key is
+then checked against the response's `cnf.jkt` (RFC 9449 §6.2):
+```go
+tokens, _ := dpop.NewIntrospector(dpop.IntrospectionConfig{
+	Endpoint: "https://as.example.com/introspect",
+	ClientID: "api", ClientSecret: secret, Issuer: iss,
+	Audiences:         []string{"api"},
+	ConfirmationClaim: true, // the binding is checked by dpop.Authenticator
+})
+auth, _ := dpop.NewAuthenticator(tokens, proofs)
+```
+`"active": false`, an expired `exp`, a future `nbf`, an `aud` without an
+accepted audience, a different `iss` or a non-string `scope` fail with
+`dpop.ErrInactiveToken`. A failed request or an unparsable response, with
+no boolean `active`, is an error that does not wrap
+`authent.ErrUnauthenticated`.
+
 ### TOTP
 ```go
 key, _ := totp.GenerateKey()                       // SHA1, 6 digits, 30 s: what every app supports
