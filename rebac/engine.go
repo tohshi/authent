@@ -29,6 +29,7 @@ type Engine struct {
 	maxEvaluations int
 	concurrency    int
 	watchInterval  time.Duration
+	cache          *checkCache
 }
 
 // Option configures an Engine.
@@ -55,6 +56,20 @@ func WithMaxEvaluations(n int) Option { return func(e *Engine) { e.maxEvaluation
 // done some work first, so a check close to the limit may succeed in one
 // run and fail with ErrTooComplex in another.
 func WithConcurrency(n int) Option { return func(e *Engine) { e.concurrency = n } }
+
+// WithCheckCache keeps the results of up to size checks across calls, the
+// least recently used dropped first. A cached result answers a check only
+// if it was computed at a revision the check accepts: the store's latest,
+// or with AtLeast(rev), rev or a later one. So a result is never older than
+// the token the caller passes. Errors are not cached.
+func WithCheckCache(size int) Option {
+	return func(e *Engine) {
+		e.cache = nil
+		if size > 0 {
+			e.cache = newCheckCache(size)
+		}
+	}
+}
 
 // WithWatchInterval sets how often Watch asks the store for new changes.
 // The default is one second.
@@ -99,13 +114,18 @@ type QueryOption func(*queryConfig)
 
 type queryConfig struct {
 	atLeast Revision
+	relaxed bool // AtLeast was given
 }
 
-// AtLeast makes a query fail with ErrFutureRevision unless the store has
-// reached rev, such as a revision that Write returned. Without it, a query
-// reads the store's latest revision as well, but cannot detect a store,
-// such as a lagging replica, that is behind the caller.
-func AtLeast(rev Revision) QueryOption { return func(c *queryConfig) { c.atLeast = rev } }
+// AtLeast lets a query use any revision at least as new as rev, such as a
+// revision that Write returned, instead of the latest. Queries still read
+// the latest revision; AtLeast makes them fail with ErrFutureRevision if
+// the store, such as a lagging replica, has not reached rev, and lets the
+// check cache (WithCheckCache) answer from a result computed at rev or
+// later without asking the store.
+func AtLeast(rev Revision) QueryOption {
+	return func(c *queryConfig) { c.atLeast, c.relaxed = rev, true }
+}
 
 // Watch yields the changes made after revision after, in the order of
 // Changes, as they are written. It asks the store for new changes at the
@@ -199,18 +219,15 @@ type CheckResult struct {
 // it cannot read the store's revision.
 func (e *Engine) CheckBulk(ctx context.Context, items []CheckItem, opts ...QueryOption) ([]CheckResult, error) {
 	q := e.newRequest(ctx, opts)
-	if _, err := q.revision(); err != nil {
-		return nil, err
-	}
 	out := make([]CheckResult, len(items))
 	q.spread(len(items), func(i int) { out[i] = q.check(items[i]) })
+	if q.revErr != nil {
+		return nil, q.revErr
+	}
 	return out, nil
 }
 
 func (q *request) check(it CheckItem) CheckResult {
-	if _, err := q.revision(); err != nil {
-		return CheckResult{Err: err}
-	}
 	if err := validateObject(it.Object, false); err != nil {
 		return CheckResult{Err: err}
 	}
@@ -220,14 +237,33 @@ func (q *request) check(it CheckItem) CheckResult {
 	if _, ok := q.e.schema.relation(it.Object.Type, it.Permission); !ok {
 		return CheckResult{Err: fmt.Errorf("%w: %s#%s", ErrUnknownRelation, it.Object.Type, it.Permission)}
 	}
+	cache := q.e.cache
+	if cache != nil && q.cfg.relaxed {
+		if allowed, ok := cache.get(it, q.cfg.atLeast); ok {
+			return CheckResult{Allowed: allowed}
+		}
+	}
+	rev, err := q.revision()
+	if err != nil {
+		return CheckResult{Err: err}
+	}
+	if cache != nil {
+		if allowed, ok := cache.get(it, rev); ok {
+			return CheckResult{Allowed: allowed}
+		}
+	}
+
 	r := &run{request: q, subject: it.Subject}
 	res := r.check(q.ctx, nil, it.Object, it.Permission)
 	if r.exceeded() {
 		return CheckResult{Err: r.errTooComplex()}
 	}
 	switch res.f.op {
-	case opTrue:
-		return CheckResult{Allowed: true}
+	case opTrue, opFalse:
+		if cache != nil {
+			cache.put(it, rev, res.f.op == opTrue)
+		}
+		return CheckResult{Allowed: res.f.op == opTrue}
 	case opUnknown:
 		return CheckResult{Err: res.f.why}
 	}
