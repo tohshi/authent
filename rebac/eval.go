@@ -82,6 +82,11 @@ func (q *request) fetch(ctx context.Context, k objRel) ([]Tuple, error) {
 		}
 		out = append(out, t)
 	}
+	// A store may end a read early, without an error, once ctx is done.
+	// Such a read is incomplete and must not be cached or decide anything.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

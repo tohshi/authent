@@ -171,7 +171,9 @@ func solve(eqs map[objRel]*formula) map[objRel]*formula {
 	}
 	s.eqs = make([]cnode, len(keys))
 	for i, k := range keys {
-		s.eqs[i] = s.compile(eqs[k])
+		// compile may append to s.eqs, so assign through a temporary.
+		e := s.compile(eqs[k])
+		s.eqs[i] = e
 	}
 
 	n := len(s.eqs)
@@ -274,7 +276,8 @@ func (s *system) compile(f *formula) cnode {
 		}
 		aux := len(s.eqs)
 		s.eqs = append(s.eqs, cnode{})
-		s.eqs[aux] = s.compile(f.args[0])
+		e := s.compile(f.args[0])
+		s.eqs[aux] = e
 		return cnode{op: opNot, at: aux}
 	case opAnd, opOr:
 		args := make([]cnode, len(f.args))
