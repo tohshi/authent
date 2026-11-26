@@ -114,7 +114,8 @@ type relationInfo struct {
 
 // Schema is a validated set of type definitions. It is immutable.
 type Schema struct {
-	types map[string]map[string]*relationInfo
+	types   map[string]map[string]*relationInfo
+	reverse map[typeRel][]reverseEdge
 }
 
 // NewSchema validates the definitions and returns a Schema.
@@ -156,6 +157,7 @@ func NewSchema(types ...TypeDef) (*Schema, error) {
 	if err := s.checkComputedCycles(); err != nil {
 		return nil, err
 	}
+	s.reverse = s.reverseEdges()
 	return s, nil
 }
 

@@ -121,9 +121,10 @@ type TupleStore interface {
 	// latest revision and with ErrRevisionExpired if the history of rev has
 	// been pruned.
 	//
-	// The Engine always sets ObjectType, ObjectID and Relation, so stores
-	// should index those. With WithConcurrency, the Engine calls Read from
-	// several goroutines at once.
+	// Check and Expand set ObjectType, ObjectID and Relation; ListObjects
+	// sets ObjectType, Relation and Subject. Stores should index both. With
+	// WithConcurrency, the Engine calls Read from several goroutines at
+	// once.
 	Read(ctx context.Context, rev Revision, f Filter) iter.Seq2[Tuple, error]
 	// Changes yields the changes made after revision after, ordered by
 	// revision; within a revision, deletes come before writes and each is
@@ -156,7 +157,10 @@ type MemoryStore struct {
 	rev          Revision
 	prunedBefore Revision
 	index        map[objRel]map[Subject][]span
-	log          []Change
+	// bySubject has the keys of index under which each subject has spans,
+	// for reads filtered by subject.
+	bySubject map[Subject]map[objRel]struct{}
+	log       []Change
 }
 
 // A deleted of 0 means the tuple is still present.
@@ -166,7 +170,7 @@ func (s span) at(rev Revision) bool { return s.created <= rev && (s.deleted == 0
 
 // NewMemoryStore returns an empty MemoryStore.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{index: map[objRel]map[Subject][]span{}}
+	return &MemoryStore{index: map[objRel]map[Subject][]span{}, bySubject: map[Subject]map[objRel]struct{}{}}
 }
 
 func (m *MemoryStore) Write(_ context.Context, writes, deletes []Tuple) (Revision, error) {
@@ -186,6 +190,10 @@ func (m *MemoryStore) Write(_ context.Context, writes, deletes []Tuple) (Revisio
 			if m.index[k] == nil {
 				m.index[k] = map[Subject][]span{}
 			}
+			if m.bySubject[t.Subject] == nil {
+				m.bySubject[t.Subject] = map[objRel]struct{}{}
+			}
+			m.bySubject[t.Subject][k] = struct{}{}
 			m.index[k][t.Subject] = append(spans, span{created: m.rev})
 			changes = append(changes, Change{m.rev, ChangeWrite, t})
 		case !present && live:
@@ -233,6 +241,12 @@ func (m *MemoryStore) Read(_ context.Context, rev Revision, f Filter) iter.Seq2[
 	case f.ObjectType != "" && f.ObjectID != "" && f.Relation != "":
 		k := objRel{Obj(f.ObjectType, f.ObjectID), f.Relation}
 		add(k, m.index[k])
+	case f.Subject != nil:
+		for k := range m.bySubject[*f.Subject] {
+			if spans, ok := m.index[k][*f.Subject]; ok {
+				add(k, map[Subject][]span{*f.Subject: spans})
+			}
+		}
 	default:
 		for k, subs := range m.index {
 			add(k, subs)
@@ -304,6 +318,10 @@ func (m *MemoryStore) Prune(_ context.Context, before Revision) error {
 			spans = slices.DeleteFunc(spans, func(sp span) bool { return sp.deleted != 0 && sp.deleted <= before })
 			if len(spans) == 0 {
 				delete(subs, s)
+				delete(m.bySubject[s], k)
+				if len(m.bySubject[s]) == 0 {
+					delete(m.bySubject, s)
+				}
 			} else {
 				subs[s] = spans
 			}

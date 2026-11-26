@@ -728,6 +728,12 @@ ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("us
   answers a later check only if it was computed at the store's latest
   revision, which every check reads, so a revoke takes effect at once.
   Errors are not cached.
+- `ListObjects(ctx, "doc", "viewer", subject)` lists the documents a
+  subject can view; `ListSubjects(ctx, doc, "viewer", "user")` lists who
+  can view a document, or with a wildcard, everyone except some users. Both
+  find candidates by walking the tuples and then check each one, so they
+  agree with `Check` under every rewrite. They are bounded by the
+  evaluation limit and honor cancellation.
 - `CheckBulk` runs many checks in one call. They share store reads and
   the relations they decide on the way; results come back in order, each
   with its own error.
