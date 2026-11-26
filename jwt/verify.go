@@ -2,10 +2,13 @@ package jwt
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +27,10 @@ type Verifier struct {
 	allowCnf    bool
 	leeway      time.Duration
 	maxSize     int
+	replay      ReplayCache
+	maxTokenAge *time.Duration
+	maxAuthAge  *time.Duration
+	roots       *x509.CertPool
 	now         func() time.Time
 }
 
@@ -75,6 +82,34 @@ func WithLeeway(d time.Duration) VerifierOption { return func(v *Verifier) { v.l
 // DefaultMaxTokenSize.
 func WithMaxTokenSize(n int) VerifierOption { return func(v *Verifier) { v.maxSize = n } }
 
+// WithMaxTokenAge rejects tokens issued more than d ago, plus the leeway,
+// with ErrTokenTooOld. "iat" becomes required.
+func WithMaxTokenAge(d time.Duration) VerifierOption {
+	return func(v *Verifier) { v.maxTokenAge = &d }
+}
+
+// WithMaxAuthAge rejects tokens whose subject authenticated more than d
+// ago, plus the leeway, with ErrAuthenticationTooOld, as OpenID Connect
+// "max_age" requires. "auth_time" becomes required. Zero accepts only an
+// authentication within the leeway.
+func WithMaxAuthAge(d time.Duration) VerifierOption {
+	return func(v *Verifier) { v.maxAuthAge = &d }
+}
+
+// WithCertificateRoots only uses keys whose "x5c" certificate chain
+// verifies to one of roots at the Verifier's clock, with a leaf that
+// allows digital signatures. Keys without "x5c" are not used. The "x5c"
+// header of a token is never used to find keys.
+func WithCertificateRoots(roots *x509.CertPool) VerifierOption {
+	return func(v *Verifier) { v.roots = roots }
+}
+
+// WithReplayCache accepts each token only once. "jti" becomes required,
+// and the pair of "iss" and "jti" is recorded in c until "exp" (plus the
+// leeway) once every other check has passed. A replayed token fails with
+// ErrReplayed. Errors from c reject the token and are returned as is.
+func WithReplayCache(c ReplayCache) VerifierOption { return func(v *Verifier) { v.replay = c } }
+
 // WithClock overrides the clock, for tests.
 func WithClock(now func() time.Time) VerifierOption { return func(v *Verifier) { v.now = now } }
 
@@ -107,12 +142,15 @@ func NewVerifier(keys KeySet, opts ...VerifierOption) (*Verifier, error) {
 	if v.leeway < 0 {
 		return nil, errors.New("jwt: negative leeway")
 	}
+	if (v.maxTokenAge != nil && *v.maxTokenAge < 0) || (v.maxAuthAge != nil && *v.maxAuthAge < 0) {
+		return nil, errors.New("jwt: negative maximum age")
+	}
 	return v, nil
 }
 
 // Verify checks the token's signature and claims and returns the claims.
-// Rejections wrap ErrInvalidToken. Errors from the KeySet, such as network
-// failures, are returned as is.
+// Rejections wrap ErrInvalidToken. Errors from the KeySet or the
+// ReplayCache, such as network failures, are returned as is.
 //
 // "exp" is always required. Tokens with a "cnf" claim are rejected unless
 // WithConfirmationClaim is set.
@@ -130,6 +168,10 @@ type Header struct {
 
 // VerifyWithHeader is like Verify but also returns the token's header.
 func (v *Verifier) VerifyWithHeader(ctx context.Context, token string) (*Claims, Header, error) {
+	return v.verifyToken(ctx, token, false)
+}
+
+func (v *Verifier) verifyToken(ctx context.Context, token string, requireSubject bool) (*Claims, Header, error) {
 	c, err := v.verify(ctx, token)
 	if err != nil {
 		return nil, Header{}, err
@@ -141,7 +183,31 @@ func (v *Verifier) VerifyWithHeader(ctx context.Context, token string) (*Claims,
 	if err := v.validate(&claims); err != nil {
 		return nil, Header{}, err
 	}
+	if requireSubject && claims.Subject == "" {
+		return nil, Header{}, fmt.Errorf("%w: sub", ErrMissingClaim)
+	}
+	// Last, so a token failing other checks does not burn its jti.
+	if err := v.checkReplay(ctx, &claims); err != nil {
+		return nil, Header{}, err
+	}
 	return &claims, Header{Algorithm: c.header.Alg, KeyID: c.header.Kid, Type: c.header.Typ}, nil
+}
+
+func (v *Verifier) checkReplay(ctx context.Context, c *Claims) error {
+	if v.replay == nil {
+		return nil
+	}
+	// "jti" is unique per issuer (RFC 7519 §4.1.7). The length prefix
+	// keeps distinct (iss, jti) pairs from hashing the same input.
+	id := sha256.Sum256([]byte(strconv.Itoa(len(c.Issuer)) + ":" + c.Issuer + c.ID))
+	fresh, err := v.replay.Add(ctx, b64.EncodeToString(id[:]), c.ExpiresAt.Add(v.leeway).Sub(v.now()))
+	if err != nil {
+		return fmt.Errorf("jwt: replay cache: %w", err)
+	}
+	if !fresh {
+		return ErrReplayed
+	}
+	return nil
 }
 
 // verify parses token and checks its header and signature.
@@ -168,14 +234,24 @@ func (v *Verifier) verifySignature(ctx context.Context, c *compact) error {
 		return err
 	}
 	tried := false
+	var untrusted error
 	for _, k := range keys {
 		if !k.canVerify(c.header.Alg) {
 			continue
+		}
+		if v.roots != nil {
+			if err := k.verifyChain(v.roots, v.now()); err != nil {
+				untrusted = err
+				continue
+			}
 		}
 		tried = true
 		if verify(c.header.Alg, k.Key, []byte(c.signingInput), c.signature) == nil {
 			return nil
 		}
+	}
+	if !tried && untrusted != nil {
+		return fmt.Errorf("%w: kid %q: %v", ErrNoMatchingKey, c.header.Kid, untrusted)
 	}
 	if !tried {
 		return fmt.Errorf("%w: kid %q alg %q", ErrNoMatchingKey, c.header.Kid, c.header.Alg)
@@ -197,6 +273,26 @@ func (v *Verifier) validate(c *Claims) error {
 	if !c.IssuedAt.IsZero() && now.Add(v.leeway).Before(c.IssuedAt.Time) {
 		return ErrIssuedInFuture
 	}
+	if v.maxTokenAge != nil {
+		if c.IssuedAt.IsZero() {
+			return fmt.Errorf("%w: iat", ErrMissingClaim)
+		}
+		if now.After(c.IssuedAt.Add(*v.maxTokenAge + v.leeway)) {
+			return ErrTokenTooOld
+		}
+	}
+	if v.maxAuthAge != nil {
+		at, err := c.AuthTime()
+		if err != nil {
+			return err
+		}
+		if at.IsZero() {
+			return fmt.Errorf("%w: auth_time", ErrMissingClaim)
+		}
+		if now.After(at.Add(*v.maxAuthAge + v.leeway)) {
+			return ErrAuthenticationTooOld
+		}
+	}
 	if !v.anyIssuer && !slices.Contains(v.issuers, c.Issuer) {
 		return fmt.Errorf("%w: %q", ErrInvalidIssuer, c.Issuer)
 	}
@@ -208,13 +304,16 @@ func (v *Verifier) validate(c *Claims) error {
 	}) {
 		return fmt.Errorf("%w: %q", ErrInvalidAudience, c.Audience)
 	}
+	if v.replay != nil && c.ID == "" {
+		return fmt.Errorf("%w: jti", ErrMissingClaim)
+	}
 	return nil
 }
 
 // Authenticate verifies token and returns its Principal. "sub" is
 // required. AuthTime is taken from "auth_time" if present, else "iat".
 func (v *Verifier) Authenticate(ctx context.Context, token string) (authent.Principal, error) {
-	c, err := v.Verify(ctx, token)
+	c, _, err := v.verifyToken(ctx, token, true)
 	if err != nil {
 		return authent.Principal{}, err
 	}
@@ -231,8 +330,8 @@ func PrincipalFromClaims(c *Claims, method authent.Method) (authent.Principal, e
 		return authent.Principal{}, err
 	}
 	authTime := c.IssuedAt.Time
-	if at, ok := c.Extra["auth_time"].(float64); ok && at > 0 && at <= maxUnixSeconds {
-		authTime = time.Unix(int64(at), 0).UTC()
+	if at, err := c.AuthTime(); err == nil && !at.IsZero() {
+		authTime = at
 	}
 	return authent.Principal{
 		Subject:  c.Subject,

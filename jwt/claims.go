@@ -3,6 +3,7 @@ package jwt
 import (
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"math"
 	"strconv"
 	"time"
@@ -36,6 +37,25 @@ func (c Claims) AsMap() (map[string]any, error) {
 	}
 	var m map[string]any
 	return m, json.Unmarshal(b, &m)
+}
+
+// AuthTime returns the "auth_time" claim (OpenID Connect Core §2), or the
+// zero time if it is absent. A value that is not a NumericDate is an
+// error wrapping ErrMalformed.
+func (c Claims) AuthTime() (time.Time, error) {
+	v, ok := c.Extra["auth_time"]
+	if !ok {
+		return time.Time{}, nil
+	}
+	b, err := json.Marshal(v)
+	var d NumericDate
+	if err == nil {
+		err = d.UnmarshalJSON(b)
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: auth_time: %v", ErrMalformed, err)
+	}
+	return d.Time, nil
 }
 
 // NumericDate is a JSON number of seconds since the Unix epoch.

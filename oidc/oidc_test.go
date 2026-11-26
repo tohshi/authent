@@ -77,7 +77,7 @@ func newFakeProvider(t *testing.T) *fakeProvider {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proofs, err := dpop.NewVerifier(dpop.WithAlgorithms(jwt.ES256), dpop.WithReplayCache(dpop.NewMemoryReplayCache()),
+	proofs, err := dpop.NewVerifier(dpop.WithAlgorithms(jwt.ES256), dpop.WithReplayCache(jwt.NewMemoryReplayCache()),
 		dpop.WithClock(func() time.Time { return now }))
 	if err != nil {
 		t.Fatal(err)

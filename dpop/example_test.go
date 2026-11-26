@@ -42,7 +42,7 @@ func Example() {
 		jwt.WithExpectedType("at+jwt"),
 		jwt.WithConfirmationClaim(),
 	)
-	proofs, _ := dpop.NewVerifier(dpop.WithAlgorithms(jwt.ES256), dpop.WithReplayCache(dpop.NewMemoryReplayCache()))
+	proofs, _ := dpop.NewVerifier(dpop.WithAlgorithms(jwt.ES256), dpop.WithReplayCache(jwt.NewMemoryReplayCache()))
 	auth, _ := dpop.NewAuthenticator(tokens, proofs)
 
 	// The client sends "Authorization: DPoP <token>" and a fresh proof.

@@ -22,10 +22,15 @@ var (
 	ErrExpired              = fmt.Errorf("%w: expired", ErrInvalidToken)
 	ErrNotYetValid          = fmt.Errorf("%w: not yet valid", ErrInvalidToken)
 	ErrIssuedInFuture       = fmt.Errorf("%w: issued in the future", ErrInvalidToken)
+	ErrTokenTooOld          = fmt.Errorf("%w: issued too long ago", ErrInvalidToken)
+	ErrAuthenticationTooOld = fmt.Errorf("%w: authentication too long ago", ErrInvalidToken)
 	ErrInvalidIssuer        = fmt.Errorf("%w: issuer not accepted", ErrInvalidToken)
 	ErrInvalidAudience      = fmt.Errorf("%w: audience not accepted", ErrInvalidToken)
 	// ErrSenderConstrained means the token has a "cnf" claim but the
 	// Verifier does not check proof of possession; see
 	// WithConfirmationClaim.
 	ErrSenderConstrained = fmt.Errorf("%w: sender-constrained token without proof of possession", ErrInvalidToken)
+	// ErrReplayed means the token's "jti" was already accepted; see
+	// WithReplayCache.
+	ErrReplayed = fmt.Errorf("%w: replayed", ErrInvalidToken)
 )
