@@ -71,3 +71,45 @@ jobs:
       - run: go test ./jwt -run '^$' -fuzz '^FuzzVerify$' -fuzztime 60s
       - run: go test ./webauthn -run '^$' -fuzz '^FuzzCBOR$' -fuzztime 30s
       - run: go test ./webauthn -run '^$' -fuzz '^FuzzParseAuthData$' -fuzztime 30s
+
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: authent
+          POSTGRES_DB: authent
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:8
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      AUTHENT_REQUIRE_INTEGRATION: "1"
+      AUTHENT_POSTGRES_DSN: postgres://postgres:authent@localhost:5432/authent?sslmode=disable
+      AUTHENT_REDIS_ADDR: localhost:6379
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Nested modules
+        run: |
+          for mod in $(find . -mindepth 2 -name go.mod -not -path './.git/*' | sort); do
+            dir=$(dirname "$mod")
+            echo "::group::$dir"
+            (cd "$dir" &&
+              go vet ./... &&
+              go mod tidy &&
+              git diff --exit-code -- go.mod go.sum &&
+              go run golang.org/x/vuln/cmd/govulncheck@latest ./... &&
+              go test -race -count=1 ./...) || exit 1
+            echo "::endgroup::"
+          done
