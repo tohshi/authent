@@ -15,16 +15,12 @@ import (
 	"github.com/tohshi/authent/jwt/replaytest"
 )
 
-// fakeDB is a database/sql driver that executes the Cache's INSERT and
-// DELETE statements against a map, with the semantics of PostgreSQL's
-// INSERT ... ON CONFLICT DO UPDATE ... WHERE.
 type fakeDB struct {
-	mu      sync.Mutex
-	rows    map[string]int64 // id -> expires_at
-	queries []string
-	err     error // returned by every Exec when set
-	// affected, when set, replaces the affected-row count of an INSERT.
-	affected *int64
+	mu             sync.Mutex
+	expiresAtByID  map[string]int64
+	queries        []string
+	execErr        error
+	insertAffected *int64
 }
 
 func (f *fakeDB) Connect(context.Context) (driver.Conn, error) { return fakeConn{f}, nil }
@@ -45,8 +41,8 @@ func (c fakeConn) ExecContext(_ context.Context, query string, args []driver.Nam
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.queries = append(f.queries, query)
-	if f.err != nil {
-		return nil, f.err
+	if f.execErr != nil {
+		return nil, f.execErr
 	}
 	switch {
 	case strings.HasPrefix(query, "CREATE "):
@@ -54,20 +50,20 @@ func (c fakeConn) ExecContext(_ context.Context, query string, args []driver.Nam
 	case strings.HasPrefix(query, "INSERT "):
 		id, exp, now := args[0].Value.(string), args[1].Value.(int64), args[2].Value.(int64)
 		var n int64
-		if old, ok := f.rows[id]; !ok || old <= now {
-			f.rows[id] = exp
+		if old, ok := f.expiresAtByID[id]; !ok || old <= now {
+			f.expiresAtByID[id] = exp
 			n = 1
 		}
-		if f.affected != nil {
-			n = *f.affected
+		if f.insertAffected != nil {
+			n = *f.insertAffected
 		}
 		return driver.RowsAffected(n), nil
 	case strings.HasPrefix(query, "DELETE "):
 		now := args[0].Value.(int64)
 		var n int64
-		for id, exp := range f.rows {
+		for id, exp := range f.expiresAtByID {
 			if exp <= now {
-				delete(f.rows, id)
+				delete(f.expiresAtByID, id)
 				n++
 			}
 		}
@@ -78,7 +74,7 @@ func (c fakeConn) ExecContext(_ context.Context, query string, args []driver.Nam
 
 func newFake(t *testing.T, dialect Dialect, opts ...Option) (*Cache, *fakeDB) {
 	t.Helper()
-	f := &fakeDB{rows: map[string]int64{}}
+	f := &fakeDB{expiresAtByID: map[string]int64{}}
 	db := sql.OpenDB(f)
 	t.Cleanup(func() { db.Close() })
 	c, err := New(db, dialect, opts...)
@@ -102,7 +98,7 @@ func TestAddUsesClockAndMinimumTTL(t *testing.T) {
 	if ok, err := c.Add(ctx, "a", time.Millisecond); !ok || err != nil {
 		t.Fatalf("Add = %v, %v", ok, err)
 	}
-	if got, want := f.rows["a"], now.Add(time.Second).UnixMilli(); got != want {
+	if got, want := f.expiresAtByID["a"], now.Add(time.Second).UnixMilli(); got != want {
 		t.Fatalf("expires_at = %d, want %d (one second minimum)", got, want)
 	}
 	now = now.Add(999 * time.Millisecond)
@@ -120,8 +116,8 @@ func TestAddUsesClockAndMinimumTTL(t *testing.T) {
 		t.Fatalf("DeleteExpired = %d, %v, want 0", n, err)
 	}
 	now = now.Add(time.Hour)
-	if n, err := c.DeleteExpired(ctx); n != 2 || err != nil || len(f.rows) != 0 {
-		t.Fatalf("DeleteExpired = %d, %v, rows %v", n, err, f.rows)
+	if n, err := c.DeleteExpired(ctx); n != 2 || err != nil || len(f.expiresAtByID) != 0 {
+		t.Fatalf("DeleteExpired = %d, %v, rows %v", n, err, f.expiresAtByID)
 	}
 }
 
@@ -129,7 +125,7 @@ func TestStoreFailuresFailClosed(t *testing.T) {
 	ctx := context.Background()
 	boom := errors.New("connection reset")
 	c, f := newFake(t, PostgreSQL)
-	f.err = boom
+	f.execErr = boom
 	if ok, err := c.Add(ctx, "a", time.Minute); ok || !errors.Is(err, boom) || errors.Is(err, authent.ErrUnauthenticated) {
 		t.Fatalf("Add = %v, %v", ok, err)
 	}
@@ -142,7 +138,7 @@ func TestStoreFailuresFailClosed(t *testing.T) {
 
 	two := int64(2)
 	c, f = newFake(t, PostgreSQL)
-	f.affected = &two
+	f.insertAffected = &two
 	if ok, err := c.Add(ctx, "a", time.Minute); ok || err == nil {
 		t.Fatalf("Add with 2 affected rows = %v, %v", ok, err)
 	}

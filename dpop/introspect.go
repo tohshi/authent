@@ -47,8 +47,7 @@ type IntrospectionConfig struct {
 	AnyAudience bool
 	// ConfirmationClaim accepts tokens with a "cnf" claim. Set it only when
 	// the caller checks the binding, as Authenticator does. Otherwise
-	// bound tokens fail with jwt.ErrSenderConstrained, so a stolen bound
-	// token is not accepted as a bearer token.
+	// bound tokens fail with jwt.ErrSenderConstrained.
 	ConfirmationClaim bool
 	// HTTPClient sends the requests. The default is http.DefaultClient.
 	HTTPClient *http.Client

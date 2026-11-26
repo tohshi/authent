@@ -21,8 +21,6 @@ const (
 	rsClientSecret = "s3cret/+"
 )
 
-// fakeIntrospection is an RFC 7662 introspection endpoint that answers
-// with responses[token], or {"active":false} for unknown tokens.
 func fakeIntrospection(t *testing.T, responses map[string]string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -108,8 +108,6 @@ func New(db *sql.DB, dialect Dialect, opts ...Option) (*Cache, error) {
 	return c, nil
 }
 
-// validIdent reports whether s is safe to splice into a statement as a
-// quoted identifier.
 func validIdent(s string) bool {
 	if len(s) == 0 || len(s) > 63 {
 		return false
@@ -133,7 +131,6 @@ func (c *Cache) buildStatements(d Dialect, schema, table string) {
 	index := quote(table + "_expires_idx")
 	switch d {
 	case PostgreSQL:
-		// The index is created in the table's schema.
 		c.createSQL = []string{
 			"CREATE TABLE IF NOT EXISTS " + qualified + ` (id TEXT COLLATE "C" NOT NULL PRIMARY KEY, expires_at BIGINT NOT NULL)`,
 			"CREATE INDEX IF NOT EXISTS " + index + " ON " + qualified + " (expires_at)",
@@ -149,9 +146,6 @@ func (c *Cache) buildStatements(d Dialect, schema, table string) {
 		}
 	}
 	p := d.placeholder
-	// One statement, so concurrent Adds of an id are serialized on its
-	// primary key: the row is inserted, or an expired row is taken over,
-	// and only then is a row counted as affected.
 	c.addSQL = "INSERT INTO " + qualified + " (id, expires_at) VALUES (" + p(1) + ", " + p(2) + ")" +
 		" ON CONFLICT (id) DO UPDATE SET expires_at = excluded.expires_at" +
 		" WHERE " + quote(table) + ".expires_at <= " + p(3)
