@@ -100,8 +100,8 @@ func (m *ResetManager) Issue(ctx context.Context, subject string) (string, error
 // is accepted once; it is consumed even if it has expired. Set the new
 // password after Redeem succeeds. If that fails, the user needs a new token.
 func (m *ResetManager) Redeem(ctx context.Context, token string) (string, error) {
-	raw, err := resetB64.DecodeString(token)
-	if err != nil || len(raw) != resetTokenBytes {
+	raw, ok := decodeCanonical(resetB64, token)
+	if !ok || len(raw) != resetTokenBytes {
 		return "", ErrInvalidResetToken
 	}
 	t, err := m.store.TakeResetToken(ctx, sha256.Sum256(raw))

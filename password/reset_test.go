@@ -139,6 +139,8 @@ func TestResetTokenRejectsMalformedBeforeStore(t *testing.T) {
 		strings.ReplaceAll(token, "-", "+") + "+",
 		nonCanonical,
 		" " + token,
+		token[:20] + "\r\n" + token[20:],
+		token[:20] + "\n" + token[20:],
 	} {
 		_, err := m.Redeem(ctx, bad)
 		wantInvalidResetToken(t, err)

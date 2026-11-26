@@ -17,7 +17,7 @@ import (
 // of the library that creates the format.
 const (
 	maxBcryptCost        = 16
-	maxScryptMemoryBytes = 1 << 30
+	maxScryptMemoryBytes = 256 << 20
 	maxScryptWork        = 1 << 24
 	maxPBKDF2Iterations  = 10_000_000
 )
@@ -97,7 +97,7 @@ func parseWerkzeugScrypt(encoded string) (*werkzeugScryptHash, error) {
 	r, ok2 := parseCanonicalDecimal(args[2], maxScryptWork)
 	p, ok3 := parseCanonicalDecimal(args[3], maxScryptWork)
 	if !ok1 || !ok2 || !ok3 || n < 2 || n&(n-1) != 0 || r == 0 || p == 0 ||
-		128*n*r > maxScryptMemoryBytes || n*r > maxScryptWork || n*r*p > maxScryptWork {
+		scryptMemory(n, r, p) > maxScryptMemoryBytes || n*r > maxScryptWork || n*r*p > maxScryptWork {
 		return nil, ErrMalformedHash
 	}
 	key, err := hex.DecodeString(parts[2])
@@ -106,6 +106,10 @@ func parseWerkzeugScrypt(encoded string) (*werkzeugScryptHash, error) {
 	}
 	return &werkzeugScryptHash{n: n, r: r, p: p, salt: []byte(parts[1]), key: key}, nil
 }
+
+// scryptMemory is the memory scrypt allocates: V (128·r·N bytes), B
+// (128·r·p bytes) and XY (256·r bytes).
+func scryptMemory(n, r, p int) int { return 128*r*(n+p) + 256*r }
 
 func (s *werkzeugScryptHash) matches(password string) bool {
 	got, err := scrypt.Key([]byte(password), s.salt, s.n, s.r, s.p, len(s.key))
@@ -127,8 +131,8 @@ func parseDjangoPBKDF2(encoded string) (*djangoPBKDF2Hash, error) {
 	if !ok || iterations == 0 {
 		return nil, ErrMalformedHash
 	}
-	key, err := base64.StdEncoding.Strict().DecodeString(parts[3])
-	if err != nil || len(key) != sha256.Size {
+	key, ok := decodeCanonical(base64.StdEncoding.Strict(), parts[3])
+	if !ok || len(key) != sha256.Size {
 		return nil, ErrMalformedHash
 	}
 	return &djangoPBKDF2Hash{iterations: iterations, salt: []byte(parts[2]), key: key}, nil

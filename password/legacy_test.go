@@ -68,6 +68,7 @@ func TestVerifyLegacyRejectsMalformed(t *testing.T) {
 	for name, encoded := range map[string]string{
 		"bcrypt $2x$ (crypt_blowfish bug variant)": "$2x$05$" + bcryptBody,
 		"bcrypt without minor version":             "$2$05$" + bcryptBody,
+		"pbkdf2 key with a line break":             "pbkdf2_sha256$1000$salt0Django0$" + b64Key[:20] + "\n" + b64Key[20:],
 		"bcrypt cost below minimum":                "$2b$03$" + bcryptBody,
 		"bcrypt cost above bound":                  "$2b$17$" + bcryptBody,
 		"bcrypt cost 31":                           "$2b$31$" + bcryptBody,
@@ -81,6 +82,8 @@ func TestVerifyLegacyRejectsMalformed(t *testing.T) {
 		"scrypt N not a power of two":     "scrypt:1000:8:1$salt0Werkzeug0$" + hexKey,
 		"scrypt N too small":              "scrypt:1:8:1$salt0Werkzeug0$" + hexKey,
 		"scrypt 2 GiB of memory":          "scrypt:2097152:8:1$salt0Werkzeug0$" + hexKey,
+		"scrypt 512 MiB of memory":        "scrypt:2097152:2:1$salt0Werkzeug0$" + hexKey,
+		"scrypt V under cap, B over":      "scrypt:2:2:1048576$salt0Werkzeug0$" + hexKey,
 		"scrypt N·r·p above work bound":   "scrypt:1024:8:4096$salt0Werkzeug0$" + hexKey,
 		"scrypt r zero":                   "scrypt:1024:0:1$salt0Werkzeug0$" + hexKey,
 		"scrypt p zero":                   "scrypt:1024:8:0$salt0Werkzeug0$" + hexKey,
@@ -172,7 +175,7 @@ func FuzzParseHash(f *testing.F) {
 		case *bcryptHash:
 			ok = len(s.encoded) == 60
 		case *werkzeugScryptHash:
-			ok = 128*s.n*s.r <= maxScryptMemoryBytes && s.n*s.r*s.p <= maxScryptWork
+			ok = scryptMemory(s.n, s.r, s.p) <= maxScryptMemoryBytes && s.n*s.r*s.p <= maxScryptWork
 		case *djangoPBKDF2Hash:
 			ok = s.iterations >= 1 && s.iterations <= maxPBKDF2Iterations
 		}

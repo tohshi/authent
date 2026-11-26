@@ -296,6 +296,16 @@ func (a *argon2idHash) derive(password string) []byte {
 
 var b64 = base64.RawStdEncoding.Strict()
 
+// decodeCanonical decodes s and rejects any input that is not exactly the
+// encoding of its result. Strict decoding alone still skips '\r' and '\n'.
+func decodeCanonical(enc *base64.Encoding, s string) ([]byte, bool) {
+	b, err := enc.DecodeString(s)
+	if err != nil || enc.EncodeToString(b) != s {
+		return nil, false
+	}
+	return b, true
+}
+
 func (a *argon2idHash) encode() string {
 	p := a.params
 	costs := fmt.Sprintf("m=%d,t=%d,p=%d", p.Memory, p.Iterations, p.Parallelism)
@@ -346,12 +356,12 @@ func parseArgon2id(encoded string) (*argon2idHash, error) {
 		return nil, ErrMalformedHash
 	}
 
-	salt, err := b64.DecodeString(parts[4])
-	if err != nil {
+	salt, ok := decodeCanonical(b64, parts[4])
+	if !ok {
 		return nil, ErrMalformedHash
 	}
-	key, err := b64.DecodeString(parts[5])
-	if err != nil {
+	key, ok := decodeCanonical(b64, parts[5])
+	if !ok {
 		return nil, ErrMalformedHash
 	}
 

@@ -89,8 +89,8 @@ p, err := auth.Authenticate(ctx, username, pw)
   The store keeps only the token's SHA-256 hash, the subject and the expiry.
   `ResetTokenStore.TakeResetToken` must remove and return a token in one
   atomic step (in SQL, `DELETE ... RETURNING` or a locking transaction), so
-  a token cannot be redeemed twice. Issuing a token invalidates the subject's earlier ones, so only the
-  most recent link works. Expired, unknown and reused tokens return
+  a token cannot be redeemed twice. Issuing a token invalidates the
+  subject's earlier ones, so only the most recent link works. Expired, unknown and reused tokens return
   `ErrInvalidResetToken`, which wraps `authent.ErrUnauthenticated`.
 - To migrate users from another system, store their existing hashes as they
   are. `Verify` accepts bcrypt (`$2a$`, `$2b$`, `$2y$`), Werkzeug scrypt
@@ -99,7 +99,7 @@ p, err := auth.Authenticate(ctx, username, pw)
   them. `NeedsRehash` always reports them, so `Authenticate` replaces each one
   with Argon2id at the user's next login. They are compared byte for byte,
   without NFC normalization, as the original system did. Hashes above bcrypt
-  cost 16, 1 GiB of scrypt memory or 10,000,000 PBKDF2 iterations are
+  cost 16, 256 MiB of scrypt memory or 10,000,000 PBKDF2 iterations are
   rejected as malformed.
 
 ### JWT
