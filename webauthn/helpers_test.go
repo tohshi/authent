@@ -133,6 +133,7 @@ type softAuthenticator struct {
 	typ         string
 	origin      string
 	crossOrigin bool
+	topOrigin   string // sent when set
 	challenge   []byte // overrides the ceremony challenge when set
 	// Authenticator data.
 	rpID      string
@@ -171,7 +172,11 @@ func (a *softAuthenticator) clientData(def string, ch []byte) []byte {
 	if a.challenge != nil {
 		ch = a.challenge
 	}
-	b, _ := json.Marshal(map[string]any{"type": typ, "challenge": b64.EncodeToString(ch), "origin": a.origin, "crossOrigin": a.crossOrigin})
+	cd := map[string]any{"type": typ, "challenge": b64.EncodeToString(ch), "origin": a.origin, "crossOrigin": a.crossOrigin}
+	if a.topOrigin != "" {
+		cd["topOrigin"] = a.topOrigin
+	}
+	b, _ := json.Marshal(cd)
 	return b
 }
 

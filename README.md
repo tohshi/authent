@@ -540,8 +540,12 @@ In the browser, pass the options to
 `parseRequestOptionsFromJSON`) and send back `credential.toJSON()`.
 
 `FinishRegistration` and `FinishLogin` check:
-- the challenge (single ceremony type, expiry), the origin, the RP ID hash,
-  and that `crossOrigin` is false
+- the challenge (single ceremony type, expiry), the origin, and the RP ID
+  hash
+- that `crossOrigin` is false, or that `topOrigin` is in `TopOrigins`. A
+  page in `TopOrigins` must also allow the iframe with the
+  `publickey-credentials-create` and `publickey-credentials-get`
+  permissions policies
 - the user presence flag, and the user verification flag when
   `UserVerification` is `required`
 - the credential algorithm against an allow-list, with the key type and
@@ -553,6 +557,18 @@ In the browser, pass the options to
   user, and was in `allowCredentials`
 - the signature counter, which must increase unless it is always 0, and
   that backup eligibility does not change
+
+Origins are matched exactly, never derived from the request:
+- `Origins` lists web origins within the RP ID and Android app origins,
+  `android:apk-key-hash:` followed by the unpadded base64url SHA-256
+  fingerprint of the signing certificate
+  ([Credential Manager](https://developer.android.com/identity/passkeys/create-passkeys)).
+  iOS apps report `https://` followed by the RP ID
+  ([Apple](https://developer.apple.com/forums/thread/719003)), so they need
+  no extra entry.
+- `RelatedOrigins` lists web origins outside the RP ID for
+  [related origin requests](https://www.w3.org/TR/webauthn-3/#sctn-related-origins).
+  Serve the same list at `https://<RP ID>/.well-known/webauthn`.
 
 CBOR is decoded strictly: no tags, floats, indefinite lengths, duplicate
 map keys or trailing bytes, with bounds on depth and length.

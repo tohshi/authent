@@ -180,9 +180,9 @@ Legend:
 | WebAuthn Level 3 test vectors | ✅ | §16 vectors, including rejected ones |
 | Attestation formats `tpm`, `android-key`, `android-safetynet`, `apple` | ⬜ | Rejected; browsers send `none` unless attestation is requested |
 | FIDO Metadata Service (MDS3) | ⬜ | |
-| Ed448 | ⬜ | No Ed448 in the standard library |
-| Cross-origin iframes (`crossOrigin`, `topOrigin`) | ⬜ | Rejected |
-| Related origins and native app origins | ⬜ | Origins must be https within the RP ID |
+| Ed448 | ➖ | No Ed448 in the standard library or golang.org/x/crypto |
+| Cross-origin iframes (`crossOrigin`, `topOrigin`) | ✅ | `TopOrigins` lists the pages that may embed a ceremony; `crossOrigin` without `topOrigin` is rejected |
+| Related origins and native app origins | ✅ | `RelatedOrigins` (WebAuthn L3 §5.11); `android:apk-key-hash:` app origins in `Origins`; iOS apps report `https://<RP ID>` |
 | Extensions (`credProps`, `prf`, `largeBlob`, `appid`) | ⬜ | Authenticator extension outputs are parsed but not used |
 | Conditional create (registration without user presence) | ⬜ | User presence is always required |
 | Single-use enforcement of challenges | ➖ | The caller keeps the `Challenge` and deletes it after use |

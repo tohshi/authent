@@ -82,8 +82,8 @@ func TestSpecVectors(t *testing.T) {
 	// The error each registration is expected to fail with; nil means the
 	// registration and the following login must succeed.
 	want := map[string]error{
-		"16.4":  ErrOrigin,      // crossOrigin: true
-		"16.5":  ErrOrigin,      // crossOrigin: true with topOrigin
+		"16.4":  ErrOrigin,      // crossOrigin: true, but TopOrigins is empty
+		"16.5":  ErrOrigin,      // crossOrigin: true with topOrigin, but TopOrigins is empty
 		"16.12": ErrAlgorithm,   // Ed448
 		"16.13": ErrAttestation, // tpm
 		"16.14": ErrAttestation, // android-key

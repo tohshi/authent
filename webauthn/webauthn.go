@@ -106,10 +106,21 @@ type Config struct {
 	// RPName is shown to the user during registration.
 	RPName string
 	// Origins lists the accepted origins, such as "https://example.com" or
-	// "https://login.example.com". Each must use https, except
+	// "https://login.example.com". Each web origin must use https, except
 	// http://localhost for development, and its host must be RPID or a
-	// subdomain of it.
+	// subdomain of it. An Android app is listed as "android:apk-key-hash:"
+	// followed by the unpadded base64url SHA-256 fingerprint of its signing
+	// certificate. iOS apps report "https://" followed by RPID.
 	Origins []string
+	// RelatedOrigins lists further web origins outside RPID that use RPID
+	// through related origin requests (WebAuthn L3 §5.11). The caller must
+	// also list them in https://<RPID>/.well-known/webauthn.
+	RelatedOrigins []string
+	// TopOrigins lists the origins of pages that may embed a ceremony in a
+	// cross-origin iframe. A response with crossOrigin set is accepted only
+	// if its topOrigin is in this list. If empty, cross-origin responses
+	// are rejected.
+	TopOrigins []string
 	// UserVerification defaults to UserVerificationPreferred.
 	UserVerification UserVerification
 	// ResidentKey defaults to ResidentKeyPreferred.
@@ -300,6 +311,13 @@ func New(cfg Config, store CredentialStore, opts ...Option) (*RelyingParty, erro
 			return nil, err
 		}
 	}
+	cfg.RelatedOrigins = slices.Clone(cfg.RelatedOrigins)
+	cfg.TopOrigins = slices.Clone(cfg.TopOrigins)
+	for _, o := range slices.Concat(cfg.RelatedOrigins, cfg.TopOrigins) {
+		if _, err := webOriginHost(o); err != nil {
+			return nil, err
+		}
+	}
 	cfg.UserVerification = cmp.Or(cfg.UserVerification, UserVerificationPreferred)
 	if !slices.Contains([]UserVerification{UserVerificationRequired, UserVerificationPreferred, UserVerificationDiscouraged}, cfg.UserVerification) {
 		return nil, fmt.Errorf("webauthn: unknown user verification %q", cfg.UserVerification)
@@ -338,25 +356,45 @@ func New(cfg Config, store CredentialStore, opts ...Option) (*RelyingParty, erro
 	return rp, nil
 }
 
+// androidOriginPrefix starts the origin of an Android app.
+const androidOriginPrefix = "android:apk-key-hash:"
+
+// checkOrigin checks an entry of Config.Origins.
 func checkOrigin(origin, rpID string) error {
+	if hash, ok := strings.CutPrefix(origin, androidOriginPrefix); ok {
+		if b, err := decodeB64(hash); err != nil || len(b) != sha256.Size {
+			return fmt.Errorf("webauthn: origin %q must end in an unpadded base64url SHA-256 hash", origin)
+		}
+		return nil
+	}
+	host, err := webOriginHost(origin)
+	if err != nil {
+		return err
+	}
+	if host != rpID && !strings.HasSuffix(host, "."+rpID) {
+		return fmt.Errorf("webauthn: origin %q is not within RP ID %q", origin, rpID)
+	}
+	return nil
+}
+
+// webOriginHost checks that origin is a serialized https origin, or http
+// on a loopback host, and returns its host.
+func webOriginHost(origin string) (string, error) {
 	u, err := url.Parse(origin)
 	if err != nil || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil || u.Opaque != "" {
-		return fmt.Errorf("webauthn: origin %q must be scheme://host[:port]", origin)
+		return "", fmt.Errorf("webauthn: origin %q must be scheme://host[:port]", origin)
 	}
 	host := u.Hostname()
 	switch {
 	case u.Scheme == "https":
 	case u.Scheme == "http" && (host == "localhost" || isLoopback(host)):
 	default:
-		return fmt.Errorf("webauthn: origin %q must use https", origin)
+		return "", fmt.Errorf("webauthn: origin %q must use https", origin)
 	}
 	if origin != u.Scheme+"://"+u.Host || strings.ToLower(u.Host) != u.Host {
-		return fmt.Errorf("webauthn: origin %q is not in serialized form", origin)
+		return "", fmt.Errorf("webauthn: origin %q is not in serialized form", origin)
 	}
-	if host != rpID && !strings.HasSuffix(host, "."+rpID) {
-		return fmt.Errorf("webauthn: origin %q is not within RP ID %q", origin, rpID)
-	}
-	return nil
+	return host, nil
 }
 
 func isLoopback(host string) bool {
@@ -386,6 +424,8 @@ type clientData struct {
 	Challenge   string `json:"challenge"`
 	Origin      string `json:"origin"`
 	CrossOrigin bool   `json:"crossOrigin"`
+	// TopOrigin is set only in cross-origin iframes.
+	TopOrigin *string `json:"topOrigin"`
 }
 
 // verifyClientData checks the client data of a response against the
@@ -408,12 +448,14 @@ func (rp *RelyingParty) verifyClientData(raw []byte, ch Challenge, ceremony stri
 	if err != nil || subtle.ConstantTimeCompare(got, ch.Value) != 1 {
 		return [32]byte{}, ErrChallenge
 	}
-	if !slices.Contains(rp.cfg.Origins, cd.Origin) {
+	if !slices.Contains(rp.cfg.Origins, cd.Origin) && !slices.Contains(rp.cfg.RelatedOrigins, cd.Origin) {
 		return [32]byte{}, fmt.Errorf("%w: %q", ErrOrigin, cd.Origin)
 	}
-	// Ceremonies in cross-origin iframes are not supported.
-	if cd.CrossOrigin {
-		return [32]byte{}, fmt.Errorf("%w: cross-origin", ErrOrigin)
+	switch {
+	case cd.CrossOrigin && (cd.TopOrigin == nil || !slices.Contains(rp.cfg.TopOrigins, *cd.TopOrigin)):
+		return [32]byte{}, fmt.Errorf("%w: cross-origin iframe without an allowed topOrigin", ErrOrigin)
+	case !cd.CrossOrigin && cd.TopOrigin != nil:
+		return [32]byte{}, fmt.Errorf("%w: topOrigin without crossOrigin", ErrOrigin)
 	}
 	return sha256.Sum256(raw), nil
 }

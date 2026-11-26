@@ -403,6 +403,14 @@ func TestNewValidatesConfig(t *testing.T) {
 		{RPID: "example.org", Origins: []string{"https://example.org"}, Algorithms: []Algorithm{-47}},
 		{RPID: "example.org", Origins: []string{"https://example.org"}, Timeout: -1},
 		{RPID: "example.org", Origins: []string{"https://example.org"}, AttestationRoots: x509.NewCertPool()},
+		{RPID: "example.org", Origins: []string{androidOrigin("app") + "="}},
+		{RPID: "example.org", Origins: []string{androidOriginPrefix + b64.EncodeToString([]byte("short"))}},
+		{RPID: "example.org", Origins: []string{androidOriginPrefix}},
+		{RPID: "example.org", Origins: []string{"android:apk-key-hash"}},
+		{RPID: "example.org", Origins: []string{"https://example.org"}, RelatedOrigins: []string{"http://example.co.uk"}},
+		{RPID: "example.org", Origins: []string{"https://example.org"}, RelatedOrigins: []string{"https://example.co.uk/"}},
+		{RPID: "example.org", Origins: []string{"https://example.org"}, TopOrigins: []string{"example.com"}},
+		{RPID: "example.org", Origins: []string{"https://example.org"}, TopOrigins: []string{androidOrigin("app")}},
 	} {
 		if _, err := New(cfg, store); err == nil {
 			t.Errorf("New(%+v) accepted", cfg)
@@ -411,6 +419,8 @@ func TestNewValidatesConfig(t *testing.T) {
 	for _, cfg := range []Config{
 		{RPID: "example.org", Origins: []string{"https://example.org", "https://login.example.org:8443"}},
 		{RPID: "localhost", Origins: []string{"http://localhost:8080"}},
+		{RPID: "example.org", Origins: []string{"https://example.org", androidOrigin("app")},
+			RelatedOrigins: []string{"https://example.co.uk"}, TopOrigins: []string{"https://example.com"}},
 	} {
 		if _, err := New(cfg, store); err != nil {
 			t.Errorf("New(%+v) = %v", cfg, err)
