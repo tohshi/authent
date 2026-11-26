@@ -17,10 +17,10 @@ Legend:
 | `NeedsRehash` and automatic upgrade on login | ✅ | Requires the store to implement `CredentialUpdater` |
 | Timing-safe handling of unknown users | ✅ | Unknown users are verified against a dummy hash |
 | Pluggable credential store | ✅ | `CredentialStore` interface |
-| Verifying legacy hashes (bcrypt, scrypt, PBKDF2) | ⬜ | Would help migrations |
-| Pepper (server-side secret) | ⬜ | |
+| Verifying legacy hashes (bcrypt, scrypt, PBKDF2) | ✅ | Verify only: bcrypt (`$2a$`, `$2b$`, `$2y$`), Werkzeug scrypt and Django PBKDF2-SHA256, with bounded costs. Upgraded to Argon2id on login |
+| Pepper (server-side secret) | ✅ | HMAC-SHA-256 before Argon2id; `keyid` in the PHC string; retired peppers verify and trigger a rehash; unknown key IDs fail closed |
 | Password policy (length, blocklist, breached-password check) | ✅ | Configurable limits, exact-match blocklist, Pwned Passwords range lookup and NFC normalization for new passwords |
-| Password reset tokens | ⬜ | |
+| Password reset tokens | ✅ | 256-bit tokens; the store keeps only the SHA-256 hash, subject and expiry; atomic single use; a new token invalidates the subject's older ones. `MemoryResetStore` included |
 | Rate limiting and account lockout | ➖ | Depends on deployment; belongs in the caller |
 
 ## jwt

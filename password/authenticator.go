@@ -24,7 +24,8 @@ type Credential struct {
 	// Subject becomes Principal.Subject. Prefer a stable ID over the
 	// username, which users may change.
 	Subject string
-	// Hash is an encoded hash produced by Hasher.Hash.
+	// Hash is an encoded hash produced by Hasher.Hash or Policy.Hash, or a
+	// legacy hash that Hasher.Verify accepts.
 	Hash string
 }
 
@@ -35,8 +36,8 @@ type CredentialStore interface {
 }
 
 // CredentialUpdater is optionally implemented by a CredentialStore. If it
-// is, Authenticate replaces hashes created with outdated parameters after a
-// successful login.
+// is, Authenticate replaces legacy hashes and hashes created with outdated
+// parameters after a successful login.
 type CredentialUpdater interface {
 	UpdateCredential(ctx context.Context, subject, hash string) error
 }
@@ -86,14 +87,15 @@ func (a *Authenticator) Authenticate(ctx context.Context, username, password str
 		return authent.Principal{}, fmt.Errorf("password: looking up credential: %w", err)
 	}
 
-	switch err := a.hasher.Verify(password, cred.Hash); {
+	stored, err := a.hasher.verify(password, cred.Hash)
+	switch {
 	case errors.Is(err, ErrMismatch):
 		return authent.Principal{}, ErrInvalidCredentials
 	case err != nil:
 		return authent.Principal{}, fmt.Errorf("password: stored hash for %q: %w", cred.Subject, err)
 	}
 
-	if err := a.rehashIfNeeded(ctx, cred, password); err != nil {
+	if err := a.rehashIfNeeded(ctx, cred.Subject, stored, password); err != nil {
 		return authent.Principal{}, err
 	}
 	return authent.Principal{
@@ -103,24 +105,16 @@ func (a *Authenticator) Authenticate(ctx context.Context, username, password str
 	}, nil
 }
 
-func (a *Authenticator) rehashIfNeeded(ctx context.Context, cred Credential, password string) error {
+func (a *Authenticator) rehashIfNeeded(ctx context.Context, subject string, stored storedHash, password string) error {
 	updater, ok := a.store.(CredentialUpdater)
-	if !ok {
+	if !ok || stored.current(a.hasher) {
 		return nil
 	}
-	needs, err := a.hasher.NeedsRehash(cred.Hash)
-	if err != nil || !needs {
-		return err
-	}
-	_, _, _, normalize, err := decode(cred.Hash)
+	hash, err := a.hasher.hash(password, stored.normalized())
 	if err != nil {
 		return err
 	}
-	hash, err := a.hasher.hash(password, normalize)
-	if err != nil {
-		return err
-	}
-	if err := updater.UpdateCredential(ctx, cred.Subject, hash); err != nil {
+	if err := updater.UpdateCredential(ctx, subject, hash); err != nil {
 		return fmt.Errorf("password: upgrading hash: %w", err)
 	}
 	return nil
