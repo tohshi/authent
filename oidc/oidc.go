@@ -201,8 +201,7 @@ type Client struct {
 	idTokenOpts       []jwt.VerifierOption
 	verifier          *jwt.Verifier // ID tokens
 	userinfo          *jwt.Verifier // signed UserInfo responses
-	client            *http.Client  // for the token and PAR endpoints; adds DPoP proofs if configured
-	singleShot        *http.Client  // client, without the DPoP transport's nonce retry
+	client            *http.Client  // for the token and PAR endpoints; see tokenEndpointClient
 	base              *http.Client  // Config.HTTPClient
 	dpop              *dpop.Prover
 	assertionSigner   *jwt.Signer
@@ -287,16 +286,7 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 		// AutoDetect would first try Basic and could resend the same assertion.
 		authStyle = oauth2.AuthStyleInParams
 	}
-	client, singleShot := cfg.HTTPClient, cfg.HTTPClient
-	if cfg.DPoP != nil {
-		c := *cfg.HTTPClient
-		c.Transport = &dpop.Transport{Prover: cfg.DPoP, Base: cfg.HTTPClient.Transport}
-		client = &c
-		s := c
-		s.Transport = singleUse{c.Transport}
-		singleShot = &s
-	}
-	return &Client{
+	c := &Client{
 		provider: p,
 		oauth: oauth2.Config{
 			ClientID:     cfg.ClientID,
@@ -313,14 +303,69 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 		idTokenOpts:       idTokenOpts,
 		verifier:          verifier,
 		userinfo:          userinfo,
-		client:            client,
-		singleShot:        singleShot,
 		base:              cfg.HTTPClient,
 		dpop:              cfg.DPoP,
 		assertionSigner:   assertionSigner,
 		assertionAudience: p.Issuer,
 		now:               cfg.Now,
-	}, nil
+	}
+	c.client = c.tokenEndpointClient()
+	return c, nil
+}
+
+// tokenEndpointClient returns the client for the token and pushed
+// authorization request endpoints. With PrivateKeyJWT, each request gets
+// a fresh client assertion. With DPoP, each request gets a proof and is
+// retried once if the provider asks for a nonce; the assertion is added
+// below the DPoP transport, so the retry carries a new one too.
+func (c *Client) tokenEndpointClient() *http.Client {
+	hc := *c.base
+	if c.assertionSigner != nil {
+		hc.Transport = assertionTransport{sign: c.clientAssertion, base: hc.Transport}
+	}
+	if c.dpop != nil {
+		hc.Transport = &dpop.Transport{Prover: c.dpop, Base: hc.Transport}
+	}
+	return &hc
+}
+
+// assertionTransport adds a freshly signed private_key_jwt client
+// assertion to the form body of each request. Providers accept each
+// assertion only once.
+type assertionTransport struct {
+	sign func() (url.Values, error)
+	base http.RoundTripper
+}
+
+func (t assertionTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body []byte
+	if req.Body != nil {
+		var err error
+		body, err = io.ReadAll(req.Body)
+		req.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	form, err := url.ParseQuery(string(body))
+	if err != nil {
+		return nil, err
+	}
+	assertion, err := t.sign()
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(form, assertion)
+	encoded := form.Encode()
+	r := req.Clone(req.Context())
+	r.Body = io.NopCloser(strings.NewReader(encoded))
+	r.ContentLength = int64(len(encoded))
+	r.GetBody = nil
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(r)
 }
 
 // defaultAlgorithms keeps the asymmetric algorithms the provider supports.
@@ -489,11 +534,6 @@ func (c *Client) PushAuthCodeURL(ctx context.Context, opts ...oauth2.AuthCodeOpt
 		params.Set("client_secret", c.oauth.ClientSecret)
 	}
 	status, body, err := c.push(ctx, endpoint, params)
-	if code, _ := oauthError(status, body); err == nil && code == "use_dpop_nonce" && c.assertionSigner != nil && c.dpop != nil {
-		// The DPoP transport does not resend a client assertion; retry
-		// here with a fresh one and the nonce the provider just supplied.
-		status, body, err = c.push(ctx, endpoint, params)
-	}
 	if err != nil {
 		return AuthRequest{}, err
 	}
@@ -526,22 +566,9 @@ func (c *Client) PushAuthCodeURL(ctx context.Context, opts ...oauth2.AuthCodeOpt
 // push sends one pushed authorization request with the client's
 // credentials and returns the response status and body.
 func (c *Client) push(ctx context.Context, endpoint string, params url.Values) (int, []byte, error) {
-	if c.assertionSigner != nil {
-		assertion, err := c.clientAssertion()
-		if err != nil {
-			return 0, nil, err
-		}
-		params = maps.Clone(params)
-		maps.Copy(params, assertion)
-	}
 	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(params.Encode()))
 	if err != nil {
 		return 0, nil, err
-	}
-	if c.assertionSigner != nil {
-		// A client assertion is single use, so the body must not be
-		// replayed by the DPoP transport.
-		hr.GetBody = nil
 	}
 	hr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	hr.Header.Set("Accept", "application/json")
@@ -626,15 +653,10 @@ func (c *Client) Exchange(ctx context.Context, req AuthRequest, state, code stri
 		return nil, fmt.Errorf("%w: empty code", ErrExchangeRejected)
 	}
 
-	tok, err := c.exchange(ctx, code, req.CodeVerifier)
-	var re *oauth2.RetrieveError
-	if c.assertionSigner != nil && c.dpop != nil && errors.As(err, &re) && re.ErrorCode == "use_dpop_nonce" {
-		// The DPoP transport does not resend a client assertion; retry
-		// here with a fresh one and the nonce the provider just supplied.
-		tok, err = c.exchange(ctx, code, req.CodeVerifier)
-	}
+	tok, err := c.oauth.Exchange(context.WithValue(ctx, oauth2.HTTPClient, c.client), code,
+		oauth2.VerifierOption(req.CodeVerifier))
 	if err != nil {
-		if errors.As(err, &re) {
+		if _, ok := errors.AsType[*oauth2.RetrieveError](err); ok {
 			return nil, fmt.Errorf("%w: %w", ErrExchangeRejected, err)
 		}
 		return nil, fmt.Errorf("oidc: token exchange: %w", err)
@@ -676,33 +698,6 @@ func (c *Client) Exchange(ctx context.Context, req AuthRequest, state, code stri
 		return nil, err
 	}
 	return &Result{Principal: p, IDToken: claims, RawIDToken: raw, Token: tok}, nil
-}
-
-// exchange sends one token request for code.
-func (c *Client) exchange(ctx context.Context, code, verifier string) (*oauth2.Token, error) {
-	opts := []oauth2.AuthCodeOption{oauth2.VerifierOption(verifier)}
-	client := c.client
-	if c.assertionSigner != nil {
-		assertion, err := c.clientAssertion()
-		if err != nil {
-			return nil, err
-		}
-		for k := range assertion {
-			opts = append(opts, oauth2.SetAuthURLParam(k, assertion.Get(k)))
-		}
-		client = c.singleShot
-	}
-	return c.oauth.Exchange(context.WithValue(ctx, oauth2.HTTPClient, client), code, opts...)
-}
-
-// singleUse stops the DPoP transport from replaying a request body that
-// carries a single-use client assertion.
-type singleUse struct{ base http.RoundTripper }
-
-func (t singleUse) RoundTrip(req *http.Request) (*http.Response, error) {
-	r := req.Clone(req.Context())
-	r.GetBody = nil
-	return t.base.RoundTrip(r)
 }
 
 // HTTPClient returns a client that sends tok's access token with every
