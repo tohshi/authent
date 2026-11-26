@@ -25,6 +25,8 @@ go get github.com/tohshi/authent
 | `totp` | Time-based one-time passwords (RFC 6238) with replay protection |
 | `webauthn` | WebAuthn relying party: passkeys and security keys |
 | `rebac` | Zanzibar-style relationship-based access control (ReBAC) |
+| `apikey` | API keys with a scannable prefix and checksum, stored hashed |
+| `httpauth` | `net/http` middleware: bearer JWTs, session cookies with CSRF checks, API keys |
 
 Every authentication method returns an `authent.Principal`. Every
 authentication failure wraps `authent.ErrUnauthenticated`, so callers can
@@ -117,6 +119,23 @@ m.Destroy(ctx, token)                  // log out
 The store is keyed by the SHA-256 hash of the token, so raw tokens are never
 stored. Setting cookie attributes (`Secure`, `HttpOnly`, `SameSite`) is up to
 the caller.
+
+### API keys
+```go
+keys, _ := apikey.NewManager("myapp", store) // store implements apikey.Store; or apikey.NewMemoryStore()
+key, rec, _ := keys.Create(ctx, "u1", time.Now().AddDate(1, 0, 0)) // show key once; rec.ID is public
+p, err := keys.Authenticate(ctx, key) // p.Method is authent.MethodAPIKey, p.Claims["key_id"] is rec.ID
+keys.Revoke(ctx, rec.ID)
+```
+- Keys look like `myapp_<id>_<secret>`. A fixed prefix and format let
+  secret scanners find leaked keys.
+- The last segment carries a CRC-32 of the whole key. Mistyped or
+  truncated keys fail with `apikey.ErrMalformed` before the store is
+  queried.
+- The store keeps the SHA-256 of the secret, never the key itself. Hashes
+  are compared in constant time.
+- Every key has an expiry. Unknown, wrong, expired and revoked keys wrap
+  `authent.ErrUnauthenticated`; store failures do not.
 
 ### OIDC
 ```go
@@ -268,6 +287,71 @@ In the browser, pass the options to
 CBOR is decoded strictly: no tags, floats, indefinite lengths, duplicate
 map keys or trailing bytes, with bounds on depth and length.
 
+### HTTP middleware
+```go
+auth := httpauth.Any(
+	httpauth.APIKey(keys),                  // only claims tokens with its prefix, so list it first
+	httpauth.Bearer(verifier),              // Authorization: Bearer <JWT>
+	httpauth.SessionCookie(sessions, "sid"), // checks the CSRF token on unsafe methods
+)
+mux.Handle("/api/", httpauth.Require(auth)(api))   // 401 without valid credentials
+mux.Handle("/", httpauth.Optional(auth)(site))     // anonymous allowed, bad credentials are not
+
+func handler(w http.ResponseWriter, r *http.Request) {
+	p, ok := authent.FromContext(r.Context())
+	// ...
+}
+```
+- Errors wrapping `authent.ErrUnauthenticated` give 401. Bearer
+  authenticators add `WWW-Authenticate: Bearer`, with
+  `error="invalid_token"` when a token was rejected (RFC 6750 §3).
+  `httpauth.ErrForbidden`, including `httpauth.ErrCSRF`, gives 403. Any
+  other error, such as a store failure, gives 500 without details.
+  `httpauth.WithErrorHandler` replaces these responses, for example with a
+  redirect to a login page.
+- `Optional` passes a request without a Principal only when it carries no
+  credentials (`httpauth.ErrNoCredentials`). Rejected credentials are
+  never downgraded to anonymous.
+- Bearer tokens are read from the `Authorization` header only, never from
+  the query string or form body. Several `Authorization` headers, or
+  several session cookies with the same name, are rejected.
+- `SessionCookie` requires the session's CSRF token on methods other than
+  GET, HEAD, OPTIONS and TRACE, in the `X-CSRF-Token` header or the
+  `csrf_token` form field. Change where it is read with
+  `httpauth.WithCSRFToken`, or pass `nil` to turn the check off. To embed
+  the token in a page, load the session with `sessions.Get` and use
+  `s.CSRFToken`.
+- `authent.NewContext` and `authent.FromContext` carry the Principal for
+  any transport.
+
+#### gRPC
+gRPC interceptors are not included, because `google.golang.org/grpc` is
+outside the dependency policy. An interceptor is a few lines on top of
+`jwt.Verifier` and the context helpers:
+```go
+func authUnary(v *jwt.Verifier) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, next grpc.UnaryHandler) (any, error) {
+		md, _ := metadata.FromIncomingContext(ctx)
+		vals := md.Get("authorization")
+		if len(vals) != 1 {
+			return nil, status.Error(codes.Unauthenticated, "missing credentials")
+		}
+		token, err := httpauth.BearerToken(vals[0])
+		if err != nil {
+			return nil, status.Error(codes.Unauthenticated, "invalid credentials")
+		}
+		p, err := v.Authenticate(ctx, token)
+		if errors.Is(err, authent.ErrUnauthenticated) {
+			return nil, status.Error(codes.Unauthenticated, "invalid credentials")
+		}
+		if err != nil {
+			return nil, status.Error(codes.Internal, "internal error")
+		}
+		return next(authent.NewContext(ctx, p), req)
+	}
+}
+```
+
 ### ReBAC
 ```go
 schema, _ := rebac.NewSchema(
@@ -302,6 +386,21 @@ ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("us
   `false` with `ErrTooComplex`.
 - Store errors fail closed: `Check` returns `false` with the error.
 
+To check permissions for an authenticated request, map its Principal to a
+subject:
+```go
+sub, err := rebac.SubjectOf(p, "user") // user:<p.Subject>; an empty or "*" subject is an error
+ok, err := engine.Check(ctx, rebac.Obj("doc", id), "viewer", sub)
+
+// or as middleware, inside httpauth.Require:
+mux.Handle("GET /docs/{id}", httpauth.Require(auth)(
+	httpauth.RequirePermission(engine, "viewer", "user", func(r *http.Request) (rebac.Object, error) {
+		return rebac.Obj("doc", r.PathValue("id")), nil
+	})(docHandler)))
+```
+`RequirePermission` responds 403 when the check is denied or the object
+ID is invalid, and 500 when the check fails.
+
 #### Persistent tuple storage
 ```go
 import _ "github.com/jackc/pgx/v5/stdlib" // or any database/sql driver
@@ -335,6 +434,7 @@ and what is out of scope.
 go test -race ./...
 go test ./jwt -run '^$' -fuzz FuzzVerify -fuzztime 30s
 go test ./webauthn -run '^$' -fuzz FuzzCBOR -fuzztime 30s
+go test ./apikey -run '^$' -fuzz FuzzParse -fuzztime 30s
 ```
 `jwt/testdata/gen_openssl_vectors.py` generates `jwt/testdata/openssl_vectors.json`
 with OpenSSL. `webauthn/testdata/extract_spec_vectors.py` extracts
