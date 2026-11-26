@@ -16,7 +16,7 @@ import (
 
 type brokenStore struct{ *rebac.MemoryStore }
 
-func (brokenStore) Read(context.Context, rebac.Filter) iter.Seq2[rebac.Tuple, error] {
+func (brokenStore) Read(context.Context, rebac.Revision, rebac.Filter) iter.Seq2[rebac.Tuple, error] {
 	return func(yield func(rebac.Tuple, error) bool) { yield(rebac.Tuple{}, errors.New("db down")) }
 }
 
@@ -36,7 +36,7 @@ func TestRequirePermission(t *testing.T) {
 		return e
 	}
 	engine := newEngine(rebac.NewMemoryStore())
-	if err := engine.Write(t.Context(), []rebac.Tuple{
+	if _, err := engine.Write(t.Context(), []rebac.Tuple{
 		rebac.MustParseTuple("doc:secret#viewer@user:alice"),
 		rebac.MustParseTuple("doc:public#viewer@user:*"),
 	}, nil); err != nil {

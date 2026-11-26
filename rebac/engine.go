@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
+	"time"
 )
 
 var (
@@ -26,6 +28,8 @@ type Engine struct {
 	maxDepth       int
 	maxEvaluations int
 	concurrency    int
+	watchInterval  time.Duration
+	cache          *checkCache
 }
 
 // Option configures an Engine.
@@ -53,35 +57,112 @@ func WithMaxEvaluations(n int) Option { return func(e *Engine) { e.maxEvaluation
 // run and fail with ErrTooComplex in another.
 func WithConcurrency(n int) Option { return func(e *Engine) { e.concurrency = n } }
 
+// WithCheckCache keeps the results of up to size checks across calls, the
+// least recently used dropped first. A cached result answers a check only
+// if it was computed at the store's latest revision, which every check
+// reads anyway, so any write, a revoke included, takes effect at once. The
+// cache saves evaluation, not the revision read. Errors are not cached.
+func WithCheckCache(size int) Option {
+	return func(e *Engine) {
+		e.cache = nil
+		if size > 0 {
+			e.cache = newCheckCache(size)
+		}
+	}
+}
+
+// WithWatchInterval sets how often Watch asks the store for new changes.
+// The default is one second.
+func WithWatchInterval(d time.Duration) Option { return func(e *Engine) { e.watchInterval = d } }
+
 // NewEngine returns an Engine.
 func NewEngine(schema *Schema, store TupleStore, opts ...Option) (*Engine, error) {
 	if schema == nil || store == nil {
 		return nil, errors.New("rebac: nil schema or store")
 	}
-	e := &Engine{schema: schema, store: store, maxDepth: 50, maxEvaluations: 10000, concurrency: 1}
+	e := &Engine{schema: schema, store: store, maxDepth: 50, maxEvaluations: 10000, concurrency: 1, watchInterval: time.Second}
 	for _, opt := range opts {
 		opt(e)
 	}
-	if e.maxDepth <= 0 || e.maxEvaluations <= 0 || e.concurrency <= 0 {
+	if e.maxDepth <= 0 || e.maxEvaluations <= 0 || e.concurrency <= 0 || e.watchInterval <= 0 {
 		return nil, errors.New("rebac: limits must be positive")
 	}
 	return e, nil
 }
 
 // Write validates the tuples against the schema and applies them
-// atomically: deletes first, then writes.
-func (e *Engine) Write(ctx context.Context, writes, deletes []Tuple) error {
+// atomically: deletes first, then writes. It returns the revision of the
+// store after the write. Store it with the content the tuples protect and
+// pass it to AtLeast when checking access to that content, so the check
+// sees the write.
+func (e *Engine) Write(ctx context.Context, writes, deletes []Tuple) (Revision, error) {
 	for _, t := range writes {
 		if err := e.validateWrite(t); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	for _, t := range deletes {
 		if err := t.validate(); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	return e.store.Write(ctx, writes, deletes)
+}
+
+// QueryOption configures Check, CheckBulk and Expand.
+type QueryOption func(*queryConfig)
+
+type queryConfig struct {
+	atLeast Revision
+}
+
+// AtLeast makes a query fail with ErrFutureRevision if the store, such as
+// a lagging replica, has not reached revision rev, such as a revision that
+// Write returned. Queries always read the store's latest revision; AtLeast
+// only detects a store that is behind the caller.
+func AtLeast(rev Revision) QueryOption { return func(c *queryConfig) { c.atLeast = rev } }
+
+// Watch yields the changes made after revision after, in the order of
+// Changes, as they are written. It asks the store for new changes at the
+// interval set by WithWatchInterval and ends when ctx is done, or after
+// yielding an error such as ErrRevisionExpired. To resume, pass the
+// revision of the last change whose revision you have received in full.
+func (e *Engine) Watch(ctx context.Context, after Revision) iter.Seq2[Change, error] {
+	return func(yield func(Change, error) bool) {
+		t := time.NewTicker(e.watchInterval)
+		defer t.Stop()
+		for {
+			// Changes after the latest revision read before asking cover it,
+			// so the cursor can move up to it even when nothing changed.
+			latest, err := e.store.Revision(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				yield(Change{}, err)
+				return
+			}
+			for c, err := range e.store.Changes(ctx, after) {
+				if ctx.Err() != nil {
+					return
+				}
+				if err != nil {
+					yield(Change{}, err)
+					return
+				}
+				if !yield(c, nil) {
+					return
+				}
+				after = c.Revision
+			}
+			after = max(after, latest)
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}
 }
 
 func (e *Engine) validateWrite(t Tuple) error {
@@ -114,8 +195,10 @@ func (e *Engine) validateWrite(t Tuple) error {
 // an Exclusion. A relation that depends on its own exclusion and is not
 // decided by anything else has no answer; Check returns false with
 // ErrExclusionCycle.
-func (e *Engine) Check(ctx context.Context, object Object, permission string, subject Subject) (bool, error) {
-	r := e.newRequest(ctx).check(CheckItem{Object: object, Permission: permission, Subject: subject})
+//
+// All reads of a check are at one revision of the store, the latest.
+func (e *Engine) Check(ctx context.Context, object Object, permission string, subject Subject, opts ...QueryOption) (bool, error) {
+	r := e.newRequest(ctx, opts).check(CheckItem{Object: object, Permission: permission, Subject: subject})
 	return r.Allowed, r.Err
 }
 
@@ -136,12 +219,17 @@ type CheckResult struct {
 // CheckBulk runs many checks in one call and returns their results in the
 // order of items. The checks share the tuples they read from the store and,
 // when they are about the same subject, the relations they decide on the
-// way. Each check has its own evaluation limit and its own error.
-func (e *Engine) CheckBulk(ctx context.Context, items []CheckItem) []CheckResult {
-	q := e.newRequest(ctx)
+// way, and read one revision of the store. Each check has its own
+// evaluation limit and its own error. CheckBulk returns an error only if
+// the store's revision cannot be read or is older than AtLeast asks.
+func (e *Engine) CheckBulk(ctx context.Context, items []CheckItem, opts ...QueryOption) ([]CheckResult, error) {
+	q := e.newRequest(ctx, opts)
 	out := make([]CheckResult, len(items))
 	q.spread(len(items), func(i int) { out[i] = q.check(items[i]) })
-	return out
+	if q.revErr != nil {
+		return nil, q.revErr
+	}
+	return out, nil
 }
 
 func (q *request) check(it CheckItem) CheckResult {
@@ -154,14 +242,28 @@ func (q *request) check(it CheckItem) CheckResult {
 	if _, ok := q.e.schema.relation(it.Object.Type, it.Permission); !ok {
 		return CheckResult{Err: fmt.Errorf("%w: %s#%s", ErrUnknownRelation, it.Object.Type, it.Permission)}
 	}
+	cache := q.e.cache
+	rev, err := q.revision()
+	if err != nil {
+		return CheckResult{Err: err}
+	}
+	if cache != nil {
+		if allowed, ok := cache.get(it, rev); ok {
+			return CheckResult{Allowed: allowed}
+		}
+	}
+
 	r := &run{request: q, subject: it.Subject}
 	res := r.check(q.ctx, nil, it.Object, it.Permission)
 	if r.exceeded() {
 		return CheckResult{Err: r.errTooComplex()}
 	}
 	switch res.f.op {
-	case opTrue:
-		return CheckResult{Allowed: true}
+	case opTrue, opFalse:
+		if cache != nil {
+			cache.put(it, rev, res.f.op == opTrue)
+		}
+		return CheckResult{Allowed: res.f.op == opTrue}
 	case opUnknown:
 		return CheckResult{Err: res.f.why}
 	}

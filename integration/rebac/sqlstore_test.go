@@ -22,7 +22,7 @@ func TestSQLStorePostgres(t *testing.T) {
 		if err := s.CreateTable(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { db.Exec("DROP TABLE " + table) })
+		t.Cleanup(func() { db.Exec("DROP TABLE " + table + ", " + table + "_revision") })
 		return s
 	})
 }

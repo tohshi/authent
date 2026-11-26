@@ -15,11 +15,11 @@ type countingStore struct {
 	reads map[string]int
 }
 
-func (c *countingStore) Read(ctx context.Context, f Filter) iter.Seq2[Tuple, error] {
+func (c *countingStore) Read(ctx context.Context, rev Revision, f Filter) iter.Seq2[Tuple, error] {
 	c.mu.Lock()
 	c.reads[f.ObjectType+":"+f.ObjectID+"#"+f.Relation]++
 	c.mu.Unlock()
-	return c.MemoryStore.Read(ctx, f)
+	return c.MemoryStore.Read(ctx, rev, f)
 }
 
 func TestCheckBulk(t *testing.T) {
@@ -54,7 +54,7 @@ func TestCheckBulk(t *testing.T) {
 				{false, errStore},
 				{true, nil},
 			}
-			got := e.CheckBulk(context.Background(), items)
+			got, _ := e.CheckBulk(context.Background(), items)
 			if len(got) != len(items) {
 				t.Fatalf("%d results for %d items", len(got), len(items))
 			}
@@ -82,7 +82,8 @@ func TestCheckBulkSharesReads(t *testing.T) {
 	for i := range 10 {
 		items = append(items, CheckItem{Obj("doc", "d"), "viewer", Sub("user", fmt.Sprintf("u%d", i))})
 	}
-	for i, r := range e.CheckBulk(context.Background(), items) {
+	got, _ := e.CheckBulk(context.Background(), items)
+	for i, r := range got {
 		if r.Allowed != (i == 3) || r.Err != nil {
 			t.Errorf("item %d = %v, %v", i, r.Allowed, r.Err)
 		}
@@ -103,7 +104,7 @@ func TestCheckBulkEvaluationLimitPerItem(t *testing.T) {
 		write(t, e, fmt.Sprintf("group:big#member@group:g%d#member", i))
 	}
 	write(t, e, "group:small#member@user:bob")
-	got := e.CheckBulk(context.Background(), []CheckItem{
+	got, _ := e.CheckBulk(context.Background(), []CheckItem{
 		{Obj("group", "big"), "member", Sub("user", "bob")},
 		{Obj("group", "small"), "member", Sub("user", "bob")},
 	})

@@ -663,11 +663,13 @@ schema, _ := rebac.NewSchema(
 	),
 )
 engine, _ := rebac.NewEngine(schema, rebac.NewMemoryStore())
-engine.Write(ctx, []rebac.Tuple{
+rev, err := engine.Write(ctx, []rebac.Tuple{
 	rebac.MustParseTuple("folder:root#viewer@group:eng#member"),
 	rebac.MustParseTuple("doc:readme#parent@folder:root"),
 }, nil)
-ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("user", "alice"))
+// Store rev with the document. AtLeast(rev) makes the check fail rather
+// than read a store that has not seen the write.
+ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("user", "alice"), rebac.AtLeast(rev))
 ```
 - Writes that do not match the schema are rejected. Examples are a subject
   type the relation does not allow, or a write to a computed-only relation.
@@ -682,6 +684,19 @@ ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("us
 - Depth and evaluation count are bounded. Exceeding either limit returns
   `false` with `ErrTooComplex`.
 - Store errors fail closed: `Check` returns `false` with the error.
+- Every `Write` moves the store to a new `Revision`, Zanzibar's consistency
+  token ("zookie"). A query reads one revision, the latest, so it never
+  mixes data from before and after a write. `AtLeast(rev)` makes a query
+  fail with `ErrFutureRevision` if the store has not reached `rev`, such as
+  a replica that is behind.
+- `TupleStore.Changes` lists the writes and deletes after a revision, and
+  `Engine.Watch` streams them as they happen. `Prune` on `MemoryStore` and
+  `SQLStore` discards history; reads and changes before the pruned
+  revision then fail with `ErrRevisionExpired`.
+- `WithCheckCache(n)` keeps up to `n` check results across calls. A result
+  answers a later check only if it was computed at the store's latest
+  revision, which every check reads, so a revoke takes effect at once.
+  Errors are not cached.
 - `CheckBulk` runs many checks in one call. They share store reads and
   the relations they decide on the way; results come back in order, each
   with its own error.
@@ -726,9 +741,16 @@ engine, _ := rebac.NewEngine(schema, store)
   different subjects whatever the server collation. Rows that do not
   exactly match a lookup are discarded anyway, and rows that are not valid
   tuples make the read fail.
-- A write is one transaction. A read releases its connection before
-  returning tuples, so a pool with a single connection (common for SQLite)
-  does not deadlock on recursive checks.
+- A write is one transaction. It locks the row of the `<table>_revision`
+  table that holds the latest revision, so writes are serialized and
+  revisions follow commit order. A delete keeps the row with the revision
+  it was deleted at, for reads at older revisions and for `Changes`, until
+  `Prune` removes it.
+- A read releases its connection before returning tuples, so a pool with a
+  single connection (common for SQLite) does not deadlock on recursive
+  checks. It reads the latest and the pruned revision in the same
+  statement, so a concurrent `Prune` is detected, not silently read
+  around.
 - `rebactest.TestTupleStore` is a conformance suite for `TupleStore`
   implementations. Run it against your own store, or against `SQLStore`
   with your database and driver.
