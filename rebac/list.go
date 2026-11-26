@@ -98,8 +98,9 @@ func walkAll(typ, rel string, children []Rewrite, walk func(string, string, Rewr
 // those name in turn, to find candidates, and then checks each one, so it
 // is correct under every rewrite. The walk is bounded by the evaluation
 // limit and each candidate's check by the limits of Check. An object
-// whose check fails with ErrExclusionCycle is not listed; any other error
-// fails the call. The whole call reads one revision of the store.
+// whose check fails with ErrExclusionCycle, or is conditional on caveat
+// parameters that WithContext does not supply, is not listed; any other
+// error fails the call. The whole call reads one revision of the store.
 func (e *Engine) ListObjects(ctx context.Context, objectType, permission string, subject Subject, opts ...QueryOption) ([]Object, error) {
 	if _, ok := e.schema.relation(objectType, permission); !ok {
 		return nil, fmt.Errorf("%w: %s#%s", ErrUnknownRelation, objectType, permission)
@@ -178,7 +179,7 @@ func (e *Engine) ListObjects(ctx context.Context, objectType, permission string,
 
 // listed returns the error that fails a list call for a check result.
 func listed(r CheckResult) error {
-	if r.Err != nil && !errors.Is(r.Err, ErrExclusionCycle) {
+	if r.Err != nil && !errors.Is(r.Err, ErrExclusionCycle) && !errors.Is(r.Err, ErrMissingContext) {
 		return r.Err
 	}
 	return nil
@@ -221,7 +222,7 @@ func (e *Engine) ListSubjects(ctx context.Context, object Object, permission, su
 	if _, ok := e.schema.relation(object.Type, permission); !ok {
 		return SubjectSet{}, fmt.Errorf("%w: %s#%s", ErrUnknownRelation, object.Type, permission)
 	}
-	want, err := e.schema.parseAllowed(subjectType)
+	want, err := e.schema.parseSubjectType(subjectType)
 	if err != nil || want.wildcard {
 		return SubjectSet{}, fmt.Errorf("%w: subject type %q", ErrUnknownRelation, subjectType)
 	}

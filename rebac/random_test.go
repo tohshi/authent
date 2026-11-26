@@ -69,7 +69,7 @@ func randomWorld(t testing.TB, rng *rand.Rand) world {
 
 	var w world
 	for {
-		defs := []TypeDef{Type("user")}
+		defs := []Definition{Type("user")}
 		for _, typ := range worldTypes {
 			defs = append(defs, Type(typ,
 				Relation("p", Direct(pick(worldTypes)...)),

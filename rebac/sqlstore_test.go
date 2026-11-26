@@ -47,6 +47,7 @@ type fakeData struct {
 
 type fakeRow struct {
 	cols             [6]string
+	caveat           [2]string
 	created, deleted int64
 }
 
@@ -251,14 +252,15 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 		if !strings.HasSuffix(query, " ON CONFLICT DO NOTHING") && !strings.HasSuffix(query, " ON DUPLICATE KEY UPDATE object_type = object_type") {
 			return nil, fmt.Errorf("fake: insert without conflict handling: %q", query)
 		}
-		if len(args) != 8 {
+		if len(args) != 10 {
 			return nil, fmt.Errorf("fake: insert with %d args", len(args))
 		}
 		var r fakeRow
 		for i := range r.cols {
 			r.cols[i] = args[i].Value.(string)
 		}
-		r.created, r.deleted = args[6].Value.(int64), args[7].Value.(int64)
+		r.caveat = [2]string{args[6].Value.(string), args[7].Value.(string)}
+		r.created, r.deleted = args[8].Value.(int64), args[9].Value.(int64)
 		c.view(func(d *fakeData) {
 			if !slices.ContainsFunc(d.rows, func(o fakeRow) bool { return o.cols == r.cols && o.deleted == r.deleted }) {
 				d.rows = append(d.rows, r)
@@ -270,8 +272,15 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 			return nil, fmt.Errorf("fake: update with %d conditions", len(conds))
 		}
 		rev := args[0].Value.(int64)
+		replace := strings.Contains(query, " AND (caveat_name <> ")
+		if replace != (len(args) == 10) {
+			return nil, fmt.Errorf("fake: update with %d args: %q", len(args), query)
+		}
 		c.view(func(d *fakeData) {
 			for i, r := range d.rows {
+				if replace && r.caveat == [2]string{args[8].Value.(string), args[9].Value.(string)} {
+					continue
+				}
 				if c.db.match(r, conds) {
 					d.rows[i].deleted = rev
 					n++
@@ -311,9 +320,9 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 				r.rows = append(r.rows, []driver.Value{d.rev})
 			}
 		})
-	case strings.HasPrefix(query, "SELECT r.rev, r.pruned_rev, t."+strings.Join(columns, ", t.")):
+	case strings.HasPrefix(query, "SELECT r.rev, r.pruned_rev, t."+strings.Join(columns, ", t.")+", t.caveat_name, t.caveat_context"):
 		changes := strings.Contains(query, ", t.created_rev, t.deleted_rev FROM")
-		r.cols = append([]string{"rev", "pruned_rev"}, columns...)
+		r.cols = append(append([]string{"rev", "pruned_rev"}, columns...), "caveat_name", "caveat_context")
 		if changes {
 			r.cols = append(r.cols, "created_rev", "deleted_rev")
 			if len(args) != 3 || !strings.Contains(query, "(t.created_rev > ") {
@@ -334,7 +343,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 					continue
 				}
 				v := []driver.Value{d.rev, d.pruned}
-				for _, col := range row.cols {
+				for _, col := range append(row.cols[:], row.caveat[:]...) {
 					if c.db.dialect == rebac.MySQL {
 						v = append(v, []byte(col))
 					} else {

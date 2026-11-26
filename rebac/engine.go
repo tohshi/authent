@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"slices"
 	"time"
 )
 
@@ -96,9 +97,17 @@ func NewEngine(schema *Schema, store TupleStore, opts ...Option) (*Engine, error
 // pass it to AtLeast when checking access to that content, so the check
 // sees the write.
 func (e *Engine) Write(ctx context.Context, writes, deletes []Tuple) (Revision, error) {
-	for _, t := range writes {
+	writes = slices.Clone(writes)
+	for i, t := range writes {
 		if err := e.validateWrite(t); err != nil {
 			return 0, err
+		}
+		if t.Caveat.Context != "" {
+			c, err := e.schema.caveats[t.Caveat.Name].canonical(t.Caveat.Context)
+			if err != nil {
+				return 0, fmt.Errorf("%w: %s: caveat context: %v", ErrInvalidTuple, t, err)
+			}
+			writes[i].Caveat.Context = c
 		}
 	}
 	for _, t := range deletes {
@@ -109,11 +118,13 @@ func (e *Engine) Write(ctx context.Context, writes, deletes []Tuple) (Revision, 
 	return e.store.Write(ctx, writes, deletes)
 }
 
-// QueryOption configures Check, CheckBulk and Expand.
+// QueryOption configures Check, CheckBulk, Expand, ListObjects and
+// ListSubjects.
 type QueryOption func(*queryConfig)
 
 type queryConfig struct {
 	atLeast Revision
+	context map[string]any
 }
 
 // AtLeast makes a query fail with ErrFutureRevision if the store, such as
@@ -174,7 +185,7 @@ func (e *Engine) validateWrite(t Tuple) error {
 		return fmt.Errorf("%w: %s#%s", ErrUnknownRelation, t.Object.Type, t.Relation)
 	}
 	for _, a := range info.allowed {
-		if a.matches(t.Subject) {
+		if a.matches(t.Subject, t.Caveat.Name) {
 			return nil
 		}
 	}
@@ -242,7 +253,12 @@ func (q *request) check(it CheckItem) CheckResult {
 	if _, ok := q.e.schema.relation(it.Object.Type, it.Permission); !ok {
 		return CheckResult{Err: fmt.Errorf("%w: %s#%s", ErrUnknownRelation, it.Object.Type, it.Permission)}
 	}
+	// A result that depends on the request's caveat context is not
+	// reusable by other requests.
 	cache := q.e.cache
+	if len(q.cfg.context) > 0 {
+		cache = nil
+	}
 	rev, err := q.revision()
 	if err != nil {
 		return CheckResult{Err: err}

@@ -106,6 +106,7 @@ type SQLStore struct {
 	headSQL       string
 	insertSQL     string
 	deleteSQL     string
+	replaceSQL    string // deletes the live version of a tuple if its caveat differs
 	readPrefixSQL string // up to the join condition
 	changeSQL     string
 	horizSQL      string
@@ -214,6 +215,14 @@ func (s *SQLStore) buildStatements(schema, table string) {
 		}
 		defs = append(defs, c+" "+typ+" NOT NULL")
 	}
+	caveatName, caveatContext := `TEXT COLLATE "C"`, "TEXT"
+	switch d {
+	case SQLite:
+		caveatName = "TEXT"
+	case MySQL:
+		caveatName, caveatContext = "VARBINARY(64)", "VARBINARY("+strconv.Itoa(maxContextLength)+")"
+	}
+	defs = append(defs, "caveat_name "+caveatName+" NOT NULL", "caveat_context "+caveatContext+" NOT NULL")
 	defs = append(defs, "created_rev BIGINT NOT NULL", "deleted_rev BIGINT NOT NULL", "PRIMARY KEY ("+cols+", deleted_rev)")
 	revDefs := "id INTEGER PRIMARY KEY, rev BIGINT NOT NULL, pruned_rev BIGINT NOT NULL"
 	seed := "INSERT INTO " + s.revTable + " (id, rev, pruned_rev) VALUES (1, 0, 0)"
@@ -260,8 +269,9 @@ func (s *SQLStore) buildStatements(schema, table string) {
 	n := len(sqlColumns)
 	s.bumpSQL = "UPDATE " + s.revTable + " SET rev = rev + 1 WHERE id = 1"
 	s.headSQL = "SELECT rev FROM " + s.revTable + " WHERE id = 1"
-	s.insertSQL = "INSERT INTO " + s.table + " (" + cols + ", created_rev, deleted_rev) VALUES (" +
-		strings.Join(params, ", ") + ", " + d.placeholder(n+1) + ", " + d.placeholder(n+2) + ")"
+	s.insertSQL = "INSERT INTO " + s.table + " (" + cols + ", caveat_name, caveat_context, created_rev, deleted_rev) VALUES (" +
+		strings.Join(params, ", ") + ", " + d.placeholder(n+1) + ", " + d.placeholder(n+2) + ", " +
+		d.placeholder(n+3) + ", " + d.placeholder(n+4) + ")"
 	if d == MySQL {
 		s.insertSQL += " ON DUPLICATE KEY UPDATE object_type = object_type"
 	} else {
@@ -269,11 +279,13 @@ func (s *SQLStore) buildStatements(schema, table string) {
 	}
 	s.deleteSQL = "UPDATE " + s.table + " SET deleted_rev = " + d.placeholder(1) + " WHERE " +
 		strings.Join(conds, " AND ") + " AND deleted_rev = " + d.placeholder(n+2)
+	s.replaceSQL = s.deleteSQL + " AND (caveat_name <> " + d.placeholder(n+3) + " OR caveat_context <> " + d.placeholder(n+4) + ")"
 
 	var tcols []string
 	for _, c := range sqlColumns {
 		tcols = append(tcols, "t."+c)
 	}
+	tcols = append(tcols, "t.caveat_name", "t.caveat_context")
 	from := " FROM " + s.revTable + " r LEFT JOIN " + s.table + " t ON "
 	s.readPrefixSQL = "SELECT r.rev, r.pruned_rev, " + strings.Join(tcols, ", ") + from
 	s.changeSQL = "SELECT r.rev, r.pruned_rev, " + strings.Join(tcols, ", ") + ", t.created_rev, t.deleted_rev" + from +
@@ -327,11 +339,11 @@ func (s *SQLStore) Write(ctx context.Context, writes, deletes []Tuple) (Revision
 		return 0, fmt.Errorf("rebac: reading revision: %w", err)
 	}
 	var adds, dels []Tuple
-	for t, present := range netChanges(writes, deletes) {
-		if present {
-			adds = append(adds, t)
+	for _, nc := range netChanges(writes, deletes) {
+		if nc.present {
+			adds = append(adds, nc.t)
 		} else {
-			dels = append(dels, t)
+			dels = append(dels, nc.t)
 		}
 	}
 	if err := execEach(ctx, tx, s.deleteSQL, dels, func(t Tuple) []any {
@@ -339,8 +351,13 @@ func (s *SQLStore) Write(ctx context.Context, writes, deletes []Tuple) (Revision
 	}); err != nil {
 		return 0, fmt.Errorf("rebac: deleting tuple: %w", err)
 	}
+	if err := execEach(ctx, tx, s.replaceSQL, adds, func(t Tuple) []any {
+		return append(append([]any{rev}, tupleArgs(t)...), int64(sqlLive), t.Caveat.Name, t.Caveat.Context)
+	}); err != nil {
+		return 0, fmt.Errorf("rebac: replacing tuple: %w", err)
+	}
 	if err := execEach(ctx, tx, s.insertSQL, adds, func(t Tuple) []any {
-		return append(tupleArgs(t), rev, int64(sqlLive))
+		return append(tupleArgs(t), t.Caveat.Name, t.Caveat.Context, rev, int64(sqlLive))
 	}); err != nil {
 		return 0, fmt.Errorf("rebac: writing tuple: %w", err)
 	}
@@ -429,6 +446,7 @@ func (s *SQLStore) read(ctx context.Context, rev Revision, f Filter) ([]Tuple, e
 			Object:   Obj(cols[0].String, cols[1].String),
 			Relation: cols[2].String,
 			Subject:  Subject{Object: Obj(cols[3].String, cols[4].String), Relation: cols[5].String},
+			Caveat:   TupleCaveat{Name: cols[6].String, Context: cols[7].String},
 		}
 		if err := t.validate(); err != nil {
 			return fmt.Errorf("rebac: invalid tuple in %s: %w", s.table, err)
@@ -454,7 +472,7 @@ func (s *SQLStore) query(ctx context.Context, rev Revision, query string, args [
 	if err != nil {
 		return fmt.Errorf("rebac: querying tuples: %w", err)
 	}
-	cols := make([]sql.NullString, len(sqlColumns))
+	cols := make([]sql.NullString, len(sqlColumns)+2)
 	extra := make([]sql.NullInt64, len(n)-2-len(cols))
 	dest := []any{new(int64), new(int64)}
 	for i := range cols {
@@ -526,6 +544,7 @@ func (s *SQLStore) changes(ctx context.Context, after Revision) ([]Change, error
 			Object:   Obj(cols[0].String, cols[1].String),
 			Relation: cols[2].String,
 			Subject:  Subject{Object: Obj(cols[3].String, cols[4].String), Relation: cols[5].String},
+			Caveat:   TupleCaveat{Name: cols[6].String, Context: cols[7].String},
 		}
 		if err := t.validate(); err != nil {
 			return fmt.Errorf("rebac: invalid tuple in %s: %w", s.table, err)

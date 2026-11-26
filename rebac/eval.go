@@ -318,23 +318,27 @@ func (r *run) direct(ctx context.Context, p *path, obj Object, rel string) resul
 	if err != nil {
 		return resUnknown(err)
 	}
-	var usersets []Subject
+	var matches []result
+	var usersets []Tuple
 	for _, t := range tuples {
 		s := t.Subject
 		switch {
-		case s == r.subject:
-			return resTrue
-		case s.isWildcard():
-			if r.subject.Relation == "" && r.subject.Object.Type == s.Object.Type {
+		case s == r.subject || s.isWildcard() && r.subject.Relation == "" && r.subject.Object.Type == s.Object.Type:
+			if t.Caveat.Name == "" {
 				return resTrue
 			}
-		case s.Relation != "":
-			usersets = append(usersets, s)
+			matches = append(matches, r.caveat(t.Caveat))
+		case s.Relation != "" && !s.isWildcard():
+			usersets = append(usersets, t)
 		}
 	}
-	return join(opOr, r.branches(ctx, len(usersets), opTrue, func(ctx context.Context, i int) result {
-		return r.check(ctx, p, usersets[i].Object, usersets[i].Relation)
-	}))
+	if m := join(opOr, matches); m.f.op == opTrue {
+		return m
+	}
+	return join(opOr, append(matches, r.branches(ctx, len(usersets), opTrue, func(ctx context.Context, i int) result {
+		u := usersets[i]
+		return r.conditional(u.Caveat, func() result { return r.check(ctx, p, u.Subject.Object, u.Subject.Relation) })
+	})...))
 }
 
 func (r *run) tupleToUserset(ctx context.Context, p *path, obj Object, rw tupleToUserset) result {
@@ -342,13 +346,14 @@ func (r *run) tupleToUserset(ctx context.Context, p *path, obj Object, rw tupleT
 	if err != nil {
 		return resUnknown(err)
 	}
-	var targets []Object
+	var targets []Tuple
 	for _, t := range tuples {
 		if !t.Subject.isWildcard() {
-			targets = append(targets, t.Subject.Object)
+			targets = append(targets, t)
 		}
 	}
 	return join(opOr, r.branches(ctx, len(targets), opTrue, func(ctx context.Context, i int) result {
-		return r.check(ctx, p, targets[i], rw.computed)
+		t := targets[i]
+		return r.conditional(t.Caveat, func() result { return r.check(ctx, p, t.Subject.Object, rw.computed) })
 	}))
 }

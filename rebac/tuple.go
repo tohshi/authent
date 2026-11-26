@@ -6,6 +6,9 @@
 //	doc:readme#viewer@group:eng#member  members of group:eng are viewers
 //	doc:readme#parent@folder:root       doc:readme is inside folder:root
 //	doc:readme#viewer@user:*            every user is a viewer
+//	doc:readme#viewer@user:bob[office:{"ip":"10.0.0.1"}]
+//	                                    bob is a viewer if the office
+//	                                    caveat holds
 //
 // and a Schema that defines, per object type, how each relation is computed
 // from tuples and from other relations (see Direct, Computed,
@@ -67,21 +70,67 @@ type Tuple struct {
 	Object   Object
 	Relation string
 	Subject  Subject
+	// Caveat, if set, makes the tuple conditional: it applies only when
+	// the caveat holds. A tuple is identified by its other fields, so
+	// writing it with another caveat replaces it.
+	Caveat TupleCaveat
 }
 
-func (t Tuple) String() string {
-	return t.Object.String() + "#" + t.Relation + "@" + t.Subject.String()
+// TupleCaveat names a caveat that the schema defines and holds a JSON
+// object with values for some of its parameters, such as
+// {"cidrs":["10.0.0.0/8"]}. The zero TupleCaveat makes a tuple
+// unconditional.
+type TupleCaveat struct {
+	Name    string
+	Context string
 }
+
+// maxContextLength bounds the stored context of a caveat, in bytes.
+const maxContextLength = 4096
+
+func (t Tuple) String() string {
+	s := t.Object.String() + "#" + t.Relation + "@" + t.Subject.String()
+	if t.Caveat.Name != "" {
+		s += "[" + t.Caveat.Name
+		if t.Caveat.Context != "" {
+			s += ":" + t.Caveat.Context
+		}
+		s += "]"
+	}
+	return s
+}
+
+// tupleKey identifies a tuple regardless of its caveat.
+type tupleKey struct {
+	object   Object
+	relation string
+	subject  Subject
+}
+
+func (t Tuple) key() tupleKey { return tupleKey{t.Object, t.Relation, t.Subject} }
 
 // ErrInvalidTuple is returned for syntactically invalid tuples, objects and
 // subjects.
 var ErrInvalidTuple = errors.New("rebac: invalid tuple")
 
-// ParseTuple parses "type:id#relation@type:id[#relation]".
+// ParseTuple parses "type:id#relation@type:id[#relation]", optionally
+// followed by a caveat as "[name]" or "[name:{...}]" with a JSON object.
 func ParseTuple(s string) (Tuple, error) {
 	objRel, sub, ok := strings.Cut(s, "@")
 	if !ok {
 		return Tuple{}, fmt.Errorf("%w: %q: missing '@'", ErrInvalidTuple, s)
+	}
+	var caveat TupleCaveat
+	if i := strings.IndexByte(sub, '['); i >= 0 {
+		if !strings.HasSuffix(sub, "]") {
+			return Tuple{}, fmt.Errorf("%w: %q: caveat missing ']'", ErrInvalidTuple, s)
+		}
+		name, context, hasContext := strings.Cut(sub[i+1:len(sub)-1], ":")
+		if name == "" || hasContext && context == "" {
+			return Tuple{}, fmt.Errorf("%w: %q: empty caveat", ErrInvalidTuple, s)
+		}
+		caveat = TupleCaveat{Name: name, Context: context}
+		sub = sub[:i]
 	}
 	obj, rel, ok := strings.Cut(objRel, "#")
 	if !ok {
@@ -95,7 +144,7 @@ func ParseTuple(s string) (Tuple, error) {
 	if err != nil {
 		return Tuple{}, err
 	}
-	t := Tuple{Object: o, Relation: rel, Subject: subject}
+	t := Tuple{Object: o, Relation: rel, Subject: subject, Caveat: caveat}
 	return t, t.validate()
 }
 
@@ -164,7 +213,7 @@ func validateObject(o Object, allowWildcard bool) error {
 		return fmt.Errorf("%w: id length %d", ErrInvalidTuple, len(o.ID))
 	}
 	for _, r := range o.ID {
-		if r == ':' || r == '#' || r == '@' || r == '*' || unicode.IsSpace(r) || unicode.IsControl(r) || r == unicode.ReplacementChar {
+		if r == ':' || r == '#' || r == '@' || r == '*' || r == '[' || r == ']' || unicode.IsSpace(r) || unicode.IsControl(r) || r == unicode.ReplacementChar {
 			return fmt.Errorf("%w: id %q contains %q", ErrInvalidTuple, o.ID, r)
 		}
 	}
@@ -193,5 +242,23 @@ func (t Tuple) validate() error {
 	if !validName(t.Relation) {
 		return fmt.Errorf("%w: relation %q", ErrInvalidTuple, t.Relation)
 	}
-	return validateSubject(t.Subject, true)
+	if err := validateSubject(t.Subject, true); err != nil {
+		return err
+	}
+	c := t.Caveat
+	switch {
+	case c.Name == "" && c.Context != "":
+		return fmt.Errorf("%w: caveat context without a caveat", ErrInvalidTuple)
+	case c.Name == "":
+		return nil
+	case !validName(c.Name):
+		return fmt.Errorf("%w: caveat %q", ErrInvalidTuple, c.Name)
+	case len(c.Context) > maxContextLength:
+		return fmt.Errorf("%w: caveat context longer than %d bytes", ErrInvalidTuple, maxContextLength)
+	case c.Context != "":
+		if _, err := parseObject(c.Context); err != nil {
+			return fmt.Errorf("%w: caveat context: %v", ErrInvalidTuple, err)
+		}
+	}
+	return nil
 }

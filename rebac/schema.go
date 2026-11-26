@@ -29,7 +29,10 @@ func (exclusion) isRewrite()      {}
 // Direct grants the relation to subjects named in tuples for this relation.
 // allowed lists the subject types that may be written, each one of
 // "type" (an object, such as user), "type#relation" (a userset, such as
-// group#member) or "type:*" (a wildcard, such as user:*).
+// group#member) or "type:*" (a wildcard, such as user:*), optionally
+// followed by " with " and the name of a caveat that such tuples must
+// carry, as in "user with office". A type without " with " allows only
+// tuples without a caveat.
 //
 // A relation whose rewrite contains Direct can be written to; one without is
 // a computed permission.
@@ -85,10 +88,11 @@ type allowedSubject struct {
 	typ      string
 	relation string // userset relation, or empty
 	wildcard bool
+	caveat   string
 }
 
-func (a allowedSubject) matches(s Subject) bool {
-	if a.typ != s.Object.Type {
+func (a allowedSubject) matches(s Subject, caveat string) bool {
+	if a.typ != s.Object.Type || a.caveat != caveat {
 		return false
 	}
 	if a.wildcard {
@@ -100,11 +104,18 @@ func (a allowedSubject) matches(s Subject) bool {
 func (a allowedSubject) String() string {
 	switch {
 	case a.wildcard:
-		return a.typ + ":*"
+		return a.typ + ":*" + a.withCaveat()
 	case a.relation != "":
-		return a.typ + "#" + a.relation
+		return a.typ + "#" + a.relation + a.withCaveat()
 	}
-	return a.typ
+	return a.typ + a.withCaveat()
+}
+
+func (a allowedSubject) withCaveat() string {
+	if a.caveat == "" {
+		return ""
+	}
+	return " with " + a.caveat
 }
 
 type relationInfo struct {
@@ -112,15 +123,41 @@ type relationInfo struct {
 	allowed []allowedSubject // subjects that may be written; empty if not writable
 }
 
-// Schema is a validated set of type definitions. It is immutable.
+// Definition is a type or caveat definition for NewSchema. Build one with
+// Type or Caveat.
+type Definition interface{ definition() }
+
+func (TypeDef) definition()   {}
+func (CaveatDef) definition() {}
+
+// Schema is a validated set of type and caveat definitions. It is
+// immutable.
 type Schema struct {
+	caveats map[string]*CaveatDef
 	types   map[string]map[string]*relationInfo
 	reverse map[typeRel][]reverseEdge
 }
 
 // NewSchema validates the definitions and returns a Schema.
-func NewSchema(types ...TypeDef) (*Schema, error) {
-	s := &Schema{types: map[string]map[string]*relationInfo{}}
+func NewSchema(defs ...Definition) (*Schema, error) {
+	s := &Schema{types: map[string]map[string]*relationInfo{}, caveats: map[string]*CaveatDef{}}
+	var types []TypeDef
+	for _, d := range defs {
+		switch d := d.(type) {
+		case TypeDef:
+			types = append(types, d)
+		case CaveatDef:
+			if err := d.validate(); err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrInvalidSchema, err)
+			}
+			if _, dup := s.caveats[d.name]; dup {
+				return nil, fmt.Errorf("%w: duplicate caveat %q", ErrInvalidSchema, d.name)
+			}
+			s.caveats[d.name] = &d
+		default:
+			return nil, fmt.Errorf("%w: unknown definition %T", ErrInvalidSchema, d)
+		}
+	}
 	for _, t := range types {
 		if !validName(t.name) {
 			return nil, fmt.Errorf("%w: type name %q", ErrInvalidSchema, t.name)
@@ -252,6 +289,16 @@ func (s *Schema) validateChildren(typ string, children []Rewrite, op string) ([]
 }
 
 func (s *Schema) parseAllowed(spec string) (allowedSubject, error) {
+	base, caveat, withCaveat := strings.Cut(spec, " with ")
+	if _, ok := s.caveats[caveat]; withCaveat && !ok {
+		return allowedSubject{}, fmt.Errorf("allowed subject %q: unknown caveat %q", spec, caveat)
+	}
+	a, err := s.parseSubjectType(base)
+	a.caveat = caveat
+	return a, err
+}
+
+func (s *Schema) parseSubjectType(spec string) (allowedSubject, error) {
 	var a allowedSubject
 	switch {
 	case strings.HasSuffix(spec, ":*"):
