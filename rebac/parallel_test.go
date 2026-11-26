@@ -23,7 +23,7 @@ type blockingStore struct {
 	cancelled atomic.Bool
 }
 
-func (b *blockingStore) Read(ctx context.Context, f Filter) iter.Seq2[Tuple, error] {
+func (b *blockingStore) Read(ctx context.Context, rev Revision, f Filter) iter.Seq2[Tuple, error] {
 	switch {
 	case objRel{Obj(f.ObjectType, f.ObjectID), f.Relation} == b.after:
 		select {
@@ -43,7 +43,7 @@ func (b *blockingStore) Read(ctx context.Context, f Filter) iter.Seq2[Tuple, err
 			}
 		}
 	}
-	return b.MemoryStore.Read(ctx, f)
+	return b.MemoryStore.Read(ctx, rev, f)
 }
 
 func TestParallelCancelsDecidedSiblings(t *testing.T) {
@@ -72,8 +72,8 @@ func TestParallelCancelsDecidedSiblings(t *testing.T) {
 // The case was found by an independent verifier of this package.
 type truncatingStore struct{ *MemoryStore }
 
-func (s *truncatingStore) Read(ctx context.Context, f Filter) iter.Seq2[Tuple, error] {
-	inner := s.MemoryStore.Read(ctx, f)
+func (s *truncatingStore) Read(ctx context.Context, rev Revision, f Filter) iter.Seq2[Tuple, error] {
+	inner := s.MemoryStore.Read(ctx, rev, f)
 	return func(yield func(Tuple, error) bool) {
 		switch f.ObjectID + "#" + f.Relation {
 		case "d#owner":
@@ -128,11 +128,11 @@ type delayStore struct {
 	slow objRel
 }
 
-func (d *delayStore) Read(ctx context.Context, f Filter) iter.Seq2[Tuple, error] {
+func (d *delayStore) Read(ctx context.Context, rev Revision, f Filter) iter.Seq2[Tuple, error] {
 	if (objRel{Obj(f.ObjectType, f.ObjectID), f.Relation}) == d.slow {
 		time.Sleep(100 * time.Millisecond)
 	}
-	return d.MemoryStore.Read(ctx, f)
+	return d.MemoryStore.Read(ctx, rev, f)
 }
 
 func TestParallelEvaluationLimitFailsClosed(t *testing.T) {

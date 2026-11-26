@@ -44,14 +44,18 @@ type UsersetTree struct {
 // A relation reached again on the same path, through a cycle in the data,
 // is a leaf naming the userset itself. Expand is bounded by the same depth
 // and evaluation limits as Check, and fails with ErrTooComplex beyond them.
-func (e *Engine) Expand(ctx context.Context, object Object, relation string) (*UsersetTree, error) {
+// It reads one revision of the store, like Check.
+func (e *Engine) Expand(ctx context.Context, object Object, relation string, opts ...QueryOption) (*UsersetTree, error) {
 	if err := validateObject(object, false); err != nil {
 		return nil, err
 	}
 	if _, ok := e.schema.relation(object.Type, relation); !ok {
 		return nil, fmt.Errorf("%w: %s#%s", ErrUnknownRelation, object.Type, relation)
 	}
-	x := &expander{request: e.newRequest(ctx)}
+	x := &expander{request: e.newRequest(ctx, opts)}
+	if _, err := x.revision(); err != nil {
+		return nil, err
+	}
 	return x.relation(nil, object, relation)
 }
 

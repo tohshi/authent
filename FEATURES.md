@@ -135,13 +135,13 @@ Legend:
 | `TupleStore` conformance suite | ✅ | `rebactest.TestTupleStore` |
 | `Expand` (userset tree) | ✅ | Follows `Computed` and `TupleToUserset`; usersets named by tuples are leaves |
 | `ListObjects` / `ListSubjects` | ⬜ | |
-| Consistency tokens (zookies) | ⬜ | |
+| Consistency tokens (zookies) | ✅ | `Write` returns a `Revision`; every query reads one revision; `AtLeast` fails with `ErrFutureRevision` when the store is behind |
 | Text schema DSL | ⬜ | |
 | Caveats / conditional tuples (ABAC) | ⬜ | |
 | Bulk check | ✅ | `CheckBulk`: shared store reads and decided relations, ordered results, an error per item |
 | Parallel branch evaluation | ✅ | `WithConcurrency`; decided branches cancel their siblings; the evaluation limit is shared by all branches and fails closed |
 | Check result caching across requests | ⬜ | |
-| Watch API / change log | ⬜ | |
+| Watch API / change log | ✅ | `TupleStore.Changes` and `Engine.Watch`; `Prune` discards old history, after which it fails with `ErrRevisionExpired` |
 | Exact semantics for `Exclusion` over data cycles | ✅ | Well-founded semantics; a relation that depends on its own exclusion fails closed with `ErrExclusionCycle` |
 
 ## totp

@@ -130,7 +130,7 @@ func (w world) engine(t testing.TB, opts ...Option) *Engine {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Write(context.Background(), w.tuples, nil); err != nil {
+	if _, err := e.Write(context.Background(), w.tuples, nil); err != nil {
 		t.Fatal(err)
 	}
 	return e

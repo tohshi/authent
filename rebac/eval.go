@@ -11,7 +11,12 @@ import (
 type request struct {
 	e     *Engine
 	ctx   context.Context
+	cfg   queryConfig
 	slots chan struct{} // nil, so never ready, without WithConcurrency
+
+	revOnce sync.Once
+	rev     Revision
+	revErr  error
 
 	mu    sync.Mutex
 	reads map[objRel]*read
@@ -30,12 +35,27 @@ type memoKey struct {
 	at      objRel
 }
 
-func (e *Engine) newRequest(ctx context.Context) *request {
+func (e *Engine) newRequest(ctx context.Context, opts []QueryOption) *request {
 	q := &request{e: e, ctx: ctx, reads: map[objRel]*read{}, memo: map[memoKey]bool{}}
+	for _, opt := range opts {
+		opt(&q.cfg)
+	}
 	if e.concurrency > 1 {
 		q.slots = make(chan struct{}, e.concurrency-1)
 	}
 	return q
+}
+
+// revision returns the revision the request reads at: the store's latest,
+// which must be at least the one AtLeast asks for.
+func (q *request) revision() (Revision, error) {
+	q.revOnce.Do(func() {
+		q.rev, q.revErr = q.e.store.Revision(q.ctx)
+		if q.revErr == nil && q.rev < q.cfg.atLeast {
+			q.revErr = fmt.Errorf("%w: %d is after %d", ErrFutureRevision, q.cfg.atLeast, q.rev)
+		}
+	})
+	return q.rev, q.revErr
 }
 
 // read returns the tuples of obj#rel. A pair is read from the store once
@@ -75,8 +95,12 @@ func (q *request) read(ctx context.Context, obj Object, rel string) ([]Tuple, er
 }
 
 func (q *request) fetch(ctx context.Context, k objRel) ([]Tuple, error) {
+	rev, err := q.revision()
+	if err != nil {
+		return nil, err
+	}
 	var out []Tuple
-	for t, err := range q.e.store.Read(ctx, Filter{ObjectType: k.obj.Type, ObjectID: k.obj.ID, Relation: k.rel}) {
+	for t, err := range q.e.store.Read(ctx, rev, Filter{ObjectType: k.obj.Type, ObjectID: k.obj.ID, Relation: k.rel}) {
 		if err != nil {
 			return nil, fmt.Errorf("rebac: reading tuples: %w", err)
 		}

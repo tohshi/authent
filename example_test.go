@@ -53,7 +53,7 @@ func Example() {
 		),
 	)
 	engine, _ := rebac.NewEngine(schema, rebac.NewMemoryStore())
-	_ = engine.Write(ctx, []rebac.Tuple{rebac.MustParseTuple("doc:readme#owner@user:u1")}, nil)
+	_, _ = engine.Write(ctx, []rebac.Tuple{rebac.MustParseTuple("doc:readme#owner@user:u1")}, nil)
 
 	ok, _ := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("user", s.Principal().Subject))
 	fmt.Println(ok)

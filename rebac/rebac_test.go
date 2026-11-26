@@ -64,7 +64,7 @@ func write(t testing.TB, e *Engine, tuples ...string) {
 	for _, s := range tuples {
 		ts = append(ts, MustParseTuple(s))
 	}
-	if err := e.Write(context.Background(), ts, nil); err != nil {
+	if _, err := e.Write(context.Background(), ts, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -168,7 +168,7 @@ func TestDeleteRevokes(t *testing.T) {
 	if ok, _ := e.Check(ctx, Obj("doc", "d"), "viewer", Sub("user", "alice")); !ok {
 		t.Fatal("expected access")
 	}
-	if err := e.Write(ctx, nil, []Tuple{MustParseTuple("doc:d#owner@user:alice")}); err != nil {
+	if _, err := e.Write(ctx, nil, []Tuple{MustParseTuple("doc:d#owner@user:alice")}); err != nil {
 		t.Fatal(err)
 	}
 	if ok, _ := e.Check(ctx, Obj("doc", "d"), "viewer", Sub("user", "alice")); ok {
@@ -190,7 +190,7 @@ func TestWriteValidation(t *testing.T) {
 		{"sheet:d#owner@user:alice", ErrUnknownRelation},
 		{"doc:d#editor@group:eng", ErrSubjectNotAllowed}, // must be group#member
 	} {
-		err := e.Write(context.Background(), []Tuple{MustParseTuple(tc.tuple)}, nil)
+		_, err := e.Write(context.Background(), []Tuple{MustParseTuple(tc.tuple)}, nil)
 		if !errors.Is(err, tc.want) {
 			t.Errorf("Write(%s) = %v, want %v", tc.tuple, err, tc.want)
 		}
@@ -198,7 +198,7 @@ func TestWriteValidation(t *testing.T) {
 
 	// A batch with one invalid tuple writes nothing.
 	ctx := context.Background()
-	err := e.Write(ctx, []Tuple{MustParseTuple("doc:d#owner@user:alice"), MustParseTuple("doc:d#owner@user:*")}, nil)
+	_, err := e.Write(ctx, []Tuple{MustParseTuple("doc:d#owner@user:alice"), MustParseTuple("doc:d#owner@user:*")}, nil)
 	if err == nil {
 		t.Fatal("batch with invalid tuple succeeded")
 	}
@@ -315,12 +315,12 @@ type failingStore struct {
 
 var errStore = errors.New("store unavailable")
 
-func (f *failingStore) Read(ctx context.Context, filter Filter) iter.Seq2[Tuple, error] {
+func (f *failingStore) Read(ctx context.Context, rev Revision, filter Filter) iter.Seq2[Tuple, error] {
 	if filter.ObjectType == f.failObject.Type && filter.ObjectID == f.failObject.ID &&
 		(f.failRelation == "" || f.failRelation == filter.Relation) {
 		return func(yield func(Tuple, error) bool) { yield(Tuple{}, errStore) }
 	}
-	return f.MemoryStore.Read(ctx, filter)
+	return f.MemoryStore.Read(ctx, rev, filter)
 }
 
 func TestExcludedBranchErrorDenies(t *testing.T) {
@@ -381,7 +381,7 @@ func TestConcurrentWritesAndChecks(t *testing.T) {
 		wg.Go(func() {
 			for j := range 100 {
 				tp := MustParseTuple(fmt.Sprintf("doc:d%d_%d#parent@folder:root", i, j))
-				if err := e.Write(ctx, []Tuple{tp}, nil); err != nil {
+				if _, err := e.Write(ctx, []Tuple{tp}, nil); err != nil {
 					t.Error(err)
 					return
 				}
@@ -404,7 +404,7 @@ func TestMemoryStoreRead(t *testing.T) {
 	)
 	alice := Sub("user", "alice")
 	n := 0
-	for tp, err := range e.store.Read(context.Background(), Filter{Subject: &alice}) {
+	for tp, err := range e.store.Read(context.Background(), 1, Filter{Subject: &alice}) {
 		if err != nil || tp.Subject != alice {
 			t.Fatalf("unexpected %v, %v", tp, err)
 		}
