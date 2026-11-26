@@ -136,6 +136,80 @@ func TestParseSchemaErrors(t *testing.T) {
 	}
 }
 
+// nestedText is a relation v whose operators nest depth deep.
+func nestedText(depth int) string {
+	e := "a or a"
+	for range depth - 1 {
+		e = "a or (" + e + ")"
+	}
+	return "type user\ntype doc {\n  relation a: [user]\n  relation v: " + e + "\n}\n"
+}
+
+func TestParseSchemaNestingLimit(t *testing.T) {
+	s, err := ParseSchema(nestedText(64), nil)
+	if err != nil {
+		t.Fatalf("64 deep: %v", err)
+	}
+	if _, err := ParseSchema(s.String(), nil); err != nil {
+		t.Errorf("String() of 64 deep: %v", err)
+	}
+
+	for _, tc := range []struct {
+		src string
+		col int
+	}{
+		{nestedText(65), 15 + 64*len("a or (") - 1},
+		{"type user\ntype doc {\n  relation a: [user]\n  relation v: " + strings.Repeat("(", 1<<20), 15 + 63},
+	} {
+		_, err := ParseSchema(tc.src, nil)
+		var pe *ParseError
+		if !errors.As(err, &pe) || pe.Line != 4 || pe.Column != tc.col || !strings.Contains(pe.Msg, "nest more than 64 deep") {
+			t.Errorf("ParseSchema(%.60q...) = %v, want a ParseError at 4:%d", tc.src, err, tc.col)
+		}
+	}
+}
+
+func TestNewSchemaNestingLimit(t *testing.T) {
+	nested := func(depth int) Rewrite {
+		r := Union(Computed("a"), Computed("a"))
+		for range depth - 1 {
+			r = Union(Computed("a"), r)
+		}
+		return r
+	}
+	schema := func(depth int) (*Schema, error) {
+		return NewSchema(Type("user"), Type("doc", Relation("a", Direct("user")), Relation("v", nested(depth))))
+	}
+	s, err := schema(64)
+	if err != nil {
+		t.Fatalf("64 deep: %v", err)
+	}
+	if _, err := ParseSchema(s.String(), nil); err != nil {
+		t.Errorf("String() of 64 deep: %v", err)
+	}
+	for _, depth := range []int{65, 100_000} {
+		if _, err := schema(depth); !errors.Is(err, ErrInvalidSchema) {
+			t.Errorf("%d deep: NewSchema = %v, want ErrInvalidSchema", depth, err)
+		}
+	}
+}
+
+func TestSchemaRejectsKeywordNames(t *testing.T) {
+	ok := func(map[string]any) (bool, error) { return true, nil }
+	for _, kw := range []string{"type", "relation", "caveat", "or", "and", "but", "not", "from", "with"} {
+		for what, defs := range map[string][]Definition{
+			"type":      {Type(kw)},
+			"relation":  {Type("user"), Type("doc", Relation(kw, Direct("user")))},
+			"caveat":    {Caveat(kw, ok)},
+			"parameter": {Caveat("c", ok, Param{kw, ParamString})},
+		} {
+			if _, err := NewSchema(defs...); !errors.Is(err, ErrInvalidSchema) {
+				t.Errorf("%s named %q: NewSchema = %v, want ErrInvalidSchema", what, kw, err)
+			}
+		}
+	}
+}
+
 func FuzzParseSchema(f *testing.F) {
 	f.Add(driveText)
 	f.Add("caveat c(a string, b list<string>, t timestamp)\ntype user\ntype doc {\n\trelation v: [user with c] but not (v and w)\n\trelation w: v from p\n\trelation p: [doc]\n}\n")

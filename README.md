@@ -783,8 +783,11 @@ fmt.Print(schema) // the same schema in canonical form
 - Errors are `*ParseError` values with a line and column, also for
   problems found when validating, such as an unknown relation.
 - `Schema.String` writes the canonical form, which parses back to the same
-  schema. Names cannot be the keywords `type`, `relation`, `caveat`, `or`,
-  `and`, `but`, `not`, `from` and `with`.
+  schema.
+- The text and the Go API accept the same schemas. Names cannot be the
+  keywords `type`, `relation`, `caveat`, `or`, `and`, `but`, `not`, `from`
+  and `with`, and `NewSchema` rejects them too. Operators nest at most 64
+  deep, so text allows 63 levels of parentheses.
 
 #### Caveats
 ```go

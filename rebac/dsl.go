@@ -43,7 +43,11 @@ func (e *ParseError) Unwrap() error { return ErrInvalidSchema }
 // Intersection and Exclusion. Mixing operators needs parentheses. Caveat
 // parameter types are string, int, bool, timestamp, duration and
 // list<string>; funcs gives the Go function of every caveat. Comments run
-// from // to the end of the line.
+// from // to the end of the line. Expressions nest at most 64 deep,
+// counting the top level and each pair of parentheses, so that operators
+// nest as deep as NewSchema allows. Names cannot be the keywords type,
+// relation, caveat, or, and, but, not, from and with, in the text or in the
+// Go API.
 //
 // Errors are *ParseError values with the position of the problem.
 func ParseSchema(src string, funcs map[string]CaveatFunc) (*Schema, error) {
@@ -83,6 +87,7 @@ type parser struct {
 	tok       token
 	funcs     map[string]CaveatFunc
 	at        map[string]token // where each type#relation is defined
+	depth     int              // parentheses open around the current expression
 }
 
 func (p *parser) errorf(t token, format string, args ...any) error {
@@ -155,14 +160,12 @@ func describe(t token) string {
 // name reads a type, relation, caveat or parameter name.
 func (p *parser) name(what string) (string, token, error) {
 	t := p.tok
-	if t.kind != tokIdent || !validName(t.text) || keywords[t.text] {
+	if t.kind != tokIdent || !validDefName(t.text) {
 		return "", t, p.errorf(t, "expected %s name, found %s", what, describe(t))
 	}
 	p.next()
 	return t.text, t, nil
 }
-
-var keywords = map[string]bool{"type": true, "relation": true, "caveat": true, "or": true, "and": true, "but": true, "not": true, "from": true, "with": true}
 
 func (p *parser) schema() ([]Definition, error) {
 	var defs []Definition
@@ -343,11 +346,16 @@ func (p *parser) expr() (Rewrite, error) {
 func (p *parser) term() (Rewrite, error) {
 	switch {
 	case p.is("("):
+		if p.depth+1 == maxRewriteDepth {
+			return nil, p.errorf(p.tok, "expressions nest more than %d deep", maxRewriteDepth)
+		}
 		p.next()
+		p.depth++
 		e, err := p.expr()
 		if err != nil {
 			return nil, err
 		}
+		p.depth--
 		return e, p.expect(")")
 	case p.is("["):
 		p.next()
