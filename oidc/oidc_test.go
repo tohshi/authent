@@ -50,6 +50,12 @@ type fakeProvider struct {
 	// omits it.
 	userinfoEndpoint string
 	accessTokens     map[string]bool // issued access tokens
+	// Refresh tokens (OpenID Connect Core §12).
+	refreshTokens      map[string]grant
+	rotateRefresh      bool
+	mutateRefresh      func(c *jwt.Claims)
+	omitRefreshIDToken bool
+	tokenUnavailable   bool
 	// userinfo overrides the UserInfo response for a valid access token.
 	userinfo          func(w http.ResponseWriter, r *http.Request)
 	authMethods       []string
@@ -82,7 +88,7 @@ func newFakeProvider(t testing.TB) *fakeProvider {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &fakeProvider{signer: signer, grants: map[string]grant{}, accessTokens: map[string]bool{},
+	p := &fakeProvider{signer: signer, grants: map[string]grant{}, accessTokens: map[string]bool{}, refreshTokens: map[string]grant{},
 		pushed: map[string]url.Values{}, proofs: proofs}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
@@ -189,19 +195,54 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 		jkt = proof.JKT
 	}
 	p.mu.Lock()
-	g, ok := p.grants[r.PostForm.Get("code")]
-	delete(p.grants, r.PostForm.Get("code")) // codes are single use
+	unavailable := p.tokenUnavailable
 	p.mu.Unlock()
-	sum := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
-	if !ok || base64.RawURLEncoding.EncodeToString(sum[:]) != g.challenge || g.jkt != "" && g.jkt != jkt {
-		tokenError()
+	if unavailable {
+		writeError(w, http.StatusServiceUnavailable, "temporarily_unavailable")
 		return
 	}
 
-	accessToken := "access-" + r.PostForm.Get("code")
+	refresh := r.PostForm.Get("grant_type") == "refresh_token"
+	var g grant
+	if refresh {
+		var ok bool
+		p.mu.Lock()
+		g, ok = p.refreshTokens[r.PostForm.Get("refresh_token")]
+		if ok && p.rotateRefresh {
+			delete(p.refreshTokens, r.PostForm.Get("refresh_token"))
+		}
+		p.mu.Unlock()
+		if !ok || g.jkt != "" && g.jkt != jkt {
+			tokenError()
+			return
+		}
+	} else {
+		var ok bool
+		p.mu.Lock()
+		g, ok = p.grants[r.PostForm.Get("code")]
+		delete(p.grants, r.PostForm.Get("code")) // codes are single use
+		p.mu.Unlock()
+		sum := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
+		if !ok || base64.RawURLEncoding.EncodeToString(sum[:]) != g.challenge || g.jkt != "" && g.jkt != jkt {
+			tokenError()
+			return
+		}
+	}
+
+	id, _ := randomString()
+	accessToken := "access-" + id
+	resp := map[string]any{"access_token": accessToken, "token_type": "Bearer", "expires_in": 300}
+	if jkt != "" {
+		resp["token_type"] = "DPoP"
+	}
 	p.mu.Lock()
 	p.accessTokens[accessToken] = true
+	if !refresh || p.rotateRefresh {
+		resp["refresh_token"] = "refresh-" + id
+		p.refreshTokens["refresh-"+id] = grant{nonce: g.nonce, jkt: jkt}
+	}
 	p.mu.Unlock()
+
 	atSum := sha256.Sum256([]byte(accessToken))
 	claims := jwt.Claims{
 		Issuer:    p.URL,
@@ -215,20 +256,22 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 			"at_hash": base64.RawURLEncoding.EncodeToString(atSum[:16]),
 		},
 	}
-	if p.mutate != nil {
-		p.mutate(&claims)
+	mutate, omit := p.mutate, p.omitIDToken
+	if refresh {
+		// OpenID Connect Core §12.2: a refreshed ID token should not
+		// carry a nonce.
+		delete(claims.Extra, "nonce")
+		mutate, omit = p.mutateRefresh, p.omitRefreshIDToken
+	}
+	if mutate != nil {
+		mutate(&claims)
 	}
 	idToken, err := p.signer.Sign(claims)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	tokenType := "Bearer"
-	if jkt != "" {
-		tokenType = "DPoP"
-	}
-	resp := map[string]any{"access_token": accessToken, "token_type": tokenType, "expires_in": 300}
-	if !p.omitIDToken {
+	if !omit {
 		resp["id_token"] = idToken
 	}
 	w.Header().Set("Content-Type", "application/json")

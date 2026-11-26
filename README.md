@@ -342,6 +342,16 @@ keys and carry the provider as `iss` and the client in `aud`; it needs no
 `exp`. Encrypted responses are rejected. Redirects are not followed, so the
 access token is never sent anywhere but the advertised https endpoint.
 
+`Refresh` uses a `Result`'s refresh token and returns the next `Result`:
+```go
+res, err = client.Refresh(ctx, res) // store res again: the refresh token may have rotated
+```
+It authenticates the client as `Exchange` does, including with
+`private_key_jwt`, and sends DPoP proofs when configured. A new ID token
+must verify like the first one and describe the same authentication: the
+same `iss`, `sub`, `aud` and `azp`, and the same `auth_time` and `nonce`
+when it has them. A rejected refresh token wraps `oidc.ErrRefreshRejected`.
+
 Pushed authorization requests (RFC 9126) send the parameters to the
 provider over the back channel, so the browser only sees a `request_uri`:
 ```go

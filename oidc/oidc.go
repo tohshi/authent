@@ -661,11 +661,8 @@ func (c *Client) Exchange(ctx context.Context, req AuthRequest, state, code stri
 		}
 		return nil, fmt.Errorf("oidc: token exchange: %w", err)
 	}
-	if c.dpop != nil && !strings.EqualFold(tok.TokenType, dpop.TokenType) {
-		// RFC 9449 §5: without a DPoP token_type the access token is not
-		// bound, so the protection asked for is not given. This is a
-		// provider or configuration problem, not a failed login.
-		return nil, fmt.Errorf("oidc: provider issued a %q access token instead of a DPoP-bound one", tok.TokenType)
+	if err := c.checkTokenType(tok); err != nil {
+		return nil, err
 	}
 
 	raw, _ := tok.Extra("id_token").(string)
@@ -700,14 +697,27 @@ func (c *Client) Exchange(ctx context.Context, req AuthRequest, state, code stri
 	return &Result{Principal: p, IDToken: claims, RawIDToken: raw, Token: tok}, nil
 }
 
+// checkTokenType refuses a Bearer token when DPoP is configured. RFC 9449
+// §5: without a DPoP token_type the access token is not bound, so the
+// protection asked for is not given. This is a provider or configuration
+// problem, not a failed login.
+func (c *Client) checkTokenType(tok *oauth2.Token) error {
+	if c.dpop != nil && !strings.EqualFold(tok.TokenType, dpop.TokenType) {
+		return fmt.Errorf("oidc: provider issued a %q access token instead of a DPoP-bound one", tok.TokenType)
+	}
+	return nil
+}
+
 // HTTPClient returns a client that sends tok's access token with every
 // request and refreshes it with the refresh token when it expires. With
 // DPoP configured, the token is sent with the DPoP scheme and every
 // request, including refreshes, carries a proof. Requests use the
 // transport of Config.HTTPClient; ctx is used for refreshes.
 //
-// Refreshed ID tokens are not verified. With PrivateKeyJWT the token is
-// not refreshed, because x/oauth2 cannot add a client assertion.
+// Refreshes authenticate the client as Exchange does, including with
+// PrivateKeyJWT. Their results are not returned and any new ID token is
+// discarded; to keep a rotated refresh token or a verified ID token, call
+// Refresh instead.
 func (c *Client) HTTPClient(ctx context.Context, tok *oauth2.Token) *http.Client {
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, c.client)
 	src := c.oauth.TokenSource(ctx, tok)
