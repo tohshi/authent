@@ -258,9 +258,13 @@ p, err = hotp.Resync(ctx, "u1", code1, code2) // after the token ran ahead
   most 50) and moves the stored counter past the match, so earlier codes
   stop working.
 - `Resync` needs two consecutive codes within the next 1000 values
-  (`WithResyncWindow`), as RFC 4226 §7.4 describes.
-- `HOTPStore.AdvanceHOTPCounter` must be an atomic compare-and-set, like
-  `AdvanceCounter`.
+  (`WithResyncWindow`), as RFC 4226 §7.4 describes. Every `Resync`
+  computes up to two HMACs per value in the window (2,000 by default,
+  20,000 at the maximum), so rate-limit it more tightly than logins.
+- `HOTPStore.AdvanceHOTPCounter(ctx, subject, first, next)` must be an
+  atomic compare-and-set. It moves the counter to `next` only if the
+  stored counter is still at most `first`, so a code read from a stale
+  lookup cannot be used twice.
 
 Recovery codes let a user log in after losing the second factor:
 ```go

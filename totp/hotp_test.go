@@ -37,14 +37,14 @@ func (s *hotpStore) LookupHOTPCredential(_ context.Context, subject string) (HOT
 	return c, nil
 }
 
-func (s *hotpStore) AdvanceHOTPCounter(_ context.Context, subject string, counter uint64) error {
+func (s *hotpStore) AdvanceHOTPCounter(_ context.Context, subject string, first, next uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.creds[subject]
-	if counter <= c.Counter {
+	if first < c.Counter {
 		return ErrReplay
 	}
-	c.Counter = counter
+	c.Counter = next
 	s.creds[subject] = c
 	return nil
 }
@@ -163,6 +163,69 @@ func TestHOTPConcurrentReplay(t *testing.T) {
 	wg.Wait()
 	if ok != 1 {
 		t.Fatalf("%d concurrent logins succeeded with one code, want 1", ok)
+	}
+}
+
+// staleHOTPStore returns the credential as it was when the store was
+// wrapped, as if the lookup ran before a concurrent login advanced it.
+type staleHOTPStore struct {
+	*hotpStore
+	snapshot HOTPCredential
+}
+
+func (s staleHOTPStore) LookupHOTPCredential(context.Context, string) (HOTPCredential, error) {
+	return s.snapshot, nil
+}
+
+func TestHOTPResyncStaleLookup(t *testing.T) {
+	ctx := context.Background()
+	a, store := newHOTP(t, 0)
+	stale, err := NewHOTPAuthenticator(staleHOTPStore{store, store.creds["u1"]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Authenticate(ctx, "u1", rfc4226[3]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stale.Resync(ctx, "u1", rfc4226[3], rfc4226[4]); !errors.Is(err, ErrReplay) {
+		t.Fatalf("Resync with a used first code = %v, want ErrReplay", err)
+	}
+	if _, err := stale.Authenticate(ctx, "u1", rfc4226[2]); !errors.Is(err, ErrReplay) {
+		t.Fatalf("Authenticate with a skipped code = %v, want ErrReplay", err)
+	}
+	if store.counter("u1") != 4 {
+		t.Fatalf("counter = %d, want 4", store.counter("u1"))
+	}
+	if _, err := stale.Resync(ctx, "u1", rfc4226[4], rfc4226[5]); err != nil {
+		t.Fatalf("Resync with unused codes = %v", err)
+	}
+}
+
+func TestHOTPConcurrentAuthenticateAndResync(t *testing.T) {
+	for range 50 {
+		a, _ := newHOTP(t, 0)
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		ok := 0
+		for i := range 32 {
+			wg.Go(func() {
+				var err error
+				if i%2 == 0 {
+					_, err = a.Authenticate(context.Background(), "u1", rfc4226[3])
+				} else {
+					_, err = a.Resync(context.Background(), "u1", rfc4226[3], rfc4226[4])
+				}
+				if err == nil {
+					mu.Lock()
+					ok++
+					mu.Unlock()
+				}
+			})
+		}
+		wg.Wait()
+		if ok != 1 {
+			t.Fatalf("%d logins succeeded with one code, want 1", ok)
+		}
 	}
 }
 

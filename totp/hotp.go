@@ -41,11 +41,12 @@ type HOTPCredential struct {
 type HOTPStore interface {
 	// LookupHOTPCredential returns ErrNotEnrolled if subject has no key.
 	LookupHOTPCredential(ctx context.Context, subject string) (HOTPCredential, error)
-	// AdvanceHOTPCounter sets the subject's Counter to counter if counter
-	// is greater than the stored value, and returns ErrReplay otherwise.
+	// AdvanceHOTPCounter records that the codes for counter values first
+	// to next-1 were used: it sets the subject's Counter to next if the
+	// stored Counter is at most first, and returns ErrReplay otherwise.
 	// The check and the update must be atomic (compare-and-set), so that
 	// two concurrent logins cannot both use the same code.
-	AdvanceHOTPCounter(ctx context.Context, subject string, counter uint64) error
+	AdvanceHOTPCounter(ctx context.Context, subject string, first, next uint64) error
 }
 
 // HOTPAuthenticator verifies counter-based codes (RFC 4226).
@@ -132,8 +133,7 @@ func (a *HOTPAuthenticator) authenticate(ctx context.Context, subject string, wi
 	if !found {
 		return authent.Principal{}, ErrInvalidCode
 	}
-	next := first + n
-	switch err := a.store.AdvanceHOTPCounter(ctx, subject, next); {
+	switch err := a.store.AdvanceHOTPCounter(ctx, subject, first, first+n); {
 	case errors.Is(err, ErrReplay):
 		return authent.Principal{}, ErrReplay
 	case err != nil:
