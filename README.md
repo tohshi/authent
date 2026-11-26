@@ -151,6 +151,17 @@ Optional checks:
   takes the same `jwt.ReplayCache` interface. Use it for single-use
   tokens (ID tokens, logout tokens, client assertions, request objects),
   not for access tokens, which clients send many times.
+- Behind a load balancer, share one cache between servers.
+  `sqlreplay.New(db, sqlreplay.PostgreSQL)` from `jwt/sqlreplay` stores
+  entries in PostgreSQL or SQLite through `database/sql`, with no driver
+  import. `CreateTable` (or `CreateTableStatements` for a migration tool)
+  creates the table. `Add` is one `INSERT ... ON CONFLICT DO UPDATE ...
+  WHERE` statement, so concurrent servers agree on which one saw an id
+  first, and an expired row is taken over. Call `DeleteExpired`
+  periodically. MySQL is not supported, because its affected-row count
+  cannot tell an unchanged duplicate from an update when
+  `CLIENT_FOUND_ROWS` is set. `replaytest.TestReplayCache` (in
+  `jwt/replaytest`) is a conformance suite for your own `jwt.ReplayCache`.
 - `jwt.WithMaxTokenAge(d)` rejects tokens issued more than `d` ago and
   makes `iat` required. `jwt.WithMaxAuthAge(d)` does the same for
   `auth_time`, as OpenID Connect `max_age` requires, and rejects an
@@ -375,6 +386,28 @@ Proof checks (RFC 9449 §4.3):
   required); proofs that fail any other check are not recorded
 - optionally a server nonce (`WithNonce`); a missing or stale one returns
   `dpop.ErrUseNonce`
+
+For opaque access tokens, pass an `Introspector` instead of a
+`jwt.Verifier`. It asks the authorization server's RFC 7662 introspection
+endpoint, authenticating with `client_secret_basic`, and the proof key is
+then checked against the response's `cnf.jkt` (RFC 9449 §6.2):
+```go
+tokens, _ := dpop.NewIntrospector(dpop.IntrospectionConfig{
+	Endpoint: "https://as.example.com/introspect",
+	ClientID: "api", ClientSecret: secret, Issuer: iss,
+	Audiences:         []string{"api"},
+	ConfirmationClaim: true, // the binding is checked by dpop.Authenticator
+})
+auth, _ := dpop.NewAuthenticator(tokens, proofs)
+```
+`"active": false`, an expired `exp`, a future `nbf`, an `aud` without an
+accepted audience, a different `iss` or a non-string `scope` fail with
+`dpop.ErrInactiveToken`. A failed request, a redirect, or an unparsable
+response, with no boolean `active`, is an error that does not wrap
+`authent.ErrUnauthenticated`. The endpoint must be https, redirects are
+never followed, and the default client times out after 10 seconds. `iss`
+is optional in RFC 7662; set `RequireIssuer` to reject responses without
+it.
 
 ### TOTP
 ```go

@@ -220,21 +220,19 @@ func (v *Verifier) Challenge(err error) string {
 }
 
 // Authenticator authenticates requests to a resource server that carry a
-// DPoP-bound JWT access token (RFC 9449 §7). It is safe for concurrent use.
+// DPoP-bound access token (RFC 9449 §7). It is safe for concurrent use.
 type Authenticator struct {
-	tokens *jwt.Verifier
+	tokens TokenVerifier
 	proofs *Verifier
 }
 
-// NewAuthenticator returns an Authenticator. tokens verifies the access
-// tokens and must be created with jwt.WithConfirmationClaim, or every
-// token is rejected with jwt.ErrSenderConstrained. Consider
-// jwt.WithExpectedType("at+jwt") for RFC 9068 access tokens. Do not give
-// tokens a jwt.WithReplayCache: access tokens are sent many times, and the
-// token would be recorded before the proof is checked, so a stolen token
-// sent with a bad proof would lock out its holder. Replay detection
-// belongs to the proofs.
-func NewAuthenticator(tokens *jwt.Verifier, proofs *Verifier) (*Authenticator, error) {
+// NewAuthenticator returns an Authenticator. tokens must accept tokens
+// with a "cnf" claim (jwt.WithConfirmationClaim, or
+// IntrospectionConfig.ConfirmationClaim), or every token is rejected with
+// jwt.ErrSenderConstrained. Do not give a *jwt.Verifier a
+// jwt.WithReplayCache: the token is recorded before the proof is checked,
+// so a stolen token sent with a bad proof would lock out its holder.
+func NewAuthenticator(tokens TokenVerifier, proofs *Verifier) (*Authenticator, error) {
 	if tokens == nil || proofs == nil {
 		return nil, errors.New("dpop: nil verifier")
 	}
