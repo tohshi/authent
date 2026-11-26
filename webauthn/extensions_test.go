@@ -179,7 +179,7 @@ var prfOutput = bytes.Repeat([]byte{7}, 32)
 
 func TestRegistrationExtensionOutputs(t *testing.T) {
 	ctx := context.Background()
-	all := WithExtensions(ExtensionInputs{CredProps: true, PRF: &PRFInputs{}, LargeBlob: &LargeBlobInputs{}})
+	all := WithExtensions(ExtensionInputs{CredProps: true, PRF: &PRFInputs{Eval: &PRFValues{First: []byte("salt")}}, LargeBlob: &LargeBlobInputs{}})
 	clientExt := map[string]any{
 		"credProps": map[string]any{"rk": true},
 		"prf":       map[string]any{"enabled": true, "results": map[string]any{"first": b64.EncodeToString(prfOutput)}},
@@ -317,17 +317,89 @@ func TestAppID(t *testing.T) {
 	}
 }
 
+// The outputs a request cannot produce follow from the client extension
+// processing of prf (WebAuthn L3 §10.1.4) and largeBlob (§10.1.5).
+func TestExtensionOutputsNotRequested(t *testing.T) {
+	ctx := context.Background()
+	out32 := b64.EncodeToString(prfOutput)
+	type outputs = map[string]any
+	for _, tc := range []struct {
+		name      string
+		login     bool
+		in        ExtensionInputs
+		clientExt map[string]any
+		want      error
+	}{
+		{"largeBlob blob at registration", false, ExtensionInputs{LargeBlob: &LargeBlobInputs{Support: LargeBlobPreferred}},
+			outputs{"largeBlob": outputs{"supported": false, "blob": "eA"}}, ErrMalformed},
+		{"largeBlob written at registration", false, ExtensionInputs{LargeBlob: &LargeBlobInputs{}},
+			outputs{"largeBlob": outputs{"written": true}}, ErrMalformed},
+		{"largeBlob blob after a write", true, ExtensionInputs{LargeBlob: &LargeBlobInputs{Write: []byte("x")}},
+			outputs{"largeBlob": outputs{"blob": "eA"}}, ErrMalformed},
+		{"largeBlob written after a read", true, ExtensionInputs{LargeBlob: &LargeBlobInputs{Read: true}},
+			outputs{"largeBlob": outputs{"written": true}}, ErrMalformed},
+		{"largeBlob supported at login", true, ExtensionInputs{LargeBlob: &LargeBlobInputs{Read: true}},
+			outputs{"largeBlob": outputs{"supported": true}}, ErrMalformed},
+		{"prf results without eval", false, ExtensionInputs{PRF: &PRFInputs{}},
+			outputs{"prf": outputs{"enabled": true, "results": outputs{"first": out32}}}, ErrMalformed},
+		{"prf second without a second input", false, ExtensionInputs{PRF: &PRFInputs{Eval: &PRFValues{First: []byte("a")}}},
+			outputs{"prf": outputs{"results": outputs{"first": out32, "second": out32}}}, ErrMalformed},
+		{"prf second at login without a second input", true, ExtensionInputs{PRF: &PRFInputs{Eval: &PRFValues{First: []byte("a")}}},
+			outputs{"prf": outputs{"results": outputs{"first": out32, "second": out32}}}, ErrMalformed},
+		{"prf enabled at login", true, ExtensionInputs{PRF: &PRFInputs{Eval: &PRFValues{First: []byte("a")}}},
+			outputs{"prf": outputs{"enabled": true}}, ErrMalformed},
+		{"prf second from the credential's own input", true, ExtensionInputs{PRF: &PRFInputs{
+			Eval:             &PRFValues{First: []byte("a")},
+			EvalByCredential: map[string]PRFValues{"": {First: []byte("b"), Second: []byte("c")}},
+		}}, outputs{"prf": outputs{"results": outputs{"first": out32, "second": out32}}}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMemStore()
+			rp := newTestRP(t, Config{}, store)
+			a := newSoftAuthenticator(t)
+			a.clientExt = tc.clientExt
+			var err error
+			if tc.login {
+				a.clientExt = nil
+				cred := register(t, rp, store, a)
+				if p := tc.in.PRF; p != nil && p.EvalByCredential != nil {
+					p.EvalByCredential = map[string]PRFValues{b64.EncodeToString(cred.ID): p.EvalByCredential[""]}
+				}
+				_, ch, berr := rp.BeginLogin([]Credential{cred}, WithExtensions(tc.in))
+				if berr != nil {
+					t.Fatal(berr)
+				}
+				a.signCount, a.clientExt = 1, tc.clientExt
+				_, err = rp.FinishLogin(ctx, ch, a.get(ch))
+			} else {
+				_, ch, berr := rp.BeginRegistration(testUser, nil, WithExtensions(tc.in))
+				if berr != nil {
+					t.Fatal(berr)
+				}
+				_, err = rp.FinishRegistration(ctx, ch, a.create(ch))
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
 func ptr[T any](v T) *T { return &v }
 
 func FuzzClientExtensionOutputs(f *testing.F) {
 	f.Add([]byte(`{"credProps":{"rk":true},"prf":{"enabled":true,"results":{"first":"` + b64.EncodeToString(prfOutput) + `"}},"largeBlob":{"blob":"AA","written":true},"appid":true}`))
-	ch := Challenge{Extensions: []string{extCredProps, extPRF, extLargeBlob}, AppID: "https://example.org"}
+	ch := Challenge{Ceremony: ceremonyGet, Extensions: ExtensionInputs{
+		PRF:       &PRFInputs{Eval: &PRFValues{First: []byte("a"), Second: []byte("b")}},
+		LargeBlob: &LargeBlobInputs{Read: true},
+		AppID:     "https://example.org",
+	}}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var raw map[string]jsontext.Value
 		if json.Unmarshal(data, &raw) != nil {
 			return
 		}
-		out, err := parseClientOutputs(raw, ch)
+		out, err := parseClientOutputs(raw, ch, []byte("cred"))
 		if err == nil && out.PRFResults != nil && len(out.PRFResults.First) != prfOutputSize {
 			t.Fatalf("accepted a %d-byte PRF output", len(out.PRFResults.First))
 		}

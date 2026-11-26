@@ -217,10 +217,9 @@ type Challenge struct {
 	// Conditional is set for registrations started with
 	// WithConditionalCreate.
 	Conditional bool `json:"conditional,omitzero"`
-	// Extensions lists the requested extensions whose client outputs are
-	// returned, and AppID is the requested appid input.
-	Extensions []string `json:"extensions,omitempty"`
-	AppID      string   `json:"appid,omitempty"`
+	// Extensions holds the requested extension inputs, which decide the
+	// outputs that Finish accepts.
+	Extensions ExtensionInputs `json:"extensions,omitzero"`
 }
 
 const (
@@ -460,8 +459,7 @@ func (rp *RelyingParty) newChallenge(ceremony string, allowed [][]byte, opts []C
 		ExpiresAt:          rp.now().Add(rp.cfg.Timeout),
 		AllowedCredentials: allowed,
 		Conditional:        o.conditional,
-		Extensions:         o.extensions.requested(),
-		AppID:              o.extensions.AppID,
+		Extensions:         o.extensions,
 	}, o.extensions, nil
 }
 

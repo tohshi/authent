@@ -130,7 +130,7 @@ func (rp *RelyingParty) FinishRegistration(ctx context.Context, ch Challenge, re
 	if err != nil {
 		return Registration{}, err
 	}
-	ext, err := parseClientOutputs(r.ClientExtensionResults, ch)
+	ext, err := parseClientOutputs(r.ClientExtensionResults, ch, r.RawID)
 	if err != nil {
 		return Registration{}, err
 	}
