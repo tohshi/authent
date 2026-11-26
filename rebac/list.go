@@ -153,6 +153,9 @@ func (e *Engine) ListObjects(ctx context.Context, objectType, permission string,
 				}
 				push(objRel{t.Object, ed.rel})
 			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 		}
 	}
 

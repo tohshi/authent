@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"math/rand/v2"
 	"slices"
 	"testing"
@@ -185,5 +186,30 @@ func TestListFailsClosed(t *testing.T) {
 	}
 	if _, err := e.ListSubjects(ctx, Obj("doc", "d"), "viewer", "user"); !errors.Is(err, errStore) {
 		t.Errorf("ListSubjects with a failing store: %v", err)
+	}
+}
+
+// cancellingStore cancels the call and ends the read early, without an
+// error, on the first read filtered by subject.
+type cancellingStore struct {
+	*MemoryStore
+	cancel context.CancelFunc
+}
+
+func (c *cancellingStore) Read(ctx context.Context, rev Revision, f Filter) iter.Seq2[Tuple, error] {
+	if f.Subject != nil {
+		c.cancel()
+		return func(func(Tuple, error) bool) {}
+	}
+	return c.MemoryStore.Read(ctx, rev, f)
+}
+
+func TestListObjectsTruncatedRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e, _ := NewEngine(driveSchema(t), &cancellingStore{MemoryStore: NewMemoryStore(), cancel: cancel})
+	write(t, e, "doc:d#viewer@user:alice")
+	if got, err := e.ListObjects(ctx, "doc", "viewer", Sub("user", "alice")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ListObjects = %v, %v; want context.Canceled", got, err)
 	}
 }
