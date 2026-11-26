@@ -182,6 +182,11 @@ func (k JWK) verifyChain(roots *x509.CertPool, now time.Time) error {
 		return errors.New("no x5c certificate chain")
 	}
 	leaf := k.Certificates[0]
+	// ParseJWK checks this, but a JWK built in code may pair Key with
+	// another key's chain.
+	if pub, ok := leaf.PublicKey.(interface{ Equal(crypto.PublicKey) bool }); !ok || !pub.Equal(k.Key) {
+		return errors.New("x5c leaf certificate does not match the key")
+	}
 	intermediates := x509.NewCertPool()
 	for _, c := range k.Certificates[1:] {
 		intermediates.AddCert(c)

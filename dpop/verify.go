@@ -229,7 +229,11 @@ type Authenticator struct {
 // NewAuthenticator returns an Authenticator. tokens verifies the access
 // tokens and must be created with jwt.WithConfirmationClaim, or every
 // token is rejected with jwt.ErrSenderConstrained. Consider
-// jwt.WithExpectedType("at+jwt") for RFC 9068 access tokens.
+// jwt.WithExpectedType("at+jwt") for RFC 9068 access tokens. Do not give
+// tokens a jwt.WithReplayCache: access tokens are sent many times, and the
+// token would be recorded before the proof is checked, so a stolen token
+// sent with a bad proof would lock out its holder. Replay detection
+// belongs to the proofs.
 func NewAuthenticator(tokens *jwt.Verifier, proofs *Verifier) (*Authenticator, error) {
 	if tokens == nil || proofs == nil {
 		return nil, errors.New("dpop: nil verifier")

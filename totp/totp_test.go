@@ -109,7 +109,7 @@ func TestURI(t *testing.T) {
 		t.Fatalf("URI without issuer = %s", got)
 	}
 
-	for _, tc := range [][2]string{{"a:b", "c"}, {"a", "b:c"}, {"a", ""}} {
+	for _, tc := range [][2]string{{"a:b", "c"}, {"a", "b:c"}, {"a", ""}, {"a", " b"}} {
 		if _, err := k.URI(tc[0], tc[1]); err == nil {
 			t.Errorf("URI(%q, %q) accepted", tc[0], tc[1])
 		}

@@ -51,8 +51,8 @@ Legend:
 | Verification with a key embedded in the `jwk` header | ✅ | Separate `VerifyWithEmbeddedKey` API for DPoP proofs; `Verifier` never uses it |
 | Parsing private JWKs | ✅ | `ParsePrivateJWK` for RSA (all CRT values, validated), EC and Ed25519; private keys are never marshaled, and `ParseJWK`/`ParseJWKSet` reject or drop keys with private members |
 | `jti` replay detection | ✅ | `WithReplayCache`; `jti` then required, scoped by `iss`, recorded only after every other check |
-| Maximum token age / `auth_time` limits | ✅ | `WithMaxTokenAge` (requires `iat`) and `WithMaxAuthAge` (requires `auth_time`); the leeway applies as for `exp` |
-| `x5c` certificate chain validation | ✅ | The leaf must certify the JWK's key when parsed; `WithCertificateRoots` verifies the chain with `crypto/x509`. The token's `x5c` header is never used |
+| Maximum token age / `auth_time` limits | ✅ | `WithMaxTokenAge` (requires `iat`) and `WithMaxAuthAge` (requires `auth_time`, rejects one in the future); the leeway applies as for `exp` |
+| `x5c` certificate chain validation | ✅ | The leaf must certify the JWK's key, checked when parsed and again before use; `WithCertificateRoots` verifies the chain with `crypto/x509`. The token's `x5c` header is never used |
 | JWE (encryption) | ➖ | Large attack surface; not needed for signed tokens |
 | JWS JSON serialization and nested JWTs | ➖ | Rarely needed; increases attack surface |
 | Symmetric keys in JWK JSON | ➖ | Kept out to avoid leaking secrets |
@@ -155,9 +155,9 @@ Legend:
 | Constant-time comparison | ✅ | |
 | Replay protection | ✅ | `Store.AdvanceCounter` is a compare-and-set on the last used step |
 | Pluggable store | ✅ | `Store` interface |
-| Recovery codes | ⬜ | |
-| HOTP counter-based authentication | ⬜ | Only the HOTP function is used, for TOTP |
-| Parsing `otpauth://` URIs | ⬜ | |
+| Recovery codes | ✅ | 120-bit single-use codes stored as SHA-256; `RecoveryStore.ConsumeRecoveryCode` removes a code atomically |
+| HOTP counter-based authentication | ✅ | `HOTPAuthenticator`: look-ahead window, resynchronization with two consecutive codes (RFC 4226 §7.4), atomic counter advance; `Key.HOTPURI` |
+| Parsing `otpauth://` URIs | ✅ | `ParseURI` for TOTP and HOTP; strict about parameters, encoding and the label; fuzzed |
 | Encrypting secrets at rest | ➖ | Depends on the deployment's key management; belongs in the store |
 | Rate limiting | ➖ | Depends on deployment; belongs in the caller |
 
