@@ -90,8 +90,9 @@ p, err := auth.Authenticate(ctx, username, pw)
   `ResetTokenStore.TakeResetToken` must remove and return a token in one
   atomic step (in SQL, `DELETE ... RETURNING` or a locking transaction), so
   a token cannot be redeemed twice. Issuing a token invalidates the
-  subject's earlier ones, so only the most recent link works. Expired, unknown and reused tokens return
-  `ErrInvalidResetToken`, which wraps `authent.ErrUnauthenticated`.
+  subject's earlier ones, so only the most recent link works. Expired,
+  unknown and reused tokens return `ErrInvalidResetToken`, which wraps
+  `authent.ErrUnauthenticated`.
 - To migrate users from another system, store their existing hashes as they
   are. `Verify` accepts bcrypt (`$2a$`, `$2b$`, `$2y$`), Werkzeug scrypt
   (`scrypt:32768:8:1$salt$hex`, the Flask default) and Django PBKDF2
