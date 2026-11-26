@@ -38,15 +38,12 @@ func TestCheckCache(t *testing.T) {
 	check("alice", true, true)
 	check("alice", true, true, AtLeast(r1))
 
-	// After a revoke, the latest revision is evaluated again. A token from
-	// before the revoke still accepts the result computed at it.
 	r2, _ := e.Write(ctx, nil, []Tuple{MustParseTuple("doc:d#owner@user:alice")})
 	check("alice", true, true, AtLeast(r1))
 	check("alice", false, false, AtLeast(r2))
 	check("alice", false, true)
 	check("alice", false, true, AtLeast(r1))
 
-	// The cache holds two checks; the least recently used is dropped.
 	check("bob", false, false)
 	check("carol", false, false)
 	check("bob", false, true)

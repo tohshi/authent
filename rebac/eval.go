@@ -46,8 +46,6 @@ func (e *Engine) newRequest(ctx context.Context, opts []QueryOption) *request {
 	return q
 }
 
-// revision returns the revision the request reads at: the store's latest,
-// which must be at least the one AtLeast asks for.
 func (q *request) revision() (Revision, error) {
 	q.revOnce.Do(func() {
 		q.rev, q.revErr = q.e.store.Revision(q.ctx)

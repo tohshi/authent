@@ -487,8 +487,7 @@ func testChanges(t *testing.T, s rebac.TupleStore) {
 	r2 := write(t, s,
 		[]string{"doc:a#viewer@user:alice", "doc:a#viewer@user:carol", "doc:a#viewer@user:dave"},
 		[]string{"doc:a#viewer@user:bob", "doc:b#owner@user:alice", "doc:a#viewer@user:dave", "doc:a#viewer@user:missing"})
-	// Changes nothing.
-	r3 := write(t, s, []string{"doc:a#viewer@user:alice"}, []string{"doc:a#viewer@user:missing"})
+	rNoop := write(t, s, []string{"doc:a#viewer@user:alice"}, []string{"doc:a#viewer@user:missing"})
 	r4 := write(t, s, nil, []string{"doc:a#viewer@user:carol"})
 	all := []string{
 		fmt.Sprintf("%d write doc:a#viewer@user:alice", r1),
@@ -507,7 +506,7 @@ func testChanges(t *testing.T, s rebac.TupleStore) {
 		{0, all},
 		{r1, all[3:]},
 		{r2, all[7:]},
-		{r3, all[7:]},
+		{rNoop, all[7:]},
 		{r4, []string{}},
 	} {
 		if got := changes(t, s, tc.after); !slices.Equal(got, tc.want) {

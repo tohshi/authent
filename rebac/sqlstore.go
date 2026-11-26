@@ -64,8 +64,8 @@ var sqlColumns = [...]string{"object_type", "object_id", "relation", "subject_ty
 // sqlLive is the deleted_rev of a tuple that has not been deleted.
 const sqlLive = math.MaxInt64
 
-// Suffixes of the names an SQLStore derives from the table name. A table
-// name leaves room for the longest within PostgreSQL's 63-byte limit.
+// A table name leaves room for the longest name derived from it, an index
+// name, within PostgreSQL's 63-byte limit.
 const (
 	sqlRevisionSuffix = "_revision"
 	sqlMaxTableName   = 63 - len("_subject_idx")
@@ -97,19 +97,19 @@ func tupleArgs(t Tuple) []any {
 // not exactly match the filter are discarded, and rows that are not valid
 // tuples make Read fail.
 type SQLStore struct {
-	db        *sql.DB
-	dialect   SQLDialect
-	table     string // quoted and qualified
-	revTable  string
-	createSQL []string
-	bumpSQL   string
-	headSQL   string
-	insertSQL string
-	deleteSQL string
-	selectSQL string // up to the join condition
-	changeSQL string
-	horizSQL  string
-	pruneSQL  string
+	db            *sql.DB
+	dialect       SQLDialect
+	table         string // quoted and qualified
+	revTable      string
+	createSQL     []string
+	bumpSQL       string
+	headSQL       string
+	insertSQL     string
+	deleteSQL     string
+	readPrefixSQL string // up to the join condition
+	changeSQL     string
+	horizSQL      string
+	pruneSQL      string
 }
 
 // SQLStoreOption configures an SQLStore.
@@ -275,7 +275,7 @@ func (s *SQLStore) buildStatements(schema, table string) {
 		tcols = append(tcols, "t."+c)
 	}
 	from := " FROM " + s.revTable + " r LEFT JOIN " + s.table + " t ON "
-	s.selectSQL = "SELECT r.rev, r.pruned_rev, " + strings.Join(tcols, ", ") + from
+	s.readPrefixSQL = "SELECT r.rev, r.pruned_rev, " + strings.Join(tcols, ", ") + from
 	s.changeSQL = "SELECT r.rev, r.pruned_rev, " + strings.Join(tcols, ", ") + ", t.created_rev, t.deleted_rev" + from +
 		"(t.created_rev > " + d.placeholder(1) + " OR (t.deleted_rev > " + d.placeholder(2) +
 		" AND t.deleted_rev < " + d.placeholder(3) + ")) WHERE r.id = 1"
@@ -421,7 +421,7 @@ func (s *SQLStore) read(ctx context.Context, rev Revision, f Filter) ([]Tuple, e
 	}
 	add("t.created_rev <= ", int64(rev))
 	add("t.deleted_rev > ", int64(rev))
-	query := s.selectSQL + strings.Join(conds, " AND ") + " WHERE r.id = 1"
+	query := s.readPrefixSQL + strings.Join(conds, " AND ") + " WHERE r.id = 1"
 
 	var out []Tuple
 	err := s.query(ctx, rev, query, args, func(cols []sql.NullString, _ ...int64) error {

@@ -5,8 +5,6 @@ import (
 	"sync"
 )
 
-// checkCache is a bounded, least recently used map from checks to their
-// latest result and the revision it was computed at.
 type checkCache struct {
 	mu    sync.Mutex
 	size  int
@@ -24,8 +22,6 @@ func newCheckCache(size int) *checkCache {
 	return &checkCache{size: size, items: map[CheckItem]*list.Element{}}
 }
 
-// get returns the result of it if one computed at revision min or later is
-// cached.
 func (c *checkCache) get(it CheckItem, min Revision) (allowed, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -11,8 +11,8 @@ import (
 	"sync"
 )
 
-// Revision identifies a state of a TupleStore. Every Write moves the store
-// to a higher revision, so a Revision is a consistency token, the
+// Revision identifies a state of a TupleStore. Every Write of at least
+// one tuple moves the store to a higher revision, so a Revision is a consistency token, the
 // "zookie" of Zanzibar: a query evaluated at a revision at least as high as
 // the one a Write returned sees that write. The empty store is at
 // revision 0.
@@ -66,14 +66,14 @@ type Change struct {
 	Tuple    Tuple
 }
 
-// compareChanges orders changes by revision, then deletes before writes,
-// then by tuple.
 func compareChanges(a, b Change) int {
 	switch {
 	case a.Revision != b.Revision:
 		return compareRevisions(a.Revision, b.Revision)
+	case a.Op != b.Op && a.Op == ChangeDelete:
+		return -1
 	case a.Op != b.Op:
-		return int(b.Op) - int(a.Op)
+		return 1
 	}
 	return strings.Compare(a.Tuple.String(), b.Tuple.String())
 }
@@ -122,9 +122,8 @@ type TupleStore interface {
 	// been pruned.
 	//
 	// The Engine always sets ObjectType, ObjectID and Relation, so stores
-	// should index those. The Engine calls Read again before an earlier
-	// sequence is exhausted, so implementations must not hold a resource
-	// that the nested call needs, such as the only connection of a pool.
+	// should index those. With WithConcurrency, the Engine calls Read from
+	// several goroutines at once.
 	Read(ctx context.Context, rev Revision, f Filter) iter.Seq2[Tuple, error]
 	// Changes yields the changes made after revision after, ordered by
 	// revision; within a revision, deletes come before writes and each is
@@ -139,8 +138,6 @@ type objRel struct {
 	rel string
 }
 
-// netChanges returns the tuples that a Write of writes and deletes leaves
-// present (true) or absent (false), deletes applied first.
 func netChanges(writes, deletes []Tuple) map[Tuple]bool {
 	out := make(map[Tuple]bool, len(writes)+len(deletes))
 	for _, t := range deletes {
@@ -155,15 +152,14 @@ func netChanges(writes, deletes []Tuple) map[Tuple]bool {
 // MemoryStore is an in-process TupleStore. It keeps every revision until
 // Prune discards old ones.
 type MemoryStore struct {
-	mu      sync.RWMutex
-	rev     Revision
-	horizon Revision // reads before it fail
-	index   map[objRel]map[Subject][]span
-	log     []Change
+	mu           sync.RWMutex
+	rev          Revision
+	prunedBefore Revision
+	index        map[objRel]map[Subject][]span
+	log          []Change
 }
 
-// span is when a tuple was present: from created up to, but not including,
-// deleted. A deleted of 0 means it still is.
+// A deleted of 0 means the tuple is still present.
 type span struct{ created, deleted Revision }
 
 func (s span) at(rev Revision) bool { return s.created <= rev && (s.deleted == 0 || rev < s.deleted) }
@@ -208,14 +204,12 @@ func (m *MemoryStore) Revision(context.Context) (Revision, error) {
 	return m.rev, nil
 }
 
-// checkRevision reports whether the history of rev is available. The
-// caller holds m.mu.
-func (m *MemoryStore) checkRevision(rev Revision) error {
+func (m *MemoryStore) checkRevisionLocked(rev Revision) error {
 	switch {
 	case rev > m.rev:
 		return fmt.Errorf("%w: %d is after %d", ErrFutureRevision, rev, m.rev)
-	case rev < m.horizon:
-		return fmt.Errorf("%w: %d is before %d", ErrRevisionExpired, rev, m.horizon)
+	case rev < m.prunedBefore:
+		return fmt.Errorf("%w: %d is before %d", ErrRevisionExpired, rev, m.prunedBefore)
 	}
 	return nil
 }
@@ -223,7 +217,7 @@ func (m *MemoryStore) checkRevision(rev Revision) error {
 func (m *MemoryStore) Read(_ context.Context, rev Revision, f Filter) iter.Seq2[Tuple, error] {
 	// Snapshot under the lock so that callers may Write while iterating.
 	m.mu.RLock()
-	err := m.checkRevision(rev)
+	err := m.checkRevisionLocked(rev)
 	var out []Tuple
 	add := func(k objRel, subs map[Subject][]span) {
 		for s, spans := range subs {
@@ -259,8 +253,6 @@ func (m *MemoryStore) Read(_ context.Context, rev Revision, f Filter) iter.Seq2[
 	}
 }
 
-// visible reports whether a tuple with spans was present at rev. The
-// latest span is checked first, since most reads are of recent revisions.
 func visible(spans []span, rev Revision) bool {
 	for _, s := range slices.Backward(spans) {
 		if s.at(rev) {
@@ -272,7 +264,7 @@ func visible(spans []span, rev Revision) bool {
 
 func (m *MemoryStore) Changes(_ context.Context, after Revision) iter.Seq2[Change, error] {
 	m.mu.RLock()
-	err := m.checkRevision(after)
+	err := m.checkRevisionLocked(after)
 	var out []Change
 	if err == nil {
 		i, _ := slices.BinarySearchFunc(m.log, after+1, func(c Change, r Revision) int { return compareRevisions(c.Revision, r) })
@@ -303,10 +295,10 @@ func (m *MemoryStore) Prune(_ context.Context, before Revision) error {
 	if before > m.rev {
 		return fmt.Errorf("%w: %d is after %d", ErrFutureRevision, before, m.rev)
 	}
-	if before <= m.horizon {
+	if before <= m.prunedBefore {
 		return nil
 	}
-	m.horizon = before
+	m.prunedBefore = before
 	for k, subs := range m.index {
 		for s, spans := range subs {
 			spans = slices.DeleteFunc(spans, func(sp span) bool { return sp.deleted != 0 && sp.deleted <= before })

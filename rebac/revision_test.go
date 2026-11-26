@@ -49,7 +49,6 @@ func TestParseRevision(t *testing.T) {
 	}
 }
 
-// writeOnReadStore applies a write the first time obj#rel is read.
 type writeOnReadStore struct {
 	*MemoryStore
 	at              objRel
