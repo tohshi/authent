@@ -355,6 +355,29 @@ must verify like the first one and describe the same authentication: the
 same `iss`, `sub`, `aud` and `azp`, and the same `auth_time` and `nonce`
 when it has them. A rejected refresh token wraps `oidc.ErrRefreshRejected`.
 
+Logout works in both directions:
+```go
+// RP-initiated: end the local session, then log out at the provider.
+u, _ := client.EndSessionURL(oidc.EndSession{
+	IDTokenHint: res.RawIDToken, PostLogoutRedirectURI: "https://app.example/bye", State: state,
+})
+
+// Front-channel: GET on the frontchannel_logout_uri.
+l, err := client.FrontChannelLogout(r.URL.Query())
+
+// Back-channel: POST on the backchannel_logout_uri.
+l, err := client.BackChannelLogout(ctx, r.PostFormValue("logout_token"))
+// end every local session whose ID token l.Matches; reply 200, or 400 on error
+```
+- Front-channel requests must carry the provider's `iss` and a `sid`, so
+  register the client with `frontchannel_logout_session_required`.
+- Logout tokens are verified like ID tokens. They must also be typed
+  `logout+jwt`, carry the back-channel logout event and a `sub` or `sid`,
+  have no `nonce`, and be at most two minutes old. Each `jti` is accepted
+  once through `Config.ReplayCache` (in memory by default; use a shared
+  cache such as `jwt/sqlreplay` behind a load balancer).
+- Respond to both with `Cache-Control: no-store`.
+
 Pushed authorization requests (RFC 9126) send the parameters to the
 provider over the back channel, so the browser only sees a `request_uri`:
 ```go
