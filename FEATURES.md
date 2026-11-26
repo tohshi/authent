@@ -88,14 +88,14 @@ Legend:
 | `client_secret_basic` / `client_secret_post` | ✅ | Through `x/oauth2` |
 | Distinguishing rejected exchanges from network errors | ✅ | |
 | UserInfo endpoint | ✅ | `sub` must match the ID token; https only; redirects are not followed; Bearer or DPoP tokens |
-| Signed UserInfo responses (`application/jwt`) | ✅ | Signature, `iss` and `aud` verified like an ID token, `exp` optional, `sub` must match. Encrypted responses are rejected; JWE is out of scope |
+| Signed UserInfo responses (`application/jwt`) | ✅ | Signature, `iss` and `aud` verified like an ID token, `exp` optional, `sub` must match; `RequireSignedUserInfo` rejects unsigned ones. Encrypted responses are rejected; JWE is out of scope |
 | Refresh token helper | ✅ | `Refresh` works with every client authentication method, including `private_key_jwt`, and with DPoP; it keeps a rotated refresh token and checks a new ID token against the original (OpenID Connect Core §12.2). `HTTPClient` refreshes the same way but discards new ID tokens |
 | Calling APIs with the access token (`HTTPClient`) | ✅ | Bearer, or DPoP when configured |
 | `max_age`, `auth_time` and `acr` enforcement | ✅ | `max_age` and `acr_values` sent with the request are kept in `AuthRequest`; `Exchange` then requires a recent enough `auth_time` and an `acr` from the requested values |
 | `private_key_jwt` client authentication | ✅ | Asymmetric JWT assertion on each code exchange; issuer audience per RFC 10070 |
 | RP-initiated, front-channel and back-channel logout | ✅ | `EndSessionURL` with `id_token_hint`, `post_logout_redirect_uri` and `state`; `FrontChannelLogout` requires `iss` and `sid`; `BackChannelLogout` checks `typ` `logout+jwt`, the event, `sub` or `sid`, no `nonce`, a fresh `iat` and a single-use `jti`. Both return a `Logout` that `Matches` the ID tokens of the ended sessions |
 | Pushed authorization requests (RFC 9126) | ✅ | `PushAuthCodeURL`; honors `require_pushed_authorization_requests`; client secret or `private_key_jwt` |
-| JWT-secured authorization requests (JAR, RFC 9101) | ⬜ | |
+| JWT-secured authorization requests (JAR, RFC 9101) | ✅ | `Config.JAR` signs every request with the `private_key_jwt` key: `typ` `oauth-authz-req+jwt`, `iss`, `aud`, `iat`, `nbf`, a five-minute `exp` and a random `jti`. Sent by value from `AuthCodeURL` or inside the pushed request; honors `require_signed_request_object` |
 | DPoP-bound tokens (RFC 9449) | ✅ | `dpop_jkt` or a proof on the pushed request; `Exchange` rejects a Bearer downgrade |
 | Implicit and hybrid flows (`c_hash`) | ➖ | Discouraged by current OAuth security best practice |
 

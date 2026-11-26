@@ -55,7 +55,10 @@ type fakeProvider struct {
 	rotateRefresh      bool
 	mutateRefresh      func(c *jwt.Claims)
 	omitRefreshIDToken bool
-	tokenUnavailable   bool
+	tokenFailure       struct {
+		status int
+		body   string
+	}
 	// userinfo overrides the UserInfo response for a valid access token.
 	userinfo          func(w http.ResponseWriter, r *http.Request)
 	authMethods       []string
@@ -68,6 +71,11 @@ type fakeProvider struct {
 	requirePAR bool
 	pushed     map[string]url.Values // request_uri -> parameters
 	lastPush   *http.Request
+
+	// JAR (RFC 9101)
+	requestObjects *jwt.Verifier // nil: request objects are rejected
+	requestAlgs    []string
+	requireJAR     bool
 
 	// DPoP (RFC 9449)
 	dpopAlgs   []string
@@ -115,6 +123,8 @@ func newFakeProvider(t testing.TB) *fakeProvider {
 			RequirePushedAuthorizationRequests:         p.requirePAR,
 			DPoPSigningAlgValuesSupported:              p.dpopAlgs,
 			EndSessionEndpoint:                         p.URL + "/end_session?tenant=t1",
+			RequestObjectSigningAlgValuesSupported:     p.requestAlgs,
+			RequireSignedRequestObject:                 p.requireJAR,
 		}
 		if p.par || p.requirePAR {
 			meta.PushedAuthorizationRequestEndpoint = p.URL + "/par"
@@ -155,6 +165,18 @@ func (p *fakeProvider) authorize(t *testing.T, authURL string) (state, code stri
 		}
 	} else if p.requirePAR {
 		t.Fatal("authorization request was not pushed")
+	} else if q.Has("request") {
+		params, err := p.openRequestObject(q.Get("request"), q.Get("client_id"))
+		if err != nil {
+			t.Fatalf("request object: %v", err)
+		}
+		// OpenID Connect Core §6.1: the query must repeat these.
+		if q.Get("response_type") != params.Get("response_type") || q.Get("scope") != params.Get("scope") {
+			t.Fatalf("query %v disagrees with request object %v", q, params)
+		}
+		q = params
+	} else if p.requireJAR {
+		t.Fatal("authorization request was not signed")
 	}
 	if q.Get("client_id") != clientID || q.Get("redirect_uri") != redirectURL ||
 		q.Get("response_type") != "code" || q.Get("code_challenge_method") != "S256" {
@@ -181,7 +203,7 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !p.clientAuthenticated(r) {
-		w.WriteHeader(http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "invalid_client")
 		return
 	}
 	// The proof is checked before the code is looked up, so that a
@@ -196,10 +218,12 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 		jkt = proof.JKT
 	}
 	p.mu.Lock()
-	unavailable := p.tokenUnavailable
+	failure := p.tokenFailure
 	p.mu.Unlock()
-	if unavailable {
-		writeError(w, http.StatusServiceUnavailable, "temporarily_unavailable")
+	if failure.status != 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(failure.status)
+		_, _ = w.Write([]byte(failure.body))
 		return
 	}
 
