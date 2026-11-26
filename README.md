@@ -529,11 +529,11 @@ rp, _ := webauthn.New(webauthn.Config{
 handle, _ := webauthn.NewUserHandle() // once per user; store it with the user
 opts, ch, _ := rp.BeginRegistration(webauthn.User{Subject: "u1", Handle: handle, Name: "alice"}, existing)
 // send opts as JSON, keep ch server-side (e.g. JSON in a session value) ...
-cred, err := rp.FinishRegistration(ctx, ch, responseJSON) // then save cred
+reg, err := rp.FinishRegistration(ctx, ch, responseJSON) // then save reg.Credential
 
 // Login: second factor for a known user, or a passkey without a username
 opts, ch, _ = rp.BeginLogin(userCreds) // or rp.BeginDiscoverableLogin()
-p, cred, err := rp.FinishLogin(ctx, ch, responseJSON)
+login, err := rp.FinishLogin(ctx, ch, responseJSON) // login.Principal, login.Credential
 ```
 In the browser, pass the options to
 `PublicKeyCredential.parseCreationOptionsFromJSON` (or
@@ -569,6 +569,21 @@ Origins are matched exactly, never derived from the request:
 - `RelatedOrigins` lists web origins outside the RP ID for
   [related origin requests](https://www.w3.org/TR/webauthn-3/#sctn-related-origins).
   Serve the same list at `https://<RP ID>/.well-known/webauthn`.
+
+Ceremony options:
+- `webauthn.WithConditionalCreate()` makes `BeginRegistration` start a
+  registration for `navigator.credentials.create({mediation: "conditional",
+  publicKey})`, which creates a passkey without a prompt, for example right
+  after a password login. Only such registrations may lack the user
+  presence flag. The `UserVerification` policy still applies.
+- `webauthn.WithExtensions` requests the `credProps`, `prf`, `largeBlob`
+  and `appid` extensions. The Begin methods reject inputs that the browser
+  would reject, such as `credProps` at login. `Registration.Extensions` and
+  `Login.Extensions` hold the client outputs of the requested extensions,
+  which the browser reports without a signature, and every authenticator
+  extension output from the signed authenticator data. With `appid`,
+  `FinishLogin` expects the hash of the AppID instead of the RP ID only
+  when the client reports that it used the AppID.
 
 CBOR is decoded strictly: no tags, floats, indefinite lengths, duplicate
 map keys or trailing bytes, with bounds on depth and length.

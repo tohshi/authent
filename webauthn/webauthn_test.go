@@ -38,10 +38,11 @@ func TestRoundTrip(t *testing.T) {
 	}
 	a.signCount = 5
 	a.flags |= flagBS
-	p, updated, err := rp.FinishLogin(ctx, ch, a.get(ch))
+	login, err := rp.FinishLogin(ctx, ch, a.get(ch))
 	if err != nil {
 		t.Fatalf("FinishLogin = %v", err)
 	}
+	p, updated := login.Principal, login.Credential
 	if p.Subject != "u-1" || p.Method != authent.MethodWebAuthn || !p.AuthTime.Equal(testNow) ||
 		p.Claims["user_verified"] != true || p.Claims["credential_id"] != b64.EncodeToString(cred.ID) {
 		t.Fatalf("unexpected principal %+v", p)
@@ -60,8 +61,8 @@ func TestRoundTrip(t *testing.T) {
 	}
 	a.signCount = 6
 	a.userHandle = testUser.Handle
-	if p, _, err := rp.FinishLogin(ctx, ch, a.get(ch)); err != nil || p.Subject != "u-1" {
-		t.Fatalf("discoverable FinishLogin = %+v, %v", p, err)
+	if l, err := rp.FinishLogin(ctx, ch, a.get(ch)); err != nil || l.Principal.Subject != "u-1" {
+		t.Fatalf("discoverable FinishLogin = %+v, %v", l, err)
 	}
 }
 
@@ -146,9 +147,9 @@ func TestSelfAttestation(t *testing.T) {
 	h := sha256Sum(cd)
 	a.attStmt = cborPairs{{"alg", -7}, {"sig", a.sign(append(ad, h...))}}
 	resp := buildCreate(a, cd, ad)
-	c, err := rp.FinishRegistration(context.Background(), ch, resp)
-	if err != nil || c.AttestationType != AttestationSelf {
-		t.Fatalf("FinishRegistration = %+v, %v", c, err)
+	reg, err := rp.FinishRegistration(context.Background(), ch, resp)
+	if err != nil || reg.Credential.AttestationType != AttestationSelf {
+		t.Fatalf("FinishRegistration = %+v, %v", reg, err)
 	}
 }
 
@@ -248,7 +249,7 @@ func TestLoginRejections(t *testing.T) {
 				t.Fatal(err)
 			}
 			tc.modify(a, &ch, store)
-			_, _, err = rp.FinishLogin(ctx, ch, a.get(ch))
+			_, err = rp.FinishLogin(ctx, ch, a.get(ch))
 			if !errors.Is(err, tc.want) || !errors.Is(err, authent.ErrUnauthenticated) {
 				t.Fatalf("FinishLogin = %v, want %v", err, tc.want)
 			}
@@ -272,7 +273,7 @@ func TestInfrastructureErrors(t *testing.T) {
 
 	_, ch, _ := rp.BeginLogin([]Credential{cred})
 	store.lookupErr = errors.New("db down")
-	_, _, err := rp.FinishLogin(ctx, ch, a.get(ch))
+	_, err := rp.FinishLogin(ctx, ch, a.get(ch))
 	check("lookup failure", err)
 	_, rch, _ := rp.BeginRegistration(testUser, nil)
 	_, err = rp.FinishRegistration(ctx, rch, newSoftAuthenticator(t).create(rch))
@@ -280,21 +281,21 @@ func TestInfrastructureErrors(t *testing.T) {
 	store.lookupErr = nil
 
 	store.updateErr = errors.New("db down")
-	_, _, err = rp.FinishLogin(ctx, ch, a.get(ch))
+	_, err = rp.FinishLogin(ctx, ch, a.get(ch))
 	check("update failure", err)
 	store.updateErr = nil
 
 	broken := cred
 	broken.PublicKey = []byte{0xa0}
 	store.put(broken)
-	_, _, err = rp.FinishLogin(ctx, ch, a.get(ch))
+	_, err = rp.FinishLogin(ctx, ch, a.get(ch))
 	check("unusable stored key", err)
 
 	// A store that detects a racing login reports ErrSignCount.
 	store.put(cred)
 	store.updateErr = ErrSignCount
 	a.signCount = 1
-	if _, _, err := rp.FinishLogin(ctx, ch, a.get(ch)); !errors.Is(err, ErrSignCount) {
+	if _, err := rp.FinishLogin(ctx, ch, a.get(ch)); !errors.Is(err, ErrSignCount) {
 		t.Errorf("racing update = %v, want ErrSignCount", err)
 	}
 }

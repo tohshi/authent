@@ -133,7 +133,7 @@ type softAuthenticator struct {
 	typ         string
 	origin      string
 	crossOrigin bool
-	topOrigin   string // sent when set
+	topOrigin   string
 	challenge   []byte // overrides the ceremony challenge when set
 	// Authenticator data.
 	rpID      string
@@ -146,6 +146,7 @@ type softAuthenticator struct {
 	format     string
 	attStmt    cborPairs
 	trailing   []byte // appended to authenticator data
+	clientExt  map[string]any
 }
 
 func newSoftAuthenticator(t testing.TB) *softAuthenticator {
@@ -230,10 +231,17 @@ func buildCreate(a *softAuthenticator, cd, ad []byte) []byte {
 			"attestationObject": b64.EncodeToString(att),
 			"transports":        []string{"usb", "usb", "bogus"},
 		},
-		"clientExtensionResults":  map[string]any{},
+		"clientExtensionResults":  a.clientExtensionResults(),
 		"authenticatorAttachment": "cross-platform",
 	})
 	return b
+}
+
+func (a *softAuthenticator) clientExtensionResults() map[string]any {
+	if a.clientExt == nil {
+		return map[string]any{}
+	}
+	return a.clientExt
 }
 
 func sha256Sum(b []byte) []byte {
@@ -256,7 +264,7 @@ func (a *softAuthenticator) get(ch Challenge) []byte {
 	}
 	b, _ := json.Marshal(map[string]any{
 		"id": b64.EncodeToString(a.id()), "rawId": b64.EncodeToString(a.id()), "type": "public-key",
-		"response": resp, "clientExtensionResults": map[string]any{},
+		"response": resp, "clientExtensionResults": a.clientExtensionResults(),
 	})
 	return b
 }
@@ -270,10 +278,10 @@ func register(t testing.TB, rp *RelyingParty, store *memStore, a *softAuthentica
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := rp.FinishRegistration(context.Background(), ch, a.create(ch))
+	reg, err := rp.FinishRegistration(context.Background(), ch, a.create(ch))
 	if err != nil {
 		t.Fatalf("FinishRegistration = %v", err)
 	}
-	store.put(c)
-	return c
+	store.put(reg.Credential)
+	return reg.Credential
 }

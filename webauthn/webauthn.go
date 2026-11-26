@@ -23,6 +23,7 @@ import (
 	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -118,8 +119,7 @@ type Config struct {
 	RelatedOrigins []string
 	// TopOrigins lists the origins of pages that may embed a ceremony in a
 	// cross-origin iframe. A response with crossOrigin set is accepted only
-	// if its topOrigin is in this list. If empty, cross-origin responses
-	// are rejected.
+	// if its topOrigin is in this list.
 	TopOrigins []string
 	// UserVerification defaults to UserVerificationPreferred.
 	UserVerification UserVerification
@@ -214,6 +214,13 @@ type Challenge struct {
 	UserHandle []byte `json:"userHandle,omitempty"`
 	// AllowedCredentials limits which credentials a login may use.
 	AllowedCredentials [][]byte `json:"allowedCredentials,omitempty"`
+	// Conditional is set for registrations started with
+	// WithConditionalCreate.
+	Conditional bool `json:"conditional,omitzero"`
+	// Extensions lists the requested extensions whose client outputs are
+	// returned, and AppID is the requested appid input.
+	Extensions []string `json:"extensions,omitempty"`
+	AppID      string   `json:"appid,omitempty"`
 }
 
 const (
@@ -288,6 +295,32 @@ type Option func(*RelyingParty)
 // WithClock overrides the clock, for tests.
 func WithClock(now func() time.Time) Option { return func(rp *RelyingParty) { rp.now = now } }
 
+// CeremonyOption configures one ceremony started by BeginRegistration,
+// BeginLogin or BeginDiscoverableLogin.
+type CeremonyOption func(*ceremonyOptions)
+
+type ceremonyOptions struct {
+	conditional bool
+	extensions  ExtensionInputs
+}
+
+// WithConditionalCreate starts a registration with conditional
+// mediation, where the browser may create a passkey without prompting the
+// user. In the browser, call
+// navigator.credentials.create({mediation: "conditional", publicKey}).
+// The response may then lack the user presence flag; the
+// UserVerification policy still applies. Only BeginRegistration accepts
+// it.
+func WithConditionalCreate() CeremonyOption {
+	return func(o *ceremonyOptions) { o.conditional = true }
+}
+
+// WithExtensions requests extensions. Their outputs are returned in
+// Registration.Extensions or Login.Extensions.
+func WithExtensions(in ExtensionInputs) CeremonyOption {
+	return func(o *ceremonyOptions) { o.extensions = in }
+}
+
 // maxResponseSize bounds the JSON of a browser response.
 const maxResponseSize = 64 << 10
 
@@ -356,10 +389,8 @@ func New(cfg Config, store CredentialStore, opts ...Option) (*RelyingParty, erro
 	return rp, nil
 }
 
-// androidOriginPrefix starts the origin of an Android app.
 const androidOriginPrefix = "android:apk-key-hash:"
 
-// checkOrigin checks an entry of Config.Origins.
 func checkOrigin(origin, rpID string) error {
 	if hash, ok := strings.CutPrefix(origin, androidOriginPrefix); ok {
 		if b, err := decodeB64(hash); err != nil || len(b) != sha256.Size {
@@ -377,8 +408,6 @@ func checkOrigin(origin, rpID string) error {
 	return nil
 }
 
-// webOriginHost checks that origin is a serialized https origin, or http
-// on a loopback host, and returns its host.
 func webOriginHost(origin string) (string, error) {
 	u, err := url.Parse(origin)
 	if err != nil || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil || u.Opaque != "" {
@@ -410,22 +439,39 @@ func randomBytes(n int) ([]byte, error) {
 	return b, nil
 }
 
-func (rp *RelyingParty) newChallenge(ceremony string) (Challenge, error) {
+func (rp *RelyingParty) newChallenge(ceremony string, allowed [][]byte, opts []CeremonyOption) (Challenge, ExtensionInputs, error) {
+	var o ceremonyOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	if o.conditional && ceremony != ceremonyCreate {
+		return Challenge{}, ExtensionInputs{}, errors.New("webauthn: conditional create applies only to registrations")
+	}
+	if err := o.extensions.check(ceremony, allowed); err != nil {
+		return Challenge{}, ExtensionInputs{}, err
+	}
 	v, err := randomBytes(32)
 	if err != nil {
-		return Challenge{}, err
+		return Challenge{}, ExtensionInputs{}, err
 	}
-	return Challenge{Ceremony: ceremony, Value: v, ExpiresAt: rp.now().Add(rp.cfg.Timeout)}, nil
+	return Challenge{
+		Ceremony:           ceremony,
+		Value:              v,
+		ExpiresAt:          rp.now().Add(rp.cfg.Timeout),
+		AllowedCredentials: allowed,
+		Conditional:        o.conditional,
+		Extensions:         o.extensions.requested(),
+		AppID:              o.extensions.AppID,
+	}, o.extensions, nil
 }
 
 // clientData is CollectedClientData (WebAuthn §5.8.1).
 type clientData struct {
-	Type        string `json:"type"`
-	Challenge   string `json:"challenge"`
-	Origin      string `json:"origin"`
-	CrossOrigin bool   `json:"crossOrigin"`
-	// TopOrigin is set only in cross-origin iframes.
-	TopOrigin *string `json:"topOrigin"`
+	Type        string  `json:"type"`
+	Challenge   string  `json:"challenge"`
+	Origin      string  `json:"origin"`
+	CrossOrigin bool    `json:"crossOrigin"`
+	TopOrigin   *string `json:"topOrigin"`
 }
 
 // verifyClientData checks the client data of a response against the
@@ -461,11 +507,11 @@ func (rp *RelyingParty) verifyClientData(raw []byte, ch Challenge, ceremony stri
 }
 
 // verifyAuthData applies the checks shared by both ceremonies.
-func (rp *RelyingParty) verifyAuthData(ad *authData) error {
-	if !bytes.Equal(ad.rpIDHash, rp.rpIDHash[:]) {
+func (rp *RelyingParty) verifyAuthData(ad *authData, rpIDHash []byte, requirePresence bool) error {
+	if !bytes.Equal(ad.rpIDHash, rpIDHash) {
 		return ErrRPID
 	}
-	if !ad.has(flagUP) {
+	if requirePresence && !ad.has(flagUP) {
 		return ErrUserNotPresent
 	}
 	if rp.cfg.UserVerification == UserVerificationRequired && !ad.has(flagUV) {
@@ -477,9 +523,10 @@ func (rp *RelyingParty) verifyAuthData(ad *authData) error {
 // credentialEnvelope holds the members shared by RegistrationResponseJSON
 // and AuthenticationResponseJSON.
 type credentialEnvelope struct {
-	ID    string    `json:"id"`
-	RawID Base64URL `json:"rawId"`
-	Type  string    `json:"type"`
+	ID                     string                    `json:"id"`
+	RawID                  Base64URL                 `json:"rawId"`
+	Type                   string                    `json:"type"`
+	ClientExtensionResults map[string]jsontext.Value `json:"clientExtensionResults"`
 }
 
 func (e credentialEnvelope) check() error {

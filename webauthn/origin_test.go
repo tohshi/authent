@@ -9,9 +9,6 @@ import (
 	"github.com/tohshi/authent"
 )
 
-// androidOrigin returns the origin of an Android app whose signing
-// certificate is cert, in the form the Credential Manager documentation
-// gives: "android:apk-key-hash:" and the unpadded base64url SHA-256 hash.
 func androidOrigin(cert string) string {
 	return androidOriginPrefix + b64.EncodeToString(sha256Sum([]byte(cert)))
 }
@@ -51,7 +48,7 @@ func TestOrigins(t *testing.T) {
 				t.Fatal(err)
 			}
 			a.signCount = 1
-			if _, _, err := rp.FinishLogin(ctx, ch, a.get(ch)); !errors.Is(err, tc.want) || (err != nil && !errors.Is(err, authent.ErrUnauthenticated)) {
+			if _, err := rp.FinishLogin(ctx, ch, a.get(ch)); !errors.Is(err, tc.want) || (err != nil && !errors.Is(err, authent.ErrUnauthenticated)) {
 				t.Fatalf("FinishLogin = %v, want %v", err, tc.want)
 			}
 
@@ -69,8 +66,7 @@ func TestOrigins(t *testing.T) {
 }
 
 // The §16.5 vector comes from an iframe in https://example.com. The §16.4
-// vector reports crossOrigin without topOrigin, so the embedding page is
-// unknown and the response is rejected even with TopOrigins set.
+// vector reports crossOrigin without topOrigin.
 func TestSpecVectorsTopOrigin(t *testing.T) {
 	vs := loadSpecVectors(t)
 	ctx := context.Background()
@@ -85,7 +81,8 @@ func TestSpecVectorsTopOrigin(t *testing.T) {
 				Ceremony: ceremonyCreate, Value: unhex(t, v.Registration["challenge"]),
 				ExpiresAt: testNow.Add(time.Minute), Subject: "u-1", UserHandle: []byte("handle-1"),
 			}
-			cred, err := rp.FinishRegistration(ctx, reg, specRegistrationJSON(t, v.Registration))
+			r, err := rp.FinishRegistration(ctx, reg, specRegistrationJSON(t, v.Registration))
+			cred := r.Credential
 			if v.Section == "16.4" {
 				if !errors.Is(err, ErrOrigin) {
 					t.Fatalf("FinishRegistration = %v, want ErrOrigin", err)
@@ -100,7 +97,7 @@ func TestSpecVectorsTopOrigin(t *testing.T) {
 				Ceremony: ceremonyGet, Value: unhex(t, v.Authentication["challenge"]),
 				ExpiresAt: testNow.Add(time.Minute), Subject: "u-1", UserHandle: []byte("handle-1"),
 			}
-			if _, _, err := rp.FinishLogin(ctx, login, specAuthenticationJSON(t, cred.ID, v.Authentication)); err != nil {
+			if _, err := rp.FinishLogin(ctx, login, specAuthenticationJSON(t, cred.ID, v.Authentication)); err != nil {
 				t.Fatalf("FinishLogin = %v", err)
 			}
 		})

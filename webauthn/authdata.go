@@ -31,7 +31,7 @@ type authData struct {
 	credentialID []byte
 	publicKey    []byte // COSE_Key, exactly as encoded by the authenticator
 
-	extensions cborMap // set only when flagED is set
+	extensions map[string]any // set only when flagED is set
 }
 
 func (a *authData) has(flag byte) bool { return a.flags&flag != 0 }
@@ -86,7 +86,14 @@ func parseAuthData(raw []byte) (*authData, error) {
 		if !ok {
 			return nil, fmt.Errorf("%w: extensions are not a map", errAuthData)
 		}
-		a.extensions = m
+		a.extensions = make(map[string]any, len(m))
+		for k, e := range m {
+			id, ok := k.(string)
+			if !ok {
+				return nil, fmt.Errorf("%w: extension identifier %v is not text", errAuthData, k)
+			}
+			a.extensions[id] = exportCBOR(e)
+		}
 		rest = after
 	}
 
