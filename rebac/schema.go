@@ -3,6 +3,8 @@ package rebac
 import (
 	"errors"
 	"fmt"
+	"iter"
+	"slices"
 	"strings"
 )
 
@@ -130,9 +132,19 @@ type Definition interface{ definition() }
 func (TypeDef) definition()   {}
 func (CaveatDef) definition() {}
 
+// relationError is an ErrInvalidSchema about one relation.
+type relationError struct{ typ, rel, msg string }
+
+func (e *relationError) Error() string {
+	return ErrInvalidSchema.Error() + ": " + e.typ + "#" + e.rel + ": " + e.msg
+}
+
+func (e *relationError) Unwrap() error { return ErrInvalidSchema }
+
 // Schema is a validated set of type and caveat definitions. It is
 // immutable.
 type Schema struct {
+	defs    []Definition
 	caveats map[string]*CaveatDef
 	types   map[string]map[string]*relationInfo
 	reverse map[typeRel][]reverseEdge
@@ -140,7 +152,7 @@ type Schema struct {
 
 // NewSchema validates the definitions and returns a Schema.
 func NewSchema(defs ...Definition) (*Schema, error) {
-	s := &Schema{types: map[string]map[string]*relationInfo{}, caveats: map[string]*CaveatDef{}}
+	s := &Schema{defs: slices.Clone(defs), types: map[string]map[string]*relationInfo{}, caveats: map[string]*CaveatDef{}}
 	var types []TypeDef
 	for _, d := range defs {
 		switch d := d.(type) {
@@ -182,20 +194,35 @@ func NewSchema(defs ...Definition) (*Schema, error) {
 	}
 
 	// Validate rewrites once every type and relation is known.
-	for typ, rels := range s.types {
-		for name, info := range rels {
-			allowed, err := s.validateRewrite(typ, info.rewrite)
-			if err != nil {
-				return nil, fmt.Errorf("%w: %s#%s: %v", ErrInvalidSchema, typ, name, err)
-			}
-			info.allowed = allowed
+	for typ, name := range s.relationsInOrder() {
+		info := s.types[typ][name]
+		allowed, err := s.validateRewrite(typ, info.rewrite)
+		if err != nil {
+			return nil, &relationError{typ, name, err.Error()}
 		}
+		info.allowed = allowed
 	}
 	if err := s.checkComputedCycles(); err != nil {
 		return nil, err
 	}
 	s.reverse = s.reverseEdges()
 	return s, nil
+}
+
+// relationsInOrder yields every type and relation in definition order, so
+// that validation reports the first error deterministically.
+func (s *Schema) relationsInOrder() iter.Seq2[string, string] {
+	return func(yield func(string, string) bool) {
+		for _, d := range s.defs {
+			if t, ok := d.(TypeDef); ok {
+				for _, r := range t.relations {
+					if !yield(t.name, r.name) {
+						return
+					}
+				}
+			}
+		}
+	}
 }
 
 func (s *Schema) relation(typ, rel string) (*relationInfo, bool) {
@@ -334,7 +361,7 @@ func (s *Schema) checkComputedCycles() error {
 	visit = func(n node) error {
 		switch state[n] {
 		case visiting:
-			return fmt.Errorf("%w: %s#%s depends on itself through Computed", ErrInvalidSchema, n.typ, n.rel)
+			return &relationError{n.typ, n.rel, "depends on itself through Computed"}
 		case done:
 			return nil
 		}
@@ -347,11 +374,9 @@ func (s *Schema) checkComputedCycles() error {
 		state[n] = done
 		return nil
 	}
-	for typ, rels := range s.types {
-		for rel := range rels {
-			if err := visit(node{typ, rel}); err != nil {
-				return err
-			}
+	for typ, rel := range s.relationsInOrder() {
+		if err := visit(node{typ, rel}); err != nil {
+			return err
 		}
 	}
 	return nil
