@@ -25,6 +25,7 @@ type Engine struct {
 	store          TupleStore
 	maxDepth       int
 	maxEvaluations int
+	concurrency    int
 }
 
 // Option configures an Engine.
@@ -34,19 +35,34 @@ type Option func(*Engine)
 func WithMaxDepth(n int) Option { return func(e *Engine) { e.maxDepth = n } }
 
 // WithMaxEvaluations limits the number of relation evaluations per check.
+// The count is shared by all branches of the check, including those
+// evaluated in parallel. A check that exceeds it fails with ErrTooComplex,
+// even if a branch evaluated before the limit was reached granted access.
 // The default is 10000.
 func WithMaxEvaluations(n int) Option { return func(e *Engine) { e.maxEvaluations = n } }
+
+// WithConcurrency lets a call evaluate up to n branches of Union and
+// Intersection rewrites, usersets and tuple-to-userset targets, and the
+// items of CheckBulk, at the same time. Once a branch decides its parent,
+// for example a Union branch that grants, the other branches are
+// cancelled. The default, 1, evaluates branches one after another.
+//
+// Results do not depend on the order in which branches finish. How much of
+// the evaluation limit a check uses can, since a cancelled branch may have
+// done some work first, so a check close to the limit may succeed in one
+// run and fail with ErrTooComplex in another.
+func WithConcurrency(n int) Option { return func(e *Engine) { e.concurrency = n } }
 
 // NewEngine returns an Engine.
 func NewEngine(schema *Schema, store TupleStore, opts ...Option) (*Engine, error) {
 	if schema == nil || store == nil {
 		return nil, errors.New("rebac: nil schema or store")
 	}
-	e := &Engine{schema: schema, store: store, maxDepth: 50, maxEvaluations: 10000}
+	e := &Engine{schema: schema, store: store, maxDepth: 50, maxEvaluations: 10000, concurrency: 1}
 	for _, opt := range opts {
 		opt(e)
 	}
-	if e.maxDepth <= 0 || e.maxEvaluations <= 0 {
+	if e.maxDepth <= 0 || e.maxEvaluations <= 0 || e.concurrency <= 0 {
 		return nil, errors.New("rebac: limits must be positive")
 	}
 	return e, nil
@@ -88,166 +104,66 @@ func (e *Engine) validateWrite(t Tuple) error {
 //
 // Errors fail closed: if any branch needed to decide the result errors,
 // Check returns false and the error. A grant found through another branch
-// is still returned as true, since it does not depend on the failing one.
+// is still returned as true, since it does not depend on the failing one,
+// and so is a denial decided by another branch, such as an Intersection
+// operand that is false.
+//
+// Cycles in the data are evaluated with the well-founded semantics of the
+// rewrite rules. A cycle never grants by itself: groups that only contain
+// each other have no members, and a cycle cannot cancel the subtraction of
+// an Exclusion. A relation that depends on its own exclusion and is not
+// decided by anything else has no answer; Check returns false with
+// ErrExclusionCycle.
 func (e *Engine) Check(ctx context.Context, object Object, permission string, subject Subject) (bool, error) {
-	if err := validateObject(object, false); err != nil {
-		return false, err
-	}
-	if err := validateSubject(subject, false); err != nil {
-		return false, err
-	}
-	if _, ok := e.schema.relation(object.Type, permission); !ok {
-		return false, fmt.Errorf("%w: %s#%s", ErrUnknownRelation, object.Type, permission)
-	}
-	c := &checker{
-		Engine:  e,
-		ctx:     ctx,
-		subject: subject,
-		onPath:  map[objRel]bool{},
-		granted: map[objRel]bool{},
-	}
-	return c.check(object, permission, 0)
+	r := e.newRequest(ctx).check(CheckItem{Object: object, Permission: permission, Subject: subject})
+	return r.Allowed, r.Err
 }
 
-// checker evaluates a single Check.
-type checker struct {
-	*Engine
-	ctx     context.Context
-	subject Subject
-
-	// onPath holds the relations being evaluated on the current path.
-	// Re-entering one is a cycle in the data (such as two groups that
-	// contain each other) and contributes nothing, so it evaluates to
-	// false.
-	onPath map[objRel]bool
-	// granted memoizes positive results. Only positive results are cached,
-	// because a negative one may be an artifact of a cycle cut-off.
-	granted     map[objRel]bool
-	evaluations int
+// CheckItem is one check of a CheckBulk call.
+type CheckItem struct {
+	Object     Object
+	Permission string
+	Subject    Subject
 }
 
-func (c *checker) check(obj Object, rel string, depth int) (bool, error) {
-	if depth > c.maxDepth {
-		return false, fmt.Errorf("%w: depth exceeds %d", ErrTooComplex, c.maxDepth)
-	}
-	if c.evaluations++; c.evaluations > c.maxEvaluations {
-		return false, fmt.Errorf("%w: more than %d evaluations", ErrTooComplex, c.maxEvaluations)
-	}
-	if err := c.ctx.Err(); err != nil {
-		return false, err
-	}
-	// A userset always contains itself: group:eng#member has member on
-	// group:eng.
-	if c.subject.Relation == rel && c.subject.Object == obj {
-		return true, nil
-	}
-	info, ok := c.schema.relation(obj.Type, rel)
-	if !ok {
-		// Tuples may outlive schema changes; an undefined relation grants
-		// nothing.
-		return false, nil
-	}
-	k := objRel{obj, rel}
-	if c.granted[k] {
-		return true, nil
-	}
-	if c.onPath[k] {
-		return false, nil
-	}
-	c.onPath[k] = true
-	ok, err := c.eval(obj, rel, info.rewrite, depth)
-	delete(c.onPath, k)
-	if ok {
-		c.granted[k] = true
-	}
-	return ok, err
+// CheckResult is the result of one CheckItem: the values Check would
+// return for it.
+type CheckResult struct {
+	Allowed bool
+	Err     error
 }
 
-func (c *checker) eval(obj Object, rel string, r Rewrite, depth int) (bool, error) {
-	switch r := r.(type) {
-	case direct:
-		return c.evalDirect(obj, rel, depth)
-	case computed:
-		return c.check(obj, r.relation, depth+1)
-	case tupleToUserset:
-		return c.evalTupleToUserset(obj, r, depth)
-	case union:
-		return c.any(len(r.children), func(i int) (bool, error) {
-			return c.eval(obj, rel, r.children[i], depth)
-		})
-	case intersection:
-		for _, child := range r.children {
-			ok, err := c.eval(obj, rel, child, depth)
-			if err != nil || !ok {
-				return false, err
-			}
-		}
-		return true, nil
-	case exclusion:
-		ok, err := c.eval(obj, rel, r.base, depth)
-		if err != nil || !ok {
-			return false, err
-		}
-		excluded, err := c.eval(obj, rel, r.subtract, depth)
-		if err != nil {
-			return false, err
-		}
-		return !excluded, nil
-	}
-	return false, fmt.Errorf("rebac: unknown rewrite %T", r)
+// CheckBulk runs many checks in one call and returns their results in the
+// order of items. The checks share the tuples they read from the store and,
+// when they are about the same subject, the relations they decide on the
+// way. Each check has its own evaluation limit and its own error.
+func (e *Engine) CheckBulk(ctx context.Context, items []CheckItem) []CheckResult {
+	q := e.newRequest(ctx)
+	out := make([]CheckResult, len(items))
+	q.spread(len(items), func(i int) { out[i] = q.check(items[i]) })
+	return out
 }
 
-// any returns true if any of n branches is true. Errors are only reported
-// if no branch grants access.
-func (c *checker) any(n int, branch func(int) (bool, error)) (bool, error) {
-	var firstErr error
-	for i := range n {
-		ok, err := branch(i)
-		if ok {
-			return true, nil
-		}
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
+func (q *request) check(it CheckItem) CheckResult {
+	if err := validateObject(it.Object, false); err != nil {
+		return CheckResult{Err: err}
 	}
-	return false, firstErr
-}
-
-func (c *checker) evalDirect(obj Object, rel string, depth int) (bool, error) {
-	var usersets []Subject
-	for t, err := range c.store.Read(c.ctx, Filter{ObjectType: obj.Type, ObjectID: obj.ID, Relation: rel}) {
-		if err != nil {
-			return false, fmt.Errorf("rebac: reading tuples: %w", err)
-		}
-		s := t.Subject
-		switch {
-		case s == c.subject:
-			return true, nil
-		case s.isWildcard():
-			if c.subject.Relation == "" && c.subject.Object.Type == s.Object.Type {
-				return true, nil
-			}
-		case s.Relation != "":
-			usersets = append(usersets, s)
-		}
+	if err := validateSubject(it.Subject, false); err != nil {
+		return CheckResult{Err: err}
 	}
-	// Expand usersets only after the cheap direct matches above.
-	return c.any(len(usersets), func(i int) (bool, error) {
-		return c.check(usersets[i].Object, usersets[i].Relation, depth+1)
-	})
-}
-
-func (c *checker) evalTupleToUserset(obj Object, r tupleToUserset, depth int) (bool, error) {
-	var targets []Object
-	for t, err := range c.store.Read(c.ctx, Filter{ObjectType: obj.Type, ObjectID: obj.ID, Relation: r.tupleset}) {
-		if err != nil {
-			return false, fmt.Errorf("rebac: reading tuples: %w", err)
-		}
-		if !t.Subject.isWildcard() {
-			targets = append(targets, t.Subject.Object)
-		}
+	if _, ok := q.e.schema.relation(it.Object.Type, it.Permission); !ok {
+		return CheckResult{Err: fmt.Errorf("%w: %s#%s", ErrUnknownRelation, it.Object.Type, it.Permission)}
 	}
-	return c.any(len(targets), func(i int) (bool, error) {
-		return c.check(targets[i], r.computed, depth+1)
-	})
+	r := &run{request: q, subject: it.Subject}
+	res := r.check(q.ctx, nil, it.Object, it.Permission)
+	if r.exceeded() {
+		return CheckResult{Err: r.errTooComplex()}
+	}
+	switch res.f.op {
+	case opTrue:
+		return CheckResult{Allowed: true}
+	case opUnknown:
+		return CheckResult{Err: res.f.why}
+	}
+	return CheckResult{}
 }
