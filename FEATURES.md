@@ -68,11 +68,11 @@ Legend:
 | Validation of the token format before the store lookup | ✅ | |
 | Per-session CSRF token | ✅ | Synchronizer token pattern; compared in constant time |
 | Pluggable store and `MemoryStore` | ✅ | |
-| Redis or SQL stores | ⬜ | |
-| Revoking all sessions of a subject ("log out everywhere") | ⬜ | Needs a subject index in the store |
-| Listing a subject's active sessions | ⬜ | |
-| Conflict detection on concurrent saves | ⬜ | Currently last write wins |
-| Structured session values | ⬜ | Currently `map[string]string` |
+| Redis or SQL stores | ✅ | `SQLStore` for PostgreSQL, MySQL and SQLite through `database/sql`; bring your own driver. Expiry column with `DeleteExpired` |
+| Revoking all sessions of a subject ("log out everywhere") | ✅ | `RevokeAll`; every `Store` keeps a subject index. A concurrent rotation does not survive it |
+| Listing a subject's active sessions | ✅ | `List` returns sessions without tokens; `Revoke` ends one by its handle, only for its own subject |
+| Conflict detection on concurrent saves | ✅ | Versioned records with compare-and-swap in every store; `ErrConflict` on a lost race |
+| Structured session values | ✅ | `Key[T]` stores typed values as JSON |
 | Cookie helpers | ➖ | The core does not depend on HTTP; planned for an adapter package |
 
 ## oidc
@@ -201,5 +201,5 @@ Legend:
 | Observability hooks (logging, metrics, tracing) | ⬜ | |
 | API keys / opaque tokens | ✅ | `apikey`: prefixed keys with a CRC-32 checksum, SHA-256 at rest, expiry and revocation |
 | Multi-factor authentication (TOTP, WebAuthn) | ✅ | See the `totp` and `webauthn` sections |
-| Recording several factors in a session (`amr`, step-up) | ⬜ | `Session.AuthMethod` holds one method |
+| Recording several factors in a session (`amr`, step-up) | ✅ | `Session.Factors` with times; `Manager.StepUp` rotates the token; `AuthenticatedSince` checks required factors and their age |
 | OAuth 2.0 authorization server (issuing endpoints) | ➖ | A separate product; the `jwt` package covers token signing |
