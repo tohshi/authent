@@ -91,7 +91,7 @@ Legend:
 | Signed UserInfo responses (`application/jwt`) | ✅ | Signature, `iss` and `aud` verified like an ID token, `exp` optional, `sub` must match. Encrypted responses are rejected; JWE is out of scope |
 | Refresh token helper | ⬜ | `HTTPClient` refreshes through `x/oauth2`, but refreshed ID tokens are not verified and `private_key_jwt` clients cannot refresh |
 | Calling APIs with the access token (`HTTPClient`) | ✅ | Bearer, or DPoP when configured |
-| `max_age`, `auth_time` and `acr` enforcement | ⬜ | |
+| `max_age`, `auth_time` and `acr` enforcement | ✅ | `max_age` and `acr_values` sent with the request are kept in `AuthRequest`; `Exchange` then requires a recent enough `auth_time` and an `acr` from the requested values |
 | `private_key_jwt` client authentication | ✅ | Asymmetric JWT assertion on each code exchange; issuer audience per RFC 10070 |
 | RP-initiated, front-channel and back-channel logout | ⬜ | |
 | Pushed authorization requests (RFC 9126) | ✅ | `PushAuthCodeURL`; honors `require_pushed_authorization_requests`; client secret or `private_key_jwt` |

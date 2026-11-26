@@ -325,6 +325,15 @@ is the provider issuer, as required by RFC 10070.
 - the ID token's signature, `iss`, `aud` and `exp`
 - `azp`
 - `at_hash`
+- `auth_time` and `acr`, when the request asked for them:
+```go
+req, _ := client.AuthCodeURL(
+	oauth2.SetAuthURLParam("max_age", "300"),
+	oauth2.SetAuthURLParam("acr_values", "urn:example:mfa"))
+```
+  With `max_age`, the ID token must carry an `auth_time` at most that many
+  seconds old. With `acr_values`, its `acr` must be one of the requested
+  values, as for an essential claim. Both are kept in the `AuthRequest`.
 
 `UserInfo` calls the provider's UserInfo endpoint with the access token and
 rejects the response unless its `sub` exactly matches the ID token's. A

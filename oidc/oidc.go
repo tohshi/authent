@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -195,6 +197,8 @@ type PrivateKeyJWTConfig struct {
 type Client struct {
 	provider          *Provider
 	oauth             oauth2.Config
+	keys              jwt.KeySet
+	idTokenOpts       []jwt.VerifierOption
 	verifier          *jwt.Verifier // ID tokens
 	userinfo          *jwt.Verifier // signed UserInfo responses
 	client            *http.Client  // for the token and PAR endpoints; adds DPoP proofs if configured
@@ -271,7 +275,7 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	userinfo, err := jwt.NewVerifier(keys, append(idTokenOpts,
+	userinfo, err := jwt.NewVerifier(keys, append(slices.Clip(idTokenOpts),
 		jwt.WithOptionalExpiration(), jwt.WithMaxTokenSize(maxUserInfoSize))...)
 	if err != nil {
 		return nil, err
@@ -305,6 +309,8 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 				AuthStyle: authStyle,
 			},
 		},
+		keys:              keys,
+		idTokenOpts:       idTokenOpts,
 		verifier:          verifier,
 		userinfo:          userinfo,
 		client:            client,
@@ -348,6 +354,14 @@ type AuthRequest struct {
 	// Expiry is when the pushed request behind URL expires (RFC 9126
 	// §2.2); redirect before then. It is zero for AuthCodeURL.
 	Expiry time.Time
+	// MaxAge is the "max_age" request parameter, if one was sent. Exchange
+	// then requires an "auth_time" no older than MaxAge (OpenID Connect
+	// Core §3.1.2.1).
+	MaxAge *time.Duration
+	// ACRValues are the values of the "acr_values" request parameter.
+	// Exchange then requires the ID token's "acr" to be one of them, as
+	// for an essential claim request (OpenID Connect Core §5.5.1.1).
+	ACRValues []string
 }
 
 func randomString() (string, error) {
@@ -359,8 +373,11 @@ func randomString() (string, error) {
 }
 
 // AuthCodeURL starts an authorization request with fresh state, nonce and
-// an S256 PKCE challenge. opts may add parameters such as prompt. It fails
-// with ErrPARRequired if the provider requires PushAuthCodeURL.
+// an S256 PKCE challenge. opts may add parameters such as "prompt". With
+// "max_age" or "acr_values", for example
+// oauth2.SetAuthURLParam("max_age", "300"), Exchange enforces them; see
+// AuthRequest. It fails with ErrPARRequired if the provider requires
+// PushAuthCodeURL.
 func (c *Client) AuthCodeURL(opts ...oauth2.AuthCodeOption) (AuthRequest, error) {
 	if c.provider.RequirePushedAuthorizationRequests {
 		return AuthRequest{}, ErrPARRequired
@@ -369,17 +386,19 @@ func (c *Client) AuthCodeURL(opts ...oauth2.AuthCodeOption) (AuthRequest, error)
 		// RFC 9449 §10: binds the authorization code to the DPoP key.
 		opts = append(slices.Clip(opts), oauth2.SetAuthURLParam("dpop_jkt", c.dpop.Thumbprint()))
 	}
-	req, opts, err := newAuthRequest(opts)
+	req, params, err := c.newAuthRequest(opts)
 	if err != nil {
 		return AuthRequest{}, err
 	}
-	req.URL = c.oauth.AuthCodeURL(req.State, opts...)
+	if req.URL, err = c.authorizationURL(params); err != nil {
+		return AuthRequest{}, err
+	}
 	return req, nil
 }
 
 // newAuthRequest generates state, nonce and PKCE verifier, and returns
-// opts extended with the matching parameters.
-func newAuthRequest(opts []oauth2.AuthCodeOption) (AuthRequest, []oauth2.AuthCodeOption, error) {
+// the authorization request parameters with opts applied.
+func (c *Client) newAuthRequest(opts []oauth2.AuthCodeOption) (AuthRequest, url.Values, error) {
 	state, err := randomString()
 	if err != nil {
 		return AuthRequest{}, nil, err
@@ -393,7 +412,53 @@ func newAuthRequest(opts []oauth2.AuthCodeOption) (AuthRequest, []oauth2.AuthCod
 		oauth2.S256ChallengeOption(verifier),
 		oauth2.SetAuthURLParam("nonce", nonce),
 	}, opts...)
-	return AuthRequest{State: state, Nonce: nonce, CodeVerifier: verifier}, opts, nil
+	// A Config without AuthURL renders just "?" and the parameters. It is
+	// built afresh because oauth2.Config must not be copied.
+	cfg := oauth2.Config{ClientID: c.oauth.ClientID, RedirectURL: c.oauth.RedirectURL, Scopes: c.oauth.Scopes}
+	params, err := url.ParseQuery(strings.TrimPrefix(cfg.AuthCodeURL(state, opts...), "?"))
+	if err != nil {
+		return AuthRequest{}, nil, err
+	}
+	req := AuthRequest{State: state, Nonce: nonce, CodeVerifier: verifier}
+	if v, ok := params["max_age"]; ok {
+		maxAge, err := parseMaxAge(v)
+		if err != nil {
+			return AuthRequest{}, nil, err
+		}
+		req.MaxAge = &maxAge
+	}
+	if v, ok := params["acr_values"]; ok {
+		if req.ACRValues = strings.Fields(strings.Join(v, " ")); len(req.ACRValues) == 0 {
+			return AuthRequest{}, nil, errors.New("oidc: empty acr_values")
+		}
+	}
+	return req, params, nil
+}
+
+// parseMaxAge parses the "max_age" parameter, a number of seconds.
+func parseMaxAge(v []string) (time.Duration, error) {
+	const maxSeconds = int64(math.MaxInt64 / time.Second)
+	if len(v) != 1 || v[0] == "" || strings.Trim(v[0], "0123456789") != "" {
+		return 0, fmt.Errorf("oidc: invalid max_age %q", v)
+	}
+	secs, err := strconv.ParseInt(v[0], 10, 64)
+	if err != nil || secs > maxSeconds {
+		return 0, fmt.Errorf("oidc: invalid max_age %q", v)
+	}
+	return time.Duration(secs) * time.Second, nil
+}
+
+// authorizationURL returns the authorization endpoint with params added
+// to its query.
+func (c *Client) authorizationURL(params url.Values) (string, error) {
+	u, err := url.Parse(c.provider.AuthorizationEndpoint)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	maps.Copy(q, params)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 
 // PushAuthCodeURL is like AuthCodeURL but sends the authorization request
@@ -411,13 +476,13 @@ func (c *Client) PushAuthCodeURL(ctx context.Context, opts ...oauth2.AuthCodeOpt
 	if endpoint == "" {
 		return AuthRequest{}, errors.New("oidc: provider has no pushed_authorization_request_endpoint")
 	}
-	req, opts, err := newAuthRequest(opts)
+	req, params, err := c.newAuthRequest(opts)
 	if err != nil {
 		return AuthRequest{}, err
 	}
-	params, err := c.authParams(req.State, opts)
-	if err != nil {
-		return AuthRequest{}, err
+	// RFC 9126 §2.1.
+	if params.Has("request_uri") {
+		return AuthRequest{}, errors.New("oidc: request_uri cannot be pushed")
 	}
 
 	if c.oauth.ClientSecret != "" && c.oauth.Endpoint.AuthStyle == oauth2.AuthStyleInParams {
@@ -450,15 +515,10 @@ func (c *Client) PushAuthCodeURL(ctx context.Context, opts ...oauth2.AuthCodeOpt
 	}
 
 	// RFC 9126 §4: only client_id and request_uri go to the browser.
-	u, err := url.Parse(c.provider.AuthorizationEndpoint)
+	req.URL, err = c.authorizationURL(url.Values{"client_id": {c.oauth.ClientID}, "request_uri": {par.RequestURI}})
 	if err != nil {
 		return AuthRequest{}, err
 	}
-	q := u.Query()
-	q.Set("client_id", c.oauth.ClientID)
-	q.Set("request_uri", par.RequestURI)
-	u.RawQuery = q.Encode()
-	req.URL = u.String()
 	req.Expiry = c.now().Add(time.Duration(par.ExpiresIn) * time.Second)
 	return req, nil
 }
@@ -547,23 +607,6 @@ func (c *Client) clientAssertion() (url.Values, error) {
 	}, nil
 }
 
-// authParams returns the authorization request parameters that
-// AuthCodeURL would put in the URL.
-func (c *Client) authParams(state string, opts []oauth2.AuthCodeOption) (url.Values, error) {
-	// A Config without AuthURL renders just "?" and the parameters. It is
-	// built afresh because oauth2.Config must not be copied.
-	cfg := oauth2.Config{ClientID: c.oauth.ClientID, RedirectURL: c.oauth.RedirectURL, Scopes: c.oauth.Scopes}
-	params, err := url.ParseQuery(strings.TrimPrefix(cfg.AuthCodeURL(state, opts...), "?"))
-	if err != nil {
-		return nil, err
-	}
-	// RFC 9126 §2.1.
-	if params.Has("request_uri") {
-		return nil, errors.New("oidc: request_uri cannot be pushed")
-	}
-	return params, nil
-}
-
 // Result is the outcome of a successful Exchange.
 type Result struct {
 	Principal  authent.Principal
@@ -607,12 +650,26 @@ func (c *Client) Exchange(ctx context.Context, req AuthRequest, state, code stri
 	if raw == "" {
 		return nil, fmt.Errorf("%w: missing id_token", ErrInvalidIDToken)
 	}
-	claims, header, err := c.verifier.VerifyWithHeader(ctx, raw)
+	verifier := c.verifier
+	if req.MaxAge != nil {
+		opts := append(slices.Clip(c.idTokenOpts), jwt.WithMaxAuthAge(*req.MaxAge))
+		if verifier, err = jwt.NewVerifier(c.keys, opts...); err != nil {
+			return nil, err
+		}
+	}
+	claims, header, err := verifier.VerifyWithHeader(ctx, raw)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.checkIDToken(claims, header, req.Nonce, tok.AccessToken); err != nil {
+	got, _ := claims.Extra["nonce"].(string)
+	if req.Nonce == "" || subtle.ConstantTimeCompare([]byte(got), []byte(req.Nonce)) != 1 {
+		return nil, fmt.Errorf("%w: nonce mismatch", ErrInvalidIDToken)
+	}
+	if err := c.checkIDToken(claims, header, tok.AccessToken); err != nil {
 		return nil, err
+	}
+	if acr, _ := claims.Extra["acr"].(string); len(req.ACRValues) > 0 && !slices.Contains(req.ACRValues, acr) {
+		return nil, fmt.Errorf("%w: acr %q was not requested", ErrInvalidIDToken, acr)
 	}
 	p, err := jwt.PrincipalFromClaims(claims, authent.MethodOIDC)
 	if err != nil {
@@ -668,13 +725,9 @@ func (c *Client) HTTPClient(ctx context.Context, tok *oauth2.Token) *http.Client
 	return &hc
 }
 
-// checkIDToken applies the ID token checks of OpenID Connect Core §3.1.3.7
-// that go beyond generic JWT validation.
-func (c *Client) checkIDToken(claims *jwt.Claims, header jwt.Header, nonce, accessToken string) error {
-	got, _ := claims.Extra["nonce"].(string)
-	if nonce == "" || subtle.ConstantTimeCompare([]byte(got), []byte(nonce)) != 1 {
-		return fmt.Errorf("%w: nonce mismatch", ErrInvalidIDToken)
-	}
+// checkIDToken applies the checks of OpenID Connect Core §3.1.3.7 that
+// go beyond generic JWT validation and do not depend on the request.
+func (c *Client) checkIDToken(claims *jwt.Claims, header jwt.Header, accessToken string) error {
 	azp, hasAzp := claims.Extra["azp"].(string)
 	if len(claims.Audience) > 1 && !hasAzp {
 		return fmt.Errorf("%w: azp required with multiple audiences", ErrInvalidIDToken)
