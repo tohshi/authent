@@ -133,7 +133,7 @@ Legend:
 | `TupleStore` interface and `MemoryStore` | ✅ | `MemoryStore` supports reverse (subject) filters |
 | Persistent stores: `SQLStore` for PostgreSQL, MySQL and SQLite | ✅ | Through `database/sql`; bring your own driver. Byte-wise identifier comparison |
 | `TupleStore` conformance suite | ✅ | `rebactest.TestTupleStore` |
-| `Expand` (userset tree) | ⬜ | |
+| `Expand` (userset tree) | ✅ | Follows `Computed` and `TupleToUserset`; usersets named by tuples are leaves |
 | `ListObjects` / `ListSubjects` | ⬜ | |
 | Consistency tokens (zookies) | ⬜ | |
 | Text schema DSL | ⬜ | |

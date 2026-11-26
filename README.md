@@ -566,6 +566,10 @@ ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("us
 - `CheckBulk` runs many checks in one call. They share store reads and
   the relations they decide on the way; results come back in order, each
   with its own error.
+- `Expand` returns the userset tree of an `object#relation`: union,
+  intersection and exclusion nodes down to the subjects of tuples. It
+  follows `Computed` and `TupleToUserset`; usersets named by tuples, such
+  as `group:eng#member`, are leaves to expand with another call.
 - `WithConcurrency(n)` evaluates up to `n` branches of a check (and items
   of `CheckBulk`) in parallel, which helps with network stores. Once a
   branch decides, its siblings are cancelled. The evaluation limit is
