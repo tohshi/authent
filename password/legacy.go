@@ -153,11 +153,11 @@ func validSalt(s string) bool {
 }
 
 func parseCanonicalDecimal(s string, max int) (int, bool) {
-	v, err := strconv.ParseUint(s, 10, 63)
-	if err != nil || v > uint64(max) || strconv.FormatUint(v, 10) != s {
+	v, err := strconv.Atoi(s)
+	if err != nil || v < 0 || v > max || strconv.Itoa(v) != s {
 		return 0, false
 	}
-	return int(v), true
+	return v, true
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
