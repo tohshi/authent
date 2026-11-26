@@ -124,7 +124,7 @@ Legend:
 | Rewrites: `Direct`, `Computed`, `TupleToUserset`, `Union`, `Intersection`, `Exclusion` | ✅ | |
 | Usersets as subjects (`group:eng#member`) | ✅ | |
 | Wildcard subjects (`user:*`) | ✅ | |
-| `Check` | ✅ | Cuts off cycles in the data; caches positive results within a check |
+| `Check` | ✅ | Caches decided relations within a call |
 | Depth and evaluation limits | ✅ | Exceeding them fails closed with `ErrTooComplex` |
 | Fail closed on store errors | ✅ | A grant found through an independent branch still succeeds |
 | Context cancellation | ✅ | |
@@ -138,11 +138,11 @@ Legend:
 | Consistency tokens (zookies) | ⬜ | |
 | Text schema DSL | ⬜ | |
 | Caveats / conditional tuples (ABAC) | ⬜ | |
-| Bulk check | ⬜ | |
-| Parallel branch evaluation | ⬜ | Branches are evaluated sequentially with short-circuiting |
+| Bulk check | ✅ | `CheckBulk`: shared store reads and decided relations, ordered results, an error per item |
+| Parallel branch evaluation | ✅ | `WithConcurrency`; decided branches cancel their siblings; the evaluation limit is shared by all branches and fails closed |
 | Check result caching across requests | ⬜ | |
 | Watch API / change log | ⬜ | |
-| Exact semantics for `Exclusion` over data cycles | ⬜ | A cycle reached from the subtracted side evaluates to `false` |
+| Exact semantics for `Exclusion` over data cycles | ✅ | Well-founded semantics; a relation that depends on its own exclusion fails closed with `ErrExclusionCycle` |
 
 ## totp
 

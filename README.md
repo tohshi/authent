@@ -554,11 +554,23 @@ ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("us
   type the relation does not allow, or a write to a computed-only relation.
 - Relations that depend on themselves through `Computed` alone are rejected
   when the schema is built.
-- Cycles in the data, such as groups that contain each other, are detected
-  and cut off during evaluation.
+- Cycles in the data follow the well-founded semantics of the rewrites. A
+  cycle never grants by itself: groups that only contain each other have
+  no members, and a cycle cannot cancel the subtraction of an
+  `Exclusion`. A relation that depends on its own exclusion ("viewers are
+  the users who are not viewers") has no answer, and `Check` fails closed
+  with `ErrExclusionCycle`.
 - Depth and evaluation count are bounded. Exceeding either limit returns
   `false` with `ErrTooComplex`.
 - Store errors fail closed: `Check` returns `false` with the error.
+- `CheckBulk` runs many checks in one call. They share store reads and
+  the relations they decide on the way; results come back in order, each
+  with its own error.
+- `WithConcurrency(n)` evaluates up to `n` branches of a check (and items
+  of `CheckBulk`) in parallel, which helps with network stores. Once a
+  branch decides, its siblings are cancelled. The evaluation limit is
+  shared by all branches: a check that exceeds it fails, even if a branch
+  granted first.
 
 To check permissions for an authenticated request, map its Principal to a
 subject:
