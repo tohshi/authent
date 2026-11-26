@@ -303,7 +303,7 @@ keys.Revoke(ctx, rec.ID)
 prov, _ := oidc.Discover(ctx, "https://accounts.example.com", nil)
 client, _ := oidc.NewClient(prov, oidc.Config{ClientID: id, ClientSecret: secret, RedirectURL: cb})
 
-req, _ := client.AuthCodeURL() // keep req.State, Nonce and CodeVerifier server-side
+req, _ := client.AuthCodeURL() // store all of req server-side, bound to the browser
 // ... redirect to req.URL and receive the callback ...
 res, err := client.Exchange(ctx, req, r.URL.Query().Get("state"), r.URL.Query().Get("code"))
 
@@ -335,14 +335,18 @@ req, _ := client.AuthCodeURL(
 	oauth2.SetAuthURLParam("acr_values", "urn:example:mfa"))
 ```
   With `max_age`, the ID token must carry an `auth_time` at most that many
-  seconds old. With `acr_values`, its `acr` must be one of the requested
-  values, as for an essential claim. Both are kept in the `AuthRequest`.
+  seconds old, plus `Config.Leeway`, so `max_age=0` still accepts an
+  authentication within the leeway. With `acr_values`, its `acr` must be
+  one of the requested values, as for an essential claim. Both are kept in
+  the `AuthRequest`, so store all of it: `Exchange` fails rather than skip
+  the checks if `MaxAge` or `ACRValues` are lost.
 
 `UserInfo` calls the provider's UserInfo endpoint with the access token and
 rejects the response unless its `sub` exactly matches the ID token's. A
 signed response (`application/jwt`) must also verify with the provider's
 keys and carry the provider as `iss` and the client in `aud`; it needs no
-`exp`. Encrypted responses are rejected. Redirects are not followed, so the
+`exp`. With `Config.RequireSignedUserInfo`, plain JSON responses are
+rejected. Encrypted responses are always rejected. Redirects are not followed, so the
 access token is never sent anywhere but the advertised https endpoint.
 
 `Refresh` uses a `Result`'s refresh token and returns the next `Result`:
@@ -366,6 +370,10 @@ u, _ := client.EndSessionURL(oidc.EndSession{
 l, err := client.FrontChannelLogout(r.URL.Query())
 
 // Back-channel: POST on the backchannel_logout_uri.
+r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/x-www-form-urlencoded" {
+	// reply 400
+}
 l, err := client.BackChannelLogout(ctx, r.PostFormValue("logout_token"))
 // end every local session whose ID token l.Matches; reply 200, or 400 on error
 ```

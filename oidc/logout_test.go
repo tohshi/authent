@@ -244,6 +244,28 @@ func TestBackChannelLogoutReplay(t *testing.T) {
 	}
 }
 
+func TestBackChannelLogoutRejectionKeepsJTI(t *testing.T) {
+	ctx := context.Background()
+	p := newFakeProvider(t)
+	c := newClient(t, p)
+	for name, mutate := range map[string]func(*jwt.Claims){
+		"nonce":               func(c *jwt.Claims) { c.Extra["nonce"] = "n" },
+		"no event":            func(c *jwt.Claims) { delete(c.Extra, "events") },
+		"neither sub nor sid": func(c *jwt.Claims) { c.Subject = ""; delete(c.Extra, "sid") },
+	} {
+		valid := validLogoutClaims(p)
+		invalid := validLogoutClaims(p)
+		invalid.ID = valid.ID
+		mutate(&invalid)
+		if _, err := c.BackChannelLogout(ctx, signLogoutToken(t, p.signerKey, logoutTokenType, invalid)); !errors.Is(err, ErrInvalidLogout) {
+			t.Fatalf("%s: err = %v", name, err)
+		}
+		if _, err := c.BackChannelLogout(ctx, signLogoutToken(t, p.signerKey, logoutTokenType, valid)); err != nil {
+			t.Errorf("%s: a rejected token used up the jti: %v", name, err)
+		}
+	}
+}
+
 type failingCache struct{}
 
 func (failingCache) Add(context.Context, string, time.Duration) (bool, error) {

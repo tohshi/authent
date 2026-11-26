@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"slices"
 
 	"golang.org/x/oauth2"
@@ -31,8 +30,10 @@ var ErrRefreshRejected = fmt.Errorf("oidc: refresh rejected: %w", authent.ErrUna
 // the same "nonce" if it has one. Without a new ID token, the result
 // keeps prev's.
 //
-// A refresh token rejected with a 4xx status wraps ErrRefreshRejected.
-// Network errors and 5xx statuses do not wrap authent.ErrUnauthenticated.
+// A refresh rejected with an OAuth error response (a 400 or 401 with an
+// error code such as invalid_grant) wraps ErrRefreshRejected. Network
+// errors and other statuses, such as 408, 429 or 5xx, do not wrap
+// authent.ErrUnauthenticated.
 func (c *Client) Refresh(ctx context.Context, prev *Result) (*Result, error) {
 	if prev == nil || prev.Token == nil || prev.Token.RefreshToken == "" {
 		return nil, errors.New("oidc: refresh: no refresh token")
@@ -44,8 +45,7 @@ func (c *Client) Refresh(ctx context.Context, prev *Result) (*Result, error) {
 		&oauth2.Token{RefreshToken: prev.Token.RefreshToken})
 	tok, err := src.Token()
 	if err != nil {
-		if re, ok := errors.AsType[*oauth2.RetrieveError](err); ok && re.Response != nil &&
-			re.Response.StatusCode >= http.StatusBadRequest && re.Response.StatusCode < http.StatusInternalServerError {
+		if tokenRejected(err) {
 			return nil, fmt.Errorf("%w: %w", ErrRefreshRejected, err)
 		}
 		return nil, fmt.Errorf("oidc: refresh: %w", err)

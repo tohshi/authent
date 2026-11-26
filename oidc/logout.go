@@ -123,8 +123,9 @@ func (c *Client) FrontChannelLogout(query url.Values) (*Logout, error) {
 // The token is verified like an ID token, and must also have the "typ"
 // header logout+jwt, the back-channel logout event, a "sub" or "sid", no
 // "nonce", an "iat" at most two minutes old (plus the leeway), and a "jti"
-// not seen before by Config.ReplayCache. A token is accepted only once,
-// even if ending the sessions then fails.
+// not seen before by Config.ReplayCache. The jti is recorded once every
+// check has passed, so a token is accepted only once, even if ending the
+// sessions then fails.
 //
 // Rejections wrap ErrInvalidLogout or a jwt error, and
 // authent.ErrUnauthenticated. Errors from the key set or the replay cache
@@ -147,6 +148,11 @@ func (c *Client) BackChannelLogout(ctx context.Context, logoutToken string) (*Lo
 	}
 	if claims.Subject == "" && sid == "" {
 		return nil, fmt.Errorf("%w: neither sub nor sid", ErrInvalidLogout)
+	}
+	// Verified again, recording the jti, only now that every check has
+	// passed, so that a rejected token does not use up its jti.
+	if _, err := c.logoutReplay.Verify(ctx, logoutToken); err != nil {
+		return nil, err
 	}
 	return &Logout{Issuer: claims.Issuer, Subject: claims.Subject, SessionID: sid}, nil
 }

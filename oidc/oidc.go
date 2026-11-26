@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json/v2"
@@ -182,6 +183,9 @@ type Config struct {
 	// DPoP-bound access token. Use HTTPClient to call resource servers
 	// with the token.
 	DPoP *dpop.Prover
+	// RequireSignedUserInfo makes UserInfo reject plain JSON responses,
+	// for clients registered with userinfo_signed_response_alg.
+	RequireSignedUserInfo bool
 	// ReplayCache records the "jti" of back-channel logout tokens, so that
 	// each is accepted once. The default is an in-memory cache, which
 	// suits a single server; behind a load balancer, use a shared one such
@@ -212,6 +216,8 @@ type Client struct {
 	idTokenVerifier   *jwt.Verifier
 	userInfoVerifier  *jwt.Verifier
 	logoutVerifier    *jwt.Verifier
+	logoutReplay      *jwt.Verifier // logoutVerifier, recording each jti
+	signedUserInfo    bool
 	client            *http.Client // for the token and PAR endpoints; see tokenEndpointClient
 	base              *http.Client // Config.HTTPClient
 	dpop              *dpop.Prover
@@ -293,9 +299,13 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 	if cfg.ReplayCache == nil {
 		cfg.ReplayCache = jwt.NewMemoryReplayCache()
 	}
-	logout, err := jwt.NewVerifier(keys, append(slices.Clip(idTokenOpts),
-		jwt.WithExpectedType(logoutTokenType), jwt.WithMaxTokenAge(maxLogoutTokenAge),
-		jwt.WithReplayCache(cfg.ReplayCache))...)
+	logoutOpts := append(slices.Clip(idTokenOpts),
+		jwt.WithExpectedType(logoutTokenType), jwt.WithMaxTokenAge(maxLogoutTokenAge))
+	logout, err := jwt.NewVerifier(keys, logoutOpts...)
+	if err != nil {
+		return nil, err
+	}
+	logoutReplay, err := jwt.NewVerifier(keys, append(logoutOpts, jwt.WithReplayCache(cfg.ReplayCache))...)
 	if err != nil {
 		return nil, err
 	}
@@ -324,6 +334,8 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 		idTokenVerifier:   verifier,
 		userInfoVerifier:  userinfo,
 		logoutVerifier:    logout,
+		logoutReplay:      logoutReplay,
+		signedUserInfo:    cfg.RequireSignedUserInfo,
 		base:              cfg.HTTPClient,
 		dpop:              cfg.DPoP,
 		assertionSigner:   assertionSigner,
@@ -409,9 +421,10 @@ func defaultAlgorithms(advertised []string) []jwt.Algorithm {
 	return out
 }
 
-// AuthRequest is an authorization request in flight. Keep State, Nonce and
-// CodeVerifier server-side, bound to the user's browser (for example in a
-// pre-login session), and never expose CodeVerifier to the client.
+// AuthRequest is an authorization request in flight. Store all of it
+// server-side, bound to the user's browser (for example in a pre-login
+// session), and never expose CodeVerifier to the client. Exchange fails if
+// MaxAge or ACRValues are lost, since their checks would be skipped.
 type AuthRequest struct {
 	URL          string
 	State        string
@@ -421,8 +434,9 @@ type AuthRequest struct {
 	// §2.2); redirect before then. It is zero for AuthCodeURL.
 	Expiry time.Time
 	// MaxAge is the "max_age" request parameter, if one was sent. Exchange
-	// then requires an "auth_time" no older than MaxAge (OpenID Connect
-	// Core §3.1.2.1).
+	// then requires an "auth_time" no older than MaxAge plus
+	// Config.Leeway (OpenID Connect Core §3.1.2.1), so zero still accepts
+	// an authentication within the leeway.
 	MaxAge *time.Duration
 	// ACRValues are the values of the "acr_values" request parameter.
 	// Exchange then requires the ID token's "acr" to be one of them, as
@@ -474,10 +488,7 @@ func (c *Client) newAuthRequest(opts []oauth2.AuthCodeOption) (AuthRequest, url.
 		return AuthRequest{}, nil, err
 	}
 	verifier := oauth2.GenerateVerifier()
-	opts = append([]oauth2.AuthCodeOption{
-		oauth2.S256ChallengeOption(verifier),
-		oauth2.SetAuthURLParam("nonce", nonce),
-	}, opts...)
+	opts = append([]oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}, opts...)
 	// A Config without AuthURL renders just "?" and the parameters. It is
 	// built afresh because oauth2.Config must not be copied.
 	cfg := oauth2.Config{ClientID: c.oauth.ClientID, RedirectURL: c.oauth.RedirectURL, Scopes: c.oauth.Scopes}
@@ -498,7 +509,24 @@ func (c *Client) newAuthRequest(opts []oauth2.AuthCodeOption) (AuthRequest, url.
 			return AuthRequest{}, nil, errors.New("oidc: empty acr_values")
 		}
 	}
+	req.Nonce += req.policyTag()
+	params.Set("nonce", req.Nonce)
 	return req, params, nil
+}
+
+// policyTag binds MaxAge and ACRValues to the nonce. Exchange recomputes
+// it, so an AuthRequest stored without them fails instead of skipping
+// their checks.
+func (r AuthRequest) policyTag() string {
+	if r.MaxAge == nil && len(r.ACRValues) == 0 {
+		return ""
+	}
+	maxAge := "-"
+	if r.MaxAge != nil {
+		maxAge = strconv.FormatInt(int64(*r.MaxAge/time.Second), 10)
+	}
+	sum := sha256.Sum256([]byte(maxAge + " " + strings.Join(r.ACRValues, " ")))
+	return "." + base64.RawURLEncoding.EncodeToString(sum[:16])
 }
 
 func parseMaxAge(v []string) (time.Duration, error) {
@@ -670,11 +698,14 @@ func (c *Client) Exchange(ctx context.Context, req AuthRequest, state, code stri
 	if code == "" {
 		return nil, fmt.Errorf("%w: empty code", ErrExchangeRejected)
 	}
+	if random, _, _ := strings.Cut(req.Nonce, "."); req.Nonce != random+req.policyTag() {
+		return nil, errors.New("oidc: AuthRequest lacks the MaxAge or ACRValues it was created with; store all of it")
+	}
 
 	tok, err := c.oauth.Exchange(context.WithValue(ctx, oauth2.HTTPClient, c.client), code,
 		oauth2.VerifierOption(req.CodeVerifier))
 	if err != nil {
-		if _, ok := errors.AsType[*oauth2.RetrieveError](err); ok {
+		if tokenRejected(err) {
 			return nil, fmt.Errorf("%w: %w", ErrExchangeRejected, err)
 		}
 		return nil, fmt.Errorf("oidc: token exchange: %w", err)
@@ -713,6 +744,15 @@ func (c *Client) Exchange(ctx context.Context, req AuthRequest, state, code stri
 		return nil, err
 	}
 	return &Result{Principal: p, IDToken: claims, RawIDToken: raw, Token: tok}, nil
+}
+
+// tokenRejected reports whether err is a token endpoint error response
+// (RFC 6749 §5.2): a 400 or 401 with an OAuth error code. Anything else,
+// such as a 408, 429 or 5xx status, is an infrastructure failure.
+func tokenRejected(err error) bool {
+	re, ok := errors.AsType[*oauth2.RetrieveError](err)
+	return ok && re.ErrorCode != "" && re.Response != nil &&
+		(re.Response.StatusCode == http.StatusBadRequest || re.Response.StatusCode == http.StatusUnauthorized)
 }
 
 // checkTokenType refuses a Bearer token when DPoP is configured. RFC 9449

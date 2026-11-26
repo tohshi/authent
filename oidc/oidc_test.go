@@ -55,7 +55,10 @@ type fakeProvider struct {
 	rotateRefresh      bool
 	mutateRefresh      func(c *jwt.Claims)
 	omitRefreshIDToken bool
-	tokenUnavailable   bool
+	tokenFailure       struct {
+		status int
+		body   string
+	}
 	// userinfo overrides the UserInfo response for a valid access token.
 	userinfo          func(w http.ResponseWriter, r *http.Request)
 	authMethods       []string
@@ -181,7 +184,7 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !p.clientAuthenticated(r) {
-		w.WriteHeader(http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "invalid_client")
 		return
 	}
 	// The proof is checked before the code is looked up, so that a
@@ -196,10 +199,12 @@ func (p *fakeProvider) token(w http.ResponseWriter, r *http.Request) {
 		jkt = proof.JKT
 	}
 	p.mu.Lock()
-	unavailable := p.tokenUnavailable
+	failure := p.tokenFailure
 	p.mu.Unlock()
-	if unavailable {
-		writeError(w, http.StatusServiceUnavailable, "temporarily_unavailable")
+	if failure.status != 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(failure.status)
+		_, _ = w.Write([]byte(failure.body))
 		return
 	}
 

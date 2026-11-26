@@ -124,6 +124,39 @@ func TestMaxAgeAndACRRejections(t *testing.T) {
 	}
 }
 
+func TestExchangeRejectsTruncatedAuthRequest(t *testing.T) {
+	zero := time.Duration(0)
+	for name, tc := range map[string]struct {
+		opts   []oauth2.AuthCodeOption
+		change func(*AuthRequest)
+	}{
+		"MaxAge dropped":       {[]oauth2.AuthCodeOption{maxAge5m}, func(r *AuthRequest) { r.MaxAge = nil }},
+		"MaxAge changed":       {[]oauth2.AuthCodeOption{maxAge5m}, func(r *AuthRequest) { r.MaxAge = &zero }},
+		"ACRValues dropped":    {[]oauth2.AuthCodeOption{acrMFAOrHW}, func(r *AuthRequest) { r.ACRValues = nil }},
+		"ACRValues narrowed":   {[]oauth2.AuthCodeOption{acrMFAOrHW}, func(r *AuthRequest) { r.ACRValues = r.ACRValues[:1] }},
+		"MaxAge added":         {nil, func(r *AuthRequest) { r.MaxAge = &zero }},
+		"only State and Nonce": {[]oauth2.AuthCodeOption{maxAge5m, acrMFAOrHW}, func(r *AuthRequest) { *r = AuthRequest{State: r.State, Nonce: r.Nonce, CodeVerifier: r.CodeVerifier} }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newFakeProvider(t)
+			p.mutate = func(c *jwt.Claims) {
+				c.Extra["auth_time"] = now.Unix()
+				c.Extra["acr"] = "urn:example:mfa"
+			}
+			c := newClient(t, p)
+			req, err := c.AuthCodeURL(tc.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, code := p.authorize(t, req.URL)
+			tc.change(&req)
+			if res, err := c.Exchange(context.Background(), req, state, code); err == nil {
+				t.Fatalf("Exchange = %+v with a changed AuthRequest", res.Principal)
+			}
+		})
+	}
+}
+
 func TestAuthCodeURLRejectsInvalidMaxAgeAndACR(t *testing.T) {
 	c := newClient(t, newFakeProvider(t))
 	for _, opt := range []oauth2.AuthCodeOption{
