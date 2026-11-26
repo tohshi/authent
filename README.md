@@ -148,17 +148,20 @@ Optional checks:
   once. `jti` becomes required, and the `iss` and `jti` pair is recorded
   until `exp` once every other check has passed. A cache error rejects the
   token but does not wrap `authent.ErrUnauthenticated`. `dpop.Verifier`
-  takes the same `jwt.ReplayCache` interface.
+  takes the same `jwt.ReplayCache` interface. Use it for single-use
+  tokens (ID tokens, logout tokens, client assertions, request objects),
+  not for access tokens, which clients send many times.
 - `jwt.WithMaxTokenAge(d)` rejects tokens issued more than `d` ago and
   makes `iat` required. `jwt.WithMaxAuthAge(d)` does the same for
-  `auth_time`, as OpenID Connect `max_age` requires. Both allow the
-  leeway on top of `d`. `Claims.AuthTime` reads `auth_time` for
+  `auth_time`, as OpenID Connect `max_age` requires, and rejects an
+  `auth_time` in the future. Both allow the leeway on top of `d`. `Claims.AuthTime` reads `auth_time` for
   per-request checks.
 - `jwt.WithCertificateRoots(pool)` only uses JWKs whose `x5c` chain
   verifies to `pool` at the verifier's clock, with a leaf allowed to make
   digital signatures. Keys without `x5c` are not used. Independently of
   this option, a JWK whose `x5c` leaf certifies a different key is
-  rejected when parsed.
+  rejected when parsed, and a JWK built in code with such a chain is not
+  used under `WithCertificateRoots`.
 
 A signing key can come from a private JWK:
 ```go

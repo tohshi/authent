@@ -90,7 +90,8 @@ func WithMaxTokenAge(d time.Duration) VerifierOption {
 
 // WithMaxAuthAge rejects tokens whose subject authenticated more than d
 // ago, plus the leeway, with ErrAuthenticationTooOld, as OpenID Connect
-// "max_age" requires. "auth_time" becomes required. Zero accepts only an
+// "max_age" requires. "auth_time" becomes required, and one later than
+// now plus the leeway fails with ErrIssuedInFuture. Zero accepts only an
 // authentication within the leeway.
 func WithMaxAuthAge(d time.Duration) VerifierOption {
 	return func(v *Verifier) { v.maxAuthAge = &d }
@@ -108,6 +109,10 @@ func WithCertificateRoots(roots *x509.CertPool) VerifierOption {
 // and the pair of "iss" and "jti" is recorded in c until "exp" (plus the
 // leeway) once every other check has passed. A replayed token fails with
 // ErrReplayed. Errors from c reject the token and are returned as is.
+//
+// Use it for single-use tokens such as ID tokens, logout tokens, client
+// assertions and request objects, not for access tokens, which a client
+// sends many times.
 func WithReplayCache(c ReplayCache) VerifierOption { return func(v *Verifier) { v.replay = c } }
 
 // WithClock overrides the clock, for tests.
@@ -277,7 +282,7 @@ func (v *Verifier) validate(c *Claims) error {
 		if c.IssuedAt.IsZero() {
 			return fmt.Errorf("%w: iat", ErrMissingClaim)
 		}
-		if now.After(c.IssuedAt.Add(*v.maxTokenAge + v.leeway)) {
+		if v.olderThan(now, c.IssuedAt.Time, *v.maxTokenAge) {
 			return ErrTokenTooOld
 		}
 	}
@@ -289,7 +294,10 @@ func (v *Verifier) validate(c *Claims) error {
 		if at.IsZero() {
 			return fmt.Errorf("%w: auth_time", ErrMissingClaim)
 		}
-		if now.After(at.Add(*v.maxAuthAge + v.leeway)) {
+		if now.Add(v.leeway).Before(at) {
+			return fmt.Errorf("%w: auth_time", ErrIssuedInFuture)
+		}
+		if v.olderThan(now, at, *v.maxAuthAge) {
 			return ErrAuthenticationTooOld
 		}
 	}
@@ -308,6 +316,14 @@ func (v *Verifier) validate(c *Claims) error {
 		return fmt.Errorf("%w: jti", ErrMissingClaim)
 	}
 	return nil
+}
+
+// olderThan reports whether more than limit plus the leeway passed since
+// t. It compares differences so that a limit near math.MaxInt64 cannot
+// overflow into a negative limit.
+func (v *Verifier) olderThan(now, t time.Time, limit time.Duration) bool {
+	age := now.Sub(t)
+	return age > limit && age-limit > v.leeway
 }
 
 // Authenticate verifies token and returns its Principal. "sub" is
