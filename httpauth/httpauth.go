@@ -34,6 +34,10 @@ var (
 	// ErrForbidden.
 	ErrCSRF = fmt.Errorf("%w: CSRF token mismatch", ErrForbidden)
 
+	// errEmptySubject is an Authenticator bug, not a client error, so it
+	// gives 500 instead of granting an anonymous Principal.
+	errEmptySubject = errors.New("httpauth: authenticator returned a Principal without a subject")
+
 	errMalformedHeader = fmt.Errorf("httpauth: malformed Authorization header: %w", authent.ErrUnauthenticated)
 )
 
@@ -115,6 +119,8 @@ func middleware(a Authenticator, required bool, opts []Option) func(http.Handler
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p, err := a.AuthenticateRequest(r)
 			switch {
+			case err == nil && p.Subject == "":
+				c.onError(w, r, errEmptySubject)
 			case err == nil:
 				next.ServeHTTP(w, r.WithContext(authent.NewContext(r.Context(), p)))
 			case !required && errors.Is(err, ErrNoCredentials):
@@ -160,10 +166,14 @@ func (a anyOf) Challenge(err error) string {
 
 // BearerToken extracts the token from an Authorization header value that
 // uses the Bearer scheme (RFC 6750 §2.1). Other schemes and an empty value
-// return ErrNoCredentials.
+// return ErrNoCredentials; the Bearer scheme with a missing or malformed
+// token is rejected.
 func BearerToken(authorization string) (string, error) {
-	scheme, token, ok := strings.Cut(authorization, " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") {
+	scheme, token := authorization, ""
+	if i := strings.IndexAny(authorization, " \t"); i >= 0 {
+		scheme, token = authorization[:i], authorization[i:]
+	}
+	if !strings.EqualFold(scheme, "Bearer") {
 		return "", ErrNoCredentials
 	}
 	token = strings.TrimLeft(token, " ")

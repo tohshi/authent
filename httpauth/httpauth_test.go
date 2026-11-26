@@ -143,12 +143,12 @@ func TestBearerToken(t *testing.T) {
 			t.Errorf("BearerToken(%q) = %q, %v, want %q", in, got, err, want)
 		}
 	}
-	for _, in := range []string{"", "Bearer", "Basic abc", "Bearerabc", "DPoP abc"} {
+	for _, in := range []string{"", "Basic abc", "Bearerabc", "DPoP abc"} {
 		if _, err := httpauth.BearerToken(in); !errors.Is(err, httpauth.ErrNoCredentials) {
 			t.Errorf("BearerToken(%q): err = %v, want ErrNoCredentials", in, err)
 		}
 	}
-	for _, in := range []string{"Bearer ", "Bearer a b", "Bearer =", "Bearer a=b", "Bearer a\tb", "Bearer ä"} {
+	for _, in := range []string{"Bearer", "bearer", "Bearer ", "Bearer\t", "Bearer\tabc", "Bearer a b", "Bearer =", "Bearer a=b", "Bearer a\tb", "Bearer ä"} {
 		_, err := httpauth.BearerToken(in)
 		if !errors.Is(err, authent.ErrUnauthenticated) || errors.Is(err, httpauth.ErrNoCredentials) {
 			t.Errorf("BearerToken(%q): err = %v, want a rejected token", in, err)
@@ -280,6 +280,20 @@ func TestSessionCookie(t *testing.T) {
 		}
 		if w.Header().Get("WWW-Authenticate") != "" {
 			t.Errorf("%s: unexpected challenge for a cookie", c.name)
+		}
+	}
+}
+
+func TestEmptySubjectIsRejected(t *testing.T) {
+	empty := httpauth.AuthenticatorFunc(func(*http.Request) (authent.Principal, error) {
+		return authent.Principal{}, nil
+	})
+	for name, mw := range map[string]func(http.Handler) http.Handler{
+		"Require":  httpauth.Require(empty),
+		"Optional": httpauth.Optional(empty),
+	} {
+		if w := serve(mw(whoami), httptest.NewRequest(http.MethodGet, "/", nil)); w.Code != http.StatusInternalServerError {
+			t.Errorf("%s: status = %d, want 500", name, w.Code)
 		}
 	}
 }
