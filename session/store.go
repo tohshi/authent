@@ -40,8 +40,9 @@ type Store interface {
 	// Load returns ErrNotFound if key is unknown or has expired.
 	Load(ctx context.Context, key string) (Record, error)
 	// Save stores r under key as one atomic compare-and-swap. If r.Version
-	// is 1, key must be new; otherwise key must hold version r.Version-1.
-	// If not, Save returns ErrConflict and changes nothing.
+	// is 1, key must hold no unexpired record; otherwise it must hold
+	// version r.Version-1. If not, Save returns ErrConflict and changes
+	// nothing.
 	Save(ctx context.Context, key string, r Record) error
 	// Delete removes key. If version is not 0, it removes key only if key
 	// holds that version, and returns ErrConflict otherwise. Deleting an

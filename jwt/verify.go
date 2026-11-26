@@ -27,6 +27,7 @@ type Verifier struct {
 	allowCnf    bool
 	leeway      time.Duration
 	maxSize     int
+	optionalExp bool
 	replay      ReplayCache
 	maxTokenAge *time.Duration
 	maxAuthAge  *time.Duration
@@ -77,6 +78,13 @@ func WithConfirmationClaim() VerifierOption { return func(v *Verifier) { v.allow
 
 // WithLeeway tolerates clock skew when checking exp, nbf and iat.
 func WithLeeway(d time.Duration) VerifierOption { return func(v *Verifier) { v.leeway = d } }
+
+// WithOptionalExpiration accepts tokens without an "exp" claim; one that
+// is present is still checked. Use it only for JWTs that are consumed as
+// soon as they arrive over an authenticated channel, such as a signed
+// OpenID Connect UserInfo response. It cannot be combined with
+// WithReplayCache, which needs "exp" to know how long to remember a token.
+func WithOptionalExpiration() VerifierOption { return func(v *Verifier) { v.optionalExp = true } }
 
 // WithMaxTokenSize bounds the token length. The default is
 // DefaultMaxTokenSize.
@@ -147,6 +155,9 @@ func NewVerifier(keys KeySet, opts ...VerifierOption) (*Verifier, error) {
 	if v.leeway < 0 {
 		return nil, errors.New("jwt: negative leeway")
 	}
+	if v.optionalExp && v.replay != nil {
+		return nil, errors.New("jwt: WithOptionalExpiration cannot be combined with WithReplayCache")
+	}
 	if (v.maxTokenAge != nil && *v.maxTokenAge < 0) || (v.maxAuthAge != nil && *v.maxAuthAge < 0) {
 		return nil, errors.New("jwt: negative maximum age")
 	}
@@ -157,8 +168,8 @@ func NewVerifier(keys KeySet, opts ...VerifierOption) (*Verifier, error) {
 // Rejections wrap ErrInvalidToken. Errors from the KeySet or the
 // ReplayCache, such as network failures, are returned as is.
 //
-// "exp" is always required. Tokens with a "cnf" claim are rejected unless
-// WithConfirmationClaim is set.
+// "exp" is required unless WithOptionalExpiration is set. Tokens with a
+// "cnf" claim are rejected unless WithConfirmationClaim is set.
 func (v *Verifier) Verify(ctx context.Context, token string) (*Claims, error) {
 	claims, _, err := v.VerifyWithHeader(ctx, token)
 	return claims, err
@@ -267,9 +278,10 @@ func (v *Verifier) verifySignature(ctx context.Context, c *compact) error {
 func (v *Verifier) validate(c *Claims) error {
 	now := v.now()
 	if c.ExpiresAt.IsZero() {
-		return fmt.Errorf("%w: exp", ErrMissingClaim)
-	}
-	if !now.Before(c.ExpiresAt.Add(v.leeway)) {
+		if !v.optionalExp {
+			return fmt.Errorf("%w: exp", ErrMissingClaim)
+		}
+	} else if !now.Before(c.ExpiresAt.Add(v.leeway)) {
 		return ErrExpired
 	}
 	if !c.NotBefore.IsZero() && now.Add(v.leeway).Before(c.NotBefore.Time) {

@@ -37,7 +37,7 @@ Legend:
 | Strict parsing | ✅ | Case-sensitive, no duplicate members, canonical base64url, size limit |
 | Rejection of `crit`, `b64`, `zip` and `enc` headers | ✅ | |
 | Never fetching keys from `jku`, `x5u` or `jwk` headers | ✅ | These headers are ignored |
-| Claim validation: `exp` (required), `nbf`, `iat`, `iss`, `aud` | ✅ | `iss` and `aud` checks must be opted out of explicitly |
+| Claim validation: `exp` (required), `nbf`, `iat`, `iss`, `aud` | ✅ | `iss` and `aud` checks must be opted out of explicitly; `WithOptionalExpiration` accepts a missing `exp`, for signed UserInfo responses |
 | Clock skew leeway | ✅ | |
 | `typ` check | ✅ | For example `at+jwt` (RFC 9068) |
 | Conversion to `authent.Principal` | ✅ | Uses `auth_time` when present |
@@ -68,7 +68,7 @@ Legend:
 | Validation of the token format before the store lookup | ✅ | |
 | Per-session CSRF token | ✅ | Synchronizer token pattern; compared in constant time |
 | Pluggable store and `MemoryStore` | ✅ | |
-| Redis or SQL stores | ✅ | `SQLStore` for PostgreSQL, MySQL and SQLite through `database/sql`; bring your own driver. Expiry column with `DeleteExpired` |
+| Redis or SQL stores | ✅ | `SQLStore` for PostgreSQL, MySQL and SQLite through `database/sql`; bring your own driver. Expiry column with `DeleteExpired`. Redis with TTLs in the separate `github.com/tohshi/authent/redis` module (`redissession`) |
 | Revoking all sessions of a subject ("log out everywhere") | ✅ | `RevokeAll`; every `Store` keeps a subject index. A concurrent rotation does not survive it |
 | Listing a subject's active sessions | ✅ | `List` returns sessions without tokens; `Revoke` ends one by its handle, only for its own subject |
 | Conflict detection on concurrent saves | ✅ | Versioned records with compare-and-swap in every store; `ErrConflict` on a lost race |
@@ -88,14 +88,14 @@ Legend:
 | `client_secret_basic` / `client_secret_post` | ✅ | Through `x/oauth2` |
 | Distinguishing rejected exchanges from network errors | ✅ | |
 | UserInfo endpoint | ✅ | `sub` must match the ID token; https only; redirects are not followed; Bearer or DPoP tokens |
-| Signed UserInfo responses (`application/jwt`) | ⬜ | Currently rejected; needs JWT verification without `exp`. Encrypted responses are out of scope along with JWE |
-| Refresh token helper | ⬜ | `HTTPClient` refreshes through `x/oauth2`, but refreshed ID tokens are not verified and `private_key_jwt` clients cannot refresh |
+| Signed UserInfo responses (`application/jwt`) | ✅ | Signature, `iss` and `aud` verified like an ID token, `exp` optional, `sub` must match; `RequireSignedUserInfo` rejects unsigned ones. Encrypted responses are rejected; JWE is out of scope |
+| Refresh token helper | ✅ | `Refresh` works with every client authentication method, including `private_key_jwt`, and with DPoP; it keeps a rotated refresh token and checks a new ID token against the original (OpenID Connect Core §12.2). `HTTPClient` refreshes the same way but discards new ID tokens |
 | Calling APIs with the access token (`HTTPClient`) | ✅ | Bearer, or DPoP when configured |
-| `max_age`, `auth_time` and `acr` enforcement | ⬜ | |
+| `max_age`, `auth_time` and `acr` enforcement | ✅ | `max_age` and `acr_values` sent with the request are kept in `AuthRequest`; `Exchange` then requires a recent enough `auth_time` and an `acr` from the requested values |
 | `private_key_jwt` client authentication | ✅ | Asymmetric JWT assertion on each code exchange; issuer audience per RFC 10070 |
-| RP-initiated, front-channel and back-channel logout | ⬜ | |
+| RP-initiated, front-channel and back-channel logout | ✅ | `EndSessionURL` with `id_token_hint`, `post_logout_redirect_uri` and `state`; `FrontChannelLogout` requires `iss` and `sid`; `BackChannelLogout` checks `typ` `logout+jwt`, the event, `sub` or `sid`, no `nonce`, a fresh `iat` and a single-use `jti`. Both return a `Logout` that `Matches` the ID tokens of the ended sessions |
 | Pushed authorization requests (RFC 9126) | ✅ | `PushAuthCodeURL`; honors `require_pushed_authorization_requests`; client secret or `private_key_jwt` |
-| JWT-secured authorization requests (JAR, RFC 9101) | ⬜ | |
+| JWT-secured authorization requests (JAR, RFC 9101) | ✅ | `Config.JAR` signs every request with the `private_key_jwt` key: `typ` `oauth-authz-req+jwt`, `iss`, `aud`, `iat`, `nbf`, a five-minute `exp` and a random `jti`. Sent by value from `AuthCodeURL` or inside the pushed request; honors `require_signed_request_object` |
 | DPoP-bound tokens (RFC 9449) | ✅ | `dpop_jkt` or a proof on the pushed request; `Exchange` rejects a Bearer downgrade |
 | Implicit and hybrid flows (`c_hash`) | ➖ | Discouraged by current OAuth security best practice |
 
@@ -111,9 +111,9 @@ Legend:
 | Server nonce validation | ✅ | Pluggable `WithNonce`; issuing nonces is up to the caller |
 | Resource server `Authenticator` for JWT access tokens | ✅ | Checks `cnf.jkt` against the proof key |
 | `WWW-Authenticate` challenges | ✅ | `Challenge` with `algs` and error codes |
-| Opaque tokens (introspection, RFC 9449 §6.2) | ⬜ | Use `Verifier` with `Request.JKT` from the introspection response |
+| Opaque tokens (introspection, RFC 9449 §6.2) | ✅ | `Introspector` (RFC 7662, `client_secret_basic`) as the token verifier of `Authenticator`; the proof key must match `cnf.jkt` |
 | Authorization server side (issuing bound tokens) | ➖ | Same reason as the OAuth 2.0 authorization server below |
-| Shared replay cache stores (Redis, SQL) | ⬜ | |
+| Shared replay cache stores (Redis, SQL) | ✅ | `jwt/sqlreplay` for PostgreSQL and SQLite; `redisreplay` (SET NX with an expiry) in the separate `redis` module; both pass the `jwt/replaytest` conformance suite against real servers |
 
 ## rebac
 

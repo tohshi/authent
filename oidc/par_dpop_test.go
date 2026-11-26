@@ -77,12 +77,32 @@ func (p *fakeProvider) pushAuthorization(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusUnauthorized, "invalid_client")
 		return
 	}
-	if r.PostForm.Has("request_uri") || r.PostForm.Get("redirect_uri") != redirectURL {
+	params := maps.Clone(r.PostForm)
+	if r.PostForm.Has("request") {
+		// RFC 9126 §3: everything but client authentication is in the
+		// request object.
+		for name := range r.PostForm {
+			if name != "request" && name != "client_id" && name != "client_assertion" && name != "client_assertion_type" {
+				writeError(w, http.StatusBadRequest, "invalid_request")
+				return
+			}
+		}
+		var err error
+		if params, err = p.openRequestObject(r.PostForm.Get("request"), r.PostForm.Get("client_id")); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request_object")
+			return
+		}
+	} else if p.requireJAR {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	params := maps.Clone(r.PostForm)
+	if params.Has("request_uri") || params.Get("redirect_uri") != redirectURL {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
 	params.Del("client_secret")
+	params.Del("client_assertion")
+	params.Del("client_assertion_type")
 	// RFC 9449 §10.1: a proof on the PAR request binds the code like
 	// dpop_jkt does.
 	if r.Header.Get(dpop.HeaderName) != "" {
