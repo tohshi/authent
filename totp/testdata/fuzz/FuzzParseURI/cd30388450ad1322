@@ -1,0 +1,2 @@
+go test fuzz v1
+string("otpauth://totp/ ?secret=2222222222222222222222222A&issuer=0")
