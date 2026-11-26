@@ -93,11 +93,14 @@ if fields[1] then redis.call('ZREM', ARGV[2] .. fields[1], ARGV[3]) end
 return 1
 `)
 
-// deleteSubjectScript deletes the sessions listed in a subject's index and
-// the index itself. ARGV[1] is the prefix of session keys.
+// deleteSubjectScript deletes the sessions listed in a subject's index
+// that still belong to the subject (ARGV[2]), and the index itself.
+// ARGV[1] is the prefix of session keys.
 var deleteSubjectScript = redis.NewScript(`
 for _, key in ipairs(redis.call('ZRANGE', KEYS[1], 0, -1)) do
-	redis.call('DEL', ARGV[1] .. key)
+	if redis.call('HGET', ARGV[1] .. key, 's') == ARGV[2] then
+		redis.call('DEL', ARGV[1] .. key)
+	end
 end
 redis.call('DEL', KEYS[1])
 return 1
@@ -202,7 +205,7 @@ func (s *Store) List(ctx context.Context, subject string) (map[string]session.Re
 }
 
 func (s *Store) DeleteSubject(ctx context.Context, subject string) error {
-	if err := deleteSubjectScript.Run(ctx, s.client, []string{s.subjectKey(subject)}, s.prefix+"k:").Err(); err != nil {
+	if err := deleteSubjectScript.Run(ctx, s.client, []string{s.subjectKey(subject)}, s.prefix+"k:", subject).Err(); err != nil {
 		return fmt.Errorf("redissession: deleting sessions of subject: %w", err)
 	}
 	return nil

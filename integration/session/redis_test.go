@@ -122,3 +122,22 @@ func TestRedisStoreIndexHoldsOnlyLiveSessions(t *testing.T) {
 		}
 	}
 }
+
+func TestRedisStoreDeleteSubjectSparesOtherSubjects(t *testing.T) {
+	s, _, _ := newRedisStore(t)
+	ctx := context.Background()
+	exp := time.Now().Add(time.Minute)
+	if err := s.Save(ctx, "k", session.Record{Subject: "old", Version: 1, ExpiresAt: exp, Data: []byte("{}")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(ctx, "k", session.Record{Subject: "new", Version: 2, ExpiresAt: exp, Data: []byte("{}")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteSubject(ctx, "old"); err != nil {
+		t.Fatal(err)
+	}
+	r, err := s.Load(ctx, "k")
+	if err != nil || r.Subject != "new" {
+		t.Fatalf("DeleteSubject(old) removed a session of another subject: %+v, %v", r, err)
+	}
+}
