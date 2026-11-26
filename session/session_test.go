@@ -634,6 +634,30 @@ func TestListOrderAndHandles(t *testing.T) {
 	}
 }
 
+func TestListHidesCSRFToken(t *testing.T) {
+	m, _, _ := setup(t)
+	ctx := context.Background()
+	token, s, _ := m.Create(ctx, alice)
+	csrf := s.CSRFToken()
+	list, err := m.List(ctx, "alice")
+	if err != nil || len(list) != 1 {
+		t.Fatalf("List = %d sessions, %v", len(list), err)
+	}
+	listed := list[0]
+	if listed.CSRFToken() != "" || listed.VerifyCSRF(csrf) || listed.VerifyCSRF("") {
+		t.Fatal("a listed session reveals or accepts the CSRF token")
+	}
+	// Saving the listed copy would store its blank CSRF token.
+	set(t, listed, "k", "v")
+	if err := m.Save(ctx, listed); err == nil {
+		t.Fatal("Save of a listed session succeeded")
+	}
+	got, err := m.Get(ctx, token)
+	if err != nil || !got.VerifyCSRF(csrf) || get(got, "k") != "" {
+		t.Fatalf("session after a rejected save of its listed copy: %v", err)
+	}
+}
+
 // FuzzRevoke checks that no handle a client sends can end another
 // subject's session or reach the store unless it is well formed.
 func FuzzRevoke(f *testing.F) {

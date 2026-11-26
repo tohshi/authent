@@ -218,6 +218,10 @@ func testExpiry(t *testing.T, s session.Store) {
 	save(t, s, past, session.Record{Subject: "alice", Version: 1, ExpiresAt: time.Now().Add(-time.Second), Data: []byte("x")})
 	wantNotFound(t, s, past)
 	wantConflict(t, s.Delete(ctx, past, 1), "Delete of an expired record")
+	// An expired record counts as deleted, so its key is free again.
+	reused := record(1, "reused")
+	save(t, s, past, reused)
+	wantRecord(t, s, past, reused)
 
 	updated := newKey()
 	save(t, s, updated, record(1, "v1"))
@@ -234,6 +238,9 @@ func testExpiry(t *testing.T, s session.Store) {
 	wantNotFound(t, s, timed)
 	wantConflict(t, s.Save(ctx, timed, record(2, "v2")), "Save over an expired record")
 	wantNotFound(t, s, timed)
+	reborn := record(1, "reborn")
+	save(t, s, timed, reborn)
+	wantRecord(t, s, timed, reborn)
 }
 
 func testConcurrentSaves(t *testing.T, s session.Store) {
@@ -516,7 +523,7 @@ func testManagerListAndRevoke(t *testing.T, s session.Store) {
 	got := map[string]string{}
 	for _, sess := range list {
 		name, _, err := device.Get(sess)
-		if err != nil || sess.Subject() != "alice" || sess.Handle() == laptopToken || sess.Handle() == phoneToken {
+		if err != nil || sess.Subject() != "alice" || sess.CSRFToken() != "" || sess.Handle() == laptopToken || sess.Handle() == phoneToken {
 			t.Fatalf("listed session %q: %q, %v", sess.Handle(), name, err)
 		}
 		got[sess.Handle()] = name

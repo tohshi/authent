@@ -43,6 +43,7 @@ type Session struct {
 	st      state
 	key     string // store key of the session; set by the Manager
 	version uint64 // version of the stored record s was loaded from
+	listed  bool   // from List, without its CSRF token, so not to be saved
 }
 
 // state is the part of a session encoded into Record.Data, except for
@@ -341,8 +342,8 @@ func (m *Manager) load(ctx context.Context, key string) (*Session, error) {
 // again and reapply the change. A session past its timeout returns
 // ErrInvalidSession.
 func (m *Manager) Save(ctx context.Context, s *Session) error {
-	if s.key == "" {
-		return errors.New("session: Save of a session not obtained from the Manager")
+	if s.key == "" || s.listed {
+		return errors.New("session: Save of a session not obtained from Create, Get, Rotate or StepUp")
 	}
 	return m.save(ctx, s)
 }
@@ -439,8 +440,9 @@ func (m *Manager) Destroy(ctx context.Context, token string) error {
 }
 
 // List returns the unexpired sessions of subject, oldest first, for
-// example to show them to the subject. The sessions carry no tokens; use
-// Session.Handle to tell them apart and to revoke one.
+// example to show them to the subject. The sessions carry neither their
+// tokens nor their CSRF tokens, and Save rejects them; use Session.Handle
+// to tell them apart and to revoke one.
 func (m *Manager) List(ctx context.Context, subject string) ([]*Session, error) {
 	records, err := m.store.List(ctx, subject)
 	if err != nil {
@@ -457,6 +459,8 @@ func (m *Manager) List(ctx context.Context, subject string) ([]*Session, error) 
 			return nil, err
 		}
 		if now.Before(m.expiresAt(s)) {
+			s.st.CSRFToken = ""
+			s.listed = true
 			out = append(out, s)
 		}
 	}

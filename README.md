@@ -216,7 +216,7 @@ the `amr` claim and the most recent authentication as `AuthTime`.
 Stores index sessions by subject, so a subject's sessions can be listed
 and revoked:
 ```go
-list, err := m.List(ctx, s.Subject())  // for an account page; no tokens
+list, err := m.List(ctx, s.Subject())  // for an account page; no tokens or CSRF tokens
 err = m.Revoke(ctx, s.Subject(), handle) // handle from Session.Handle()
 err = m.RevokeAll(ctx, s.Subject())      // log out everywhere
 ```
@@ -243,6 +243,21 @@ m, _ := session.NewManager(store)
   `WHERE` clause, so concurrent saves are detected without transactions.
 - Token hashes and subjects are compared byte by byte (`COLLATE "C"` on
   PostgreSQL, `VARBINARY` on MySQL). Subjects may be up to 1024 bytes.
+
+For Redis, use the separate `github.com/tohshi/authent/redis` module, which
+keeps the go-redis dependency out of the core module:
+```go
+import "github.com/tohshi/authent/redis/redissession"
+
+store, _ := redissession.New(redis.NewClient(&redis.Options{Addr: addr}))
+m, _ := session.NewManager(store)
+```
+- Each session is a hash with a TTL, set relative to the application's
+  clock. A sorted set per subject indexes the sessions and expires with
+  the last of them, so nothing needs periodic cleanup.
+- Lua scripts make the version check and `DeleteSubject` atomic.
+- Redis Cluster is not supported, because the scripts touch keys in
+  several slots.
 
 Every stored session has a version, and stores save it with a
 compare-and-swap. `Save` returns an error wrapping `session.ErrConflict`

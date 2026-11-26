@@ -93,6 +93,8 @@ type SQLStore struct {
 	deleteVersionSQL string
 	deleteSubjectSQL string
 	deleteExpiredSQL string
+
+	deleteExpiredKeySQL string
 }
 
 // SQLStoreOption configures an SQLStore.
@@ -218,6 +220,7 @@ func (s *SQLStore) buildStatements(schema, table string) {
 	s.deleteVersionSQL = deleteSQL + "token_hash = " + p(1) + " AND version = " + p(2) + " AND expires_at > " + p(3)
 	s.deleteSubjectSQL = deleteSQL + "subject = " + p(1)
 	s.deleteExpiredSQL = deleteSQL + "expires_at <= " + p(1)
+	s.deleteExpiredKeySQL = deleteSQL + "token_hash = " + p(1) + " AND expires_at <= " + p(2)
 }
 
 // CreateTableStatements returns the statements CreateTable runs, for use
@@ -294,6 +297,12 @@ func (s *SQLStore) Save(ctx context.Context, key string, r Record) error {
 }
 
 func (s *SQLStore) insert(ctx context.Context, key string, r Record) error {
+	// An expired row counts as deleted, so it must not block the insert.
+	// Removing it first is safe without a transaction: only another insert
+	// could take the key in between, and then this one fails as it should.
+	if _, err := s.db.ExecContext(ctx, s.deleteExpiredKeySQL, key, s.now().UnixNano()); err != nil {
+		return fmt.Errorf("session: deleting expired session: %w", err)
+	}
 	_, err := s.db.ExecContext(ctx, s.insertSQL, key, r.Subject, int64(1), r.ExpiresAt.UnixNano(), r.Data)
 	if err == nil {
 		return nil
