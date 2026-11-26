@@ -162,3 +162,37 @@ func TestWatchUnavailableRevision(t *testing.T) {
 		}
 	}
 }
+
+func TestWatchIdleCursorSurvivesPrune(t *testing.T) {
+	store := NewMemoryStore()
+	e, _ := NewEngine(driveSchema(t), store, WithWatchInterval(5*time.Millisecond))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r1, _ := e.Write(ctx, []Tuple{MustParseTuple("doc:a#owner@user:x")}, nil)
+	got := make(chan error, 1)
+	go func() {
+		for c, err := range e.Watch(ctx, r1) {
+			if err == nil && c.Tuple.Subject.Object.ID != "y" {
+				err = fmt.Errorf("unexpected change %v", c)
+			}
+			got <- err
+			return
+		}
+	}()
+	// Writes that change nothing move the revision but leave no change.
+	r2, _ := e.Write(ctx, []Tuple{MustParseTuple("doc:a#owner@user:x")}, nil)
+	time.Sleep(50 * time.Millisecond)
+	if err := store.Prune(ctx, r2); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	e.Write(ctx, []Tuple{MustParseTuple("doc:a#owner@user:y")}, nil)
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatalf("Watch: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Watch did not yield the change")
+	}
+}

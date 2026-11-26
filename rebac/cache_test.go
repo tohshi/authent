@@ -38,11 +38,13 @@ func TestCheckCache(t *testing.T) {
 	check("alice", true, true)
 	check("alice", true, true, AtLeast(r1))
 
+	// A revoke takes effect at once, whatever token the caller passes.
 	r2, _ := e.Write(ctx, nil, []Tuple{MustParseTuple("doc:d#owner@user:alice")})
-	check("alice", true, true, AtLeast(r1))
-	check("alice", false, false, AtLeast(r2))
+	check("alice", false, false, AtLeast(r1))
+	check("alice", false, true, AtLeast(0))
 	check("alice", false, true)
-	check("alice", false, true, AtLeast(r1))
+	e.Write(ctx, []Tuple{MustParseTuple("doc:other#owner@user:x")}, nil)
+	check("alice", false, false, AtLeast(r2))
 
 	check("bob", false, false)
 	check("carol", false, false)
@@ -51,7 +53,7 @@ func TestCheckCache(t *testing.T) {
 
 	items := []CheckItem{{Obj("doc", "d"), "viewer", Sub("user", "bob")}, {Obj("doc", "d"), "viewer", Sub("user", "alice")}}
 	before := reads()
-	got, err := e.CheckBulk(ctx, items, AtLeast(r2))
+	got, err := e.CheckBulk(ctx, items)
 	if err != nil || got[0].Allowed || got[1].Allowed || reads() != before {
 		t.Fatalf("CheckBulk = %v, %v with %d reads; want cached denials", got, err, reads()-before)
 	}

@@ -694,9 +694,9 @@ ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("us
   `SQLStore` discards history; reads and changes before the pruned
   revision then fail with `ErrRevisionExpired`.
 - `WithCheckCache(n)` keeps up to `n` check results across calls. A result
-  answers a later check only if it was computed at the latest revision or,
-  with `AtLeast(rev)`, at `rev` or later, so it is never older than the
-  token the caller passes. Errors are not cached.
+  answers a later check only if it was computed at the store's latest
+  revision, which every check reads, so a revoke takes effect at once.
+  Errors are not cached.
 - `CheckBulk` runs many checks in one call. They share store reads and
   the relations they decide on the way; results come back in order, each
   with its own error.

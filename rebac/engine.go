@@ -59,8 +59,9 @@ func WithConcurrency(n int) Option { return func(e *Engine) { e.concurrency = n 
 
 // WithCheckCache keeps the results of up to size checks across calls, the
 // least recently used dropped first. A cached result answers a check only
-// if it was computed at a revision the check accepts: the store's latest,
-// or with AtLeast(rev), rev or a later one. Errors are not cached.
+// if it was computed at the store's latest revision, which every check
+// reads anyway, so any write, a revoke included, takes effect at once. The
+// cache saves evaluation, not the revision read. Errors are not cached.
 func WithCheckCache(size int) Option {
 	return func(e *Engine) {
 		e.cache = nil
@@ -112,19 +113,14 @@ func (e *Engine) Write(ctx context.Context, writes, deletes []Tuple) (Revision, 
 type QueryOption func(*queryConfig)
 
 type queryConfig struct {
-	atLeast    Revision
-	hasAtLeast bool
+	atLeast Revision
 }
 
-// AtLeast asks for a result at least as new as revision rev, such as a
-// revision that Write returned. A query still reads the store's latest
-// revision, but fails with ErrFutureRevision if the store, such as a
-// lagging replica, has not reached rev. The check cache (WithCheckCache)
-// may answer a check with a result computed at rev or later without
-// asking the store.
-func AtLeast(rev Revision) QueryOption {
-	return func(c *queryConfig) { c.atLeast, c.hasAtLeast = rev, true }
-}
+// AtLeast makes a query fail with ErrFutureRevision if the store, such as
+// a lagging replica, has not reached revision rev, such as a revision that
+// Write returned. Queries always read the store's latest revision; AtLeast
+// only detects a store that is behind the caller.
+func AtLeast(rev Revision) QueryOption { return func(c *queryConfig) { c.atLeast = rev } }
 
 // Watch yields the changes made after revision after, in the order of
 // Changes, as they are written. It asks the store for new changes at the
@@ -136,6 +132,16 @@ func (e *Engine) Watch(ctx context.Context, after Revision) iter.Seq2[Change, er
 		t := time.NewTicker(e.watchInterval)
 		defer t.Stop()
 		for {
+			// Changes after the latest revision read before asking cover it,
+			// so the cursor can move up to it even when nothing changed.
+			latest, err := e.store.Revision(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				yield(Change{}, err)
+				return
+			}
 			for c, err := range e.store.Changes(ctx, after) {
 				if ctx.Err() != nil {
 					return
@@ -149,6 +155,7 @@ func (e *Engine) Watch(ctx context.Context, after Revision) iter.Seq2[Change, er
 				}
 				after = c.Revision
 			}
+			after = max(after, latest)
 			select {
 			case <-ctx.Done():
 				return
@@ -236,11 +243,6 @@ func (q *request) check(it CheckItem) CheckResult {
 		return CheckResult{Err: fmt.Errorf("%w: %s#%s", ErrUnknownRelation, it.Object.Type, it.Permission)}
 	}
 	cache := q.e.cache
-	if cache != nil && q.cfg.hasAtLeast {
-		if allowed, ok := cache.get(it, q.cfg.atLeast); ok {
-			return CheckResult{Allowed: allowed}
-		}
-	}
 	rev, err := q.revision()
 	if err != nil {
 		return CheckResult{Err: err}

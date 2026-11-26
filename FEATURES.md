@@ -140,7 +140,7 @@ Legend:
 | Caveats / conditional tuples (ABAC) | ⬜ | |
 | Bulk check | ✅ | `CheckBulk`: shared store reads and decided relations, ordered results, an error per item |
 | Parallel branch evaluation | ✅ | `WithConcurrency`; decided branches cancel their siblings; the evaluation limit is shared by all branches and fails closed |
-| Check result caching across requests | ✅ | `WithCheckCache`: bounded LRU keyed by check and revision; never older than the `AtLeast` token |
+| Check result caching across requests | ✅ | `WithCheckCache`: bounded LRU keyed by check and revision; serves only results computed at the latest revision |
 | Watch API / change log | ✅ | `TupleStore.Changes` and `Engine.Watch`; `Prune` discards old history, after which it fails with `ErrRevisionExpired` |
 | Exact semantics for `Exclusion` over data cycles | ✅ | Well-founded semantics; a relation that depends on its own exclusion fails closed with `ErrExclusionCycle` |
 
