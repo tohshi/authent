@@ -129,7 +129,7 @@ Legend:
 | Fail closed on store errors | ✅ | A grant found through an independent branch still succeeds |
 | Context cancellation | ✅ | |
 | Write validation against the schema | ✅ | Batches are atomic |
-| Tuple string format (parse and format) | ✅ | `doc:readme#viewer@user:alice` |
+| Tuple string format (parse and format) | ✅ | `doc:readme#viewer@user:alice`, with a caveat `...@user:alice[office:{"ip":"10.0.0.1"}]`; fuzzed |
 | `TupleStore` interface and `MemoryStore` | ✅ | `MemoryStore` indexes subjects for reverse (subject) filters |
 | Persistent stores: `SQLStore` for PostgreSQL, MySQL and SQLite | ✅ | Through `database/sql`; bring your own driver. Byte-wise identifier comparison |
 | `TupleStore` conformance suite | ✅ | `rebactest.TestTupleStore` |
@@ -137,7 +137,7 @@ Legend:
 | `ListObjects` / `ListSubjects` | ✅ | Candidates from a walk over the tuples, filtered by `Check`, so every rewrite is exact; wildcards give "all except"; bounded and cancellable |
 | Consistency tokens (zookies) | ✅ | `Write` returns a `Revision`; every query reads one revision; `AtLeast` fails with `ErrFutureRevision` when the store is behind |
 | Text schema DSL | ⬜ | |
-| Caveats / conditional tuples (ABAC) | ⬜ | |
+| Caveats / conditional tuples (ABAC) | ✅ | `Caveat` declares a Go function with typed parameters; tuples store a context; `WithContext` supplies the rest; missing parameters give `*MissingContextError`, never true |
 | Bulk check | ✅ | `CheckBulk`: shared store reads and decided relations, ordered results, an error per item |
 | Parallel branch evaluation | ✅ | `WithConcurrency`; decided branches cancel their siblings; the evaluation limit is shared by all branches and fails closed |
 | Check result caching across requests | ✅ | `WithCheckCache`: bounded LRU keyed by check and revision; serves only results computed at the latest revision |

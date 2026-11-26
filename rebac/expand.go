@@ -33,6 +33,10 @@ type UsersetTree struct {
 	// Subject is the member of a TreeLeaf node.
 	Subject  Subject
 	Children []*UsersetTree
+	// Caveat, if set, makes the node conditional: it comes from a tuple
+	// with a caveat, either the leaf's own or, for a node reached through
+	// TupleToUserset, the tuple naming its object.
+	Caveat TupleCaveat
 }
 
 // Expand returns the userset tree of object#relation: how the schema's
@@ -100,8 +104,8 @@ func (x *expander) rewrite(p *path, obj Object, rel string, rw Rewrite) (*Userse
 			return nil, err
 		}
 		t := &UsersetTree{Op: TreeUnion}
-		for _, s := range sortedSubjects(tuples) {
-			t.Children = append(t.Children, &UsersetTree{Op: TreeLeaf, Subject: s})
+		for _, tp := range sortedTuples(tuples) {
+			t.Children = append(t.Children, &UsersetTree{Op: TreeLeaf, Subject: tp.Subject, Caveat: tp.Caveat})
 		}
 		return t, nil
 	case computed:
@@ -112,7 +116,8 @@ func (x *expander) rewrite(p *path, obj Object, rel string, rw Rewrite) (*Userse
 			return nil, err
 		}
 		t := &UsersetTree{Op: TreeUnion}
-		for _, s := range sortedSubjects(tuples) {
+		for _, tp := range sortedTuples(tuples) {
+			s := tp.Subject
 			if _, ok := x.e.schema.relation(s.Object.Type, rw.computed); !ok || s.isWildcard() {
 				continue
 			}
@@ -120,6 +125,7 @@ func (x *expander) rewrite(p *path, obj Object, rel string, rw Rewrite) (*Userse
 			if err != nil {
 				return nil, err
 			}
+			child.Caveat = tp.Caveat
 			t.Children = append(t.Children, child)
 		}
 		return t, nil
@@ -145,11 +151,8 @@ func (x *expander) operator(p *path, obj Object, rel string, op TreeOp, children
 	return t, nil
 }
 
-func sortedSubjects(tuples []Tuple) []Subject {
-	out := make([]Subject, len(tuples))
-	for i, t := range tuples {
-		out[i] = t.Subject
-	}
-	slices.SortFunc(out, func(a, b Subject) int { return strings.Compare(a.String(), b.String()) })
+func sortedTuples(tuples []Tuple) []Tuple {
+	out := slices.Clone(tuples)
+	slices.SortFunc(out, func(a, b Tuple) int { return strings.Compare(a.String(), b.String()) })
 	return out
 }

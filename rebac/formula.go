@@ -138,20 +138,42 @@ func mergeEqs(dst, src map[objRel]*formula) map[objRel]*formula {
 }
 
 // mergeWhy picks the error to report for an unknown value that has two
-// causes. An error from the store or a limit is reported before a cycle,
-// because it may hide a decision; between equals the first one wins.
+// causes. An error from the store or a limit is reported first, because no
+// input from the caller can fix it, then missing caveat context, merging
+// the missing parameters, then a cycle. Between other equals the first
+// one wins.
 func mergeWhy(a, b error) error {
-	if whyRank(b) > whyRank(a) {
+	switch ra, rb := whyRank(a), whyRank(b); {
+	case rb > ra:
 		return b
+	case ra == rb && ra == rankMissing:
+		var ma, mb *MissingContextError
+		errors.As(a, &ma)
+		errors.As(b, &mb)
+		params := append(slices.Clone(ma.Params), mb.Params...)
+		slices.Sort(params)
+		return &MissingContextError{Params: slices.Compact(params)}
 	}
 	return a
 }
 
+const (
+	rankCycle = iota
+	rankMissing
+	rankError
+)
+
 func whyRank(err error) int {
-	if errors.Is(err, ErrExclusionCycle) {
-		return 0
+	var missing *MissingContextError
+	switch {
+	case err == nil:
+		return rankCycle - 1
+	case errors.Is(err, ErrExclusionCycle):
+		return rankCycle
+	case errors.As(err, &missing):
+		return rankMissing
 	}
-	return 1
+	return rankError
 }
 
 // solve returns the value of every atom defined by eqs in the well-founded

@@ -48,6 +48,7 @@ func TestTupleStore(t *testing.T, newStore func(t *testing.T) rebac.TupleStore) 
 		{"UnavailableRevisions", testUnavailableRevisions},
 		{"Changes", testChanges},
 		{"Prune", testPrune},
+		{"Caveats", testCaveats},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) { tc.fn(t, newStore(t)) })
@@ -555,5 +556,42 @@ func testPrune(t *testing.T, s rebac.TupleStore) {
 	}
 	if got := readAt(t, s, r3, f); !slices.Equal(got, []string{"doc:a#viewer@user:carol"}) {
 		t.Errorf("Read at %d = %q", r3, got)
+	}
+}
+
+func testCaveats(t *testing.T, s rebac.TupleStore) {
+	plain := "doc:a#viewer@user:alice"
+	office := `doc:a#viewer@user:alice[office:{"ip":"10.0.0.1"}]`
+	home := `doc:a#viewer@user:alice[office:{"ip":"192.168.0.1"}]`
+	bare := "doc:a#viewer@user:alice[office]"
+	f := objRel("doc", "a", "viewer")
+
+	r1 := write(t, s, []string{office, `doc:a#viewer@user:bob[office:{"cidrs":["10.0.0.0/8","::1/128"],"note":"a#b@c]"}]`}, nil)
+	want(t, s, f, office, `doc:a#viewer@user:bob[office:{"cidrs":["10.0.0.0/8","::1/128"],"note":"a#b@c]"}]`)
+	// The same caveat again changes nothing; another one replaces it.
+	rSame := write(t, s, []string{office}, nil)
+	r2 := write(t, s, []string{home}, nil)
+	r3 := write(t, s, []string{bare}, nil)
+	r4 := write(t, s, []string{plain}, nil)
+	for rev, w := range map[rebac.Revision]string{r1: office, rSame: office, r2: home, r3: bare, r4: plain} {
+		alice := rebac.Sub("user", "alice")
+		if got := readAt(t, s, rev, rebac.Filter{Subject: &alice}); !slices.Equal(got, []string{w}) {
+			t.Errorf("Read at %d = %q, want %q", rev, got, w)
+		}
+	}
+	// A delete names the tuple without its caveat.
+	r5 := write(t, s, nil, []string{plain})
+	r6 := write(t, s, []string{home}, nil)
+	r7 := write(t, s, nil, []string{"doc:a#viewer@user:alice"})
+	wantChanges := []string{
+		fmt.Sprintf("%d delete %s", r2, office), fmt.Sprintf("%d write %s", r2, home),
+		fmt.Sprintf("%d delete %s", r3, home), fmt.Sprintf("%d write %s", r3, bare),
+		fmt.Sprintf("%d delete %s", r4, bare), fmt.Sprintf("%d write %s", r4, plain),
+		fmt.Sprintf("%d delete %s", r5, plain),
+		fmt.Sprintf("%d write %s", r6, home),
+		fmt.Sprintf("%d delete %s", r7, home),
+	}
+	if got := changes(t, s, rSame); !slices.Equal(got, wantChanges) {
+		t.Errorf("Changes(%d) =\n\t%q\nwant\n\t%q", rSame, got, wantChanges)
 	}
 }

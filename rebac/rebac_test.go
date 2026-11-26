@@ -250,7 +250,7 @@ func TestCheckValidatesInput(t *testing.T) {
 }
 
 func TestSchemaValidation(t *testing.T) {
-	for name, types := range map[string][]TypeDef{
+	for name, types := range map[string][]Definition{
 		"unknown direct type":    {Type("doc", Relation("viewer", Direct("user")))},
 		"unknown userset rel":    {Type("user"), Type("doc", Relation("viewer", Direct("user#member")))},
 		"unknown computed":       {Type("doc", Relation("viewer", Computed("editor")))},

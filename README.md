@@ -762,6 +762,48 @@ mux.Handle("GET /docs/{id}", httpauth.Require(auth)(
 `RequirePermission` responds 403 when the check is denied or the object
 ID is invalid, and 500 when the check fails.
 
+#### Caveats
+```go
+schema, _ := rebac.NewSchema(
+	rebac.Caveat("office", func(args map[string]any) (bool, error) {
+		ip, err := netip.ParseAddr(args["ip"].(string))
+		return err == nil && netip.MustParsePrefix(args["cidr"].(string)).Contains(ip), err
+	}, rebac.Param{Name: "cidr", Type: rebac.ParamString}, rebac.Param{Name: "ip", Type: rebac.ParamString}),
+	rebac.Type("user"),
+	rebac.Type("doc", rebac.Relation("viewer", rebac.Direct("user", "user with office"))),
+)
+engine.Write(ctx, []rebac.Tuple{
+	rebac.MustParseTuple(`doc:readme#viewer@user:bob[office:{"cidr":"10.0.0.0/8"}]`),
+}, nil)
+ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("user", "bob"),
+	rebac.WithContext(map[string]any{"ip": clientIP}))
+```
+- A caveat is a Go function of typed parameters (`ParamString`, `ParamInt`,
+  `ParamBool`, `ParamTimestamp`, `ParamDuration`, `ParamStringList`); there
+  is no expression language. A relation accepts tuples with a caveat only
+  through an allowed type such as `"user with office"`.
+- A tuple stores values for some parameters as a JSON object, which
+  `Write` checks against the parameter types and stores in canonical
+  form. Each value must be a JSON value of its type, never `null`: an int
+  is a number without fraction or exponent, a duration is a string as
+  `time.Duration.String` formats it (`"1h30m0s"`), and a timestamp is an
+  RFC 3339 string in UTC as `time.RFC3339Nano` formats it. Stored values
+  are read with the same rules, so a value that bypassed `Write` fails the
+  check. `WithContext` supplies the others; stored values win, so a request
+  cannot override them.
+- A check that needs a parameter nobody supplied is conditional: it
+  returns `false` with a `*MissingContextError` that names the parameters
+  (`errors.Is(err, rebac.ErrMissingContext)`). It is never `true`. Unions,
+  intersections and exclusions combine true, false and conditional in
+  three-valued logic: a union with a true branch is true, an intersection
+  with a false operand is false, anything else that depends on a
+  conditional value is conditional.
+- A wrong type in the context, an error or a panic in the function fails
+  the check closed. `ListObjects` and `ListSubjects` do not list
+  conditional results. The check cache skips checks that pass a context.
+- Object and subject IDs may not contain `[` or `]`, which delimit the
+  caveat in the tuple string format.
+
 #### Persistent tuple storage
 ```go
 import _ "github.com/jackc/pgx/v5/stdlib" // or any database/sql driver

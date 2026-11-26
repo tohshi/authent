@@ -110,9 +110,11 @@ func (f Filter) matches(t Tuple) bool {
 // The rebactest package tests implementations against this contract.
 type TupleStore interface {
 	// Write atomically deletes and then adds tuples, and returns the new
-	// revision of the store. Deleting a missing tuple and adding an
-	// existing one are no-ops. A Write with no tuples returns the current
-	// revision.
+	// revision of the store. Tuples are identified without their caveat:
+	// a delete removes the tuple whatever its caveat, and adding a tuple
+	// that exists with another caveat replaces it. Deleting a missing
+	// tuple and adding an existing one with the same caveat are no-ops. A
+	// Write with no tuples returns the current revision.
 	Write(ctx context.Context, writes, deletes []Tuple) (Revision, error)
 	// Revision returns the latest revision.
 	Revision(ctx context.Context) (Revision, error)
@@ -139,15 +141,22 @@ type objRel struct {
 	rel string
 }
 
-func netChanges(writes, deletes []Tuple) map[Tuple]bool {
-	out := make(map[Tuple]bool, len(writes)+len(deletes))
+// netChanges returns the tuple each identity has after a Write, or a
+// tuple with present false if it is deleted.
+func netChanges(writes, deletes []Tuple) map[tupleKey]netChange {
+	out := make(map[tupleKey]netChange, len(writes)+len(deletes))
 	for _, t := range deletes {
-		out[t] = false
+		out[t.key()] = netChange{t, false}
 	}
 	for _, t := range writes {
-		out[t] = true
+		out[t.key()] = netChange{t, true}
 	}
 	return out
+}
+
+type netChange struct {
+	t       Tuple
+	present bool
 }
 
 // MemoryStore is an in-process TupleStore. It keeps every revision until
@@ -164,7 +173,10 @@ type MemoryStore struct {
 }
 
 // A deleted of 0 means the tuple is still present.
-type span struct{ created, deleted Revision }
+type span struct {
+	created, deleted Revision
+	caveat           TupleCaveat
+}
 
 func (s span) at(rev Revision) bool { return s.created <= rev && (s.deleted == 0 || rev < s.deleted) }
 
@@ -181,12 +193,19 @@ func (m *MemoryStore) Write(_ context.Context, writes, deletes []Tuple) (Revisio
 	}
 	m.rev++
 	var changes []Change
-	for t, present := range netChanges(writes, deletes) {
+	for _, nc := range netChanges(writes, deletes) {
+		t := nc.t
 		k := objRel{t.Object, t.Relation}
 		spans := m.index[k][t.Subject]
 		live := len(spans) > 0 && spans[len(spans)-1].deleted == 0
-		switch {
-		case present && !live:
+		if live && (!nc.present || spans[len(spans)-1].caveat != t.Caveat) {
+			spans[len(spans)-1].deleted = m.rev
+			old := t
+			old.Caveat = spans[len(spans)-1].caveat
+			changes = append(changes, Change{m.rev, ChangeDelete, old})
+			live = false
+		}
+		if nc.present && !live {
 			if m.index[k] == nil {
 				m.index[k] = map[Subject][]span{}
 			}
@@ -194,11 +213,8 @@ func (m *MemoryStore) Write(_ context.Context, writes, deletes []Tuple) (Revisio
 				m.bySubject[t.Subject] = map[objRel]struct{}{}
 			}
 			m.bySubject[t.Subject][k] = struct{}{}
-			m.index[k][t.Subject] = append(spans, span{created: m.rev})
+			m.index[k][t.Subject] = append(spans, span{created: m.rev, caveat: t.Caveat})
 			changes = append(changes, Change{m.rev, ChangeWrite, t})
-		case !present && live:
-			spans[len(spans)-1].deleted = m.rev
-			changes = append(changes, Change{m.rev, ChangeDelete, t})
 		}
 	}
 	slices.SortFunc(changes, compareChanges)
@@ -229,8 +245,8 @@ func (m *MemoryStore) Read(_ context.Context, rev Revision, f Filter) iter.Seq2[
 	var out []Tuple
 	add := func(k objRel, subs map[Subject][]span) {
 		for s, spans := range subs {
-			if t := (Tuple{k.obj, k.rel, s}); visible(spans, rev) {
-				if f.matches(t) {
+			if sp, ok := visible(spans, rev); ok {
+				if t := (Tuple{k.obj, k.rel, s, sp.caveat}); f.matches(t) {
 					out = append(out, t)
 				}
 			}
@@ -267,13 +283,13 @@ func (m *MemoryStore) Read(_ context.Context, rev Revision, f Filter) iter.Seq2[
 	}
 }
 
-func visible(spans []span, rev Revision) bool {
+func visible(spans []span, rev Revision) (span, bool) {
 	for _, s := range slices.Backward(spans) {
 		if s.at(rev) {
-			return true
+			return s, true
 		}
 	}
-	return false
+	return span{}, false
 }
 
 func (m *MemoryStore) Changes(_ context.Context, after Revision) iter.Seq2[Change, error] {
