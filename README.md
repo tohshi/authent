@@ -161,7 +161,10 @@ Optional checks:
   first, and an expired row is taken over. Call `DeleteExpired`
   periodically. MySQL is not supported, because its affected-row count
   cannot tell an unchanged duplicate from an update when
-  `CLIENT_FOUND_ROWS` is set. `replaytest.TestReplayCache` (in
+  `CLIENT_FOUND_ROWS` is set. For Redis, `redisreplay.New(client)` from
+  the `github.com/tohshi/authent/redis` module records each id with
+  `SET NX` and an expiry, so Redis drops expired entries itself. It takes
+  any `redis.UniversalClient`, including Redis Cluster. `replaytest.TestReplayCache` (in
   `jwt/replaytest`) is a conformance suite for your own `jwt.ReplayCache`.
 - `jwt.WithMaxTokenAge(d)` rejects tokens issued more than `d` ago and
   makes `iat` required. `jwt.WithMaxAuthAge(d)` does the same for

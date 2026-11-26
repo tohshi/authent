@@ -25,7 +25,8 @@ const DefaultPrefix = "authent:session:"
 // Each session is a hash under prefix+"k:"+key that expires with the
 // session. Each subject has a sorted set under prefix+"s:"+subject holding
 // its keys, scored by expiry; the set expires with its last session, and
-// entries of expired or deleted sessions are pruned as sessions are saved.
+// entries of deleted sessions are removed with them, and entries of
+// expired sessions are pruned as sessions are saved.
 // Lua scripts make compare-and-swap and DeleteSubject atomic.
 //
 // Expiry is set as a TTL relative to the application's clock, so clock
@@ -81,17 +82,25 @@ redis.call('PEXPIREAT', KEYS[2], last[2])
 return 1
 `)
 
-var deleteVersionScript = redis.NewScript(`
-if redis.call('HGET', KEYS[1], 'v') ~= ARGV[1] then return 0 end
+// deleteScript deletes a session if its version is ARGV[1], or whatever
+// its version if ARGV[1] is "0", and removes it from its subject's index.
+// ARGV[2] is the prefix of index keys and ARGV[3] the session key.
+var deleteScript = redis.NewScript(`
+local fields = redis.call('HMGET', KEYS[1], 's', 'v')
+if ARGV[1] ~= '0' and fields[2] ~= ARGV[1] then return 0 end
 redis.call('DEL', KEYS[1])
+if fields[1] then redis.call('ZREM', ARGV[2] .. fields[1], ARGV[3]) end
 return 1
 `)
 
-// deleteSubjectScript deletes the sessions listed in a subject's index and
-// the index itself. ARGV[1] is the prefix of session keys.
+// deleteSubjectScript deletes the sessions listed in a subject's index
+// that still belong to the subject (ARGV[2]), and the index itself.
+// ARGV[1] is the prefix of session keys.
 var deleteSubjectScript = redis.NewScript(`
 for _, key in ipairs(redis.call('ZRANGE', KEYS[1], 0, -1)) do
-	redis.call('DEL', ARGV[1] .. key)
+	if redis.call('HGET', ARGV[1] .. key, 's') == ARGV[2] then
+		redis.call('DEL', ARGV[1] .. key)
+	end
 end
 redis.call('DEL', KEYS[1])
 return 1
@@ -156,13 +165,8 @@ func (s *Store) Save(ctx context.Context, key string, r session.Record) error {
 }
 
 func (s *Store) Delete(ctx context.Context, key string, version uint64) error {
-	if version == 0 {
-		if err := s.client.Del(ctx, s.recordKey(key)).Err(); err != nil {
-			return fmt.Errorf("redissession: deleting session: %w", err)
-		}
-		return nil
-	}
-	ok, err := deleteVersionScript.Run(ctx, s.client, []string{s.recordKey(key)}, strconv.FormatUint(version, 10)).Int()
+	ok, err := deleteScript.Run(ctx, s.client, []string{s.recordKey(key)},
+		strconv.FormatUint(version, 10), s.prefix+"s:", key).Int()
 	if err != nil {
 		return fmt.Errorf("redissession: deleting session: %w", err)
 	}
@@ -201,7 +205,7 @@ func (s *Store) List(ctx context.Context, subject string) (map[string]session.Re
 }
 
 func (s *Store) DeleteSubject(ctx context.Context, subject string) error {
-	if err := deleteSubjectScript.Run(ctx, s.client, []string{s.subjectKey(subject)}, s.prefix+"k:").Err(); err != nil {
+	if err := deleteSubjectScript.Run(ctx, s.client, []string{s.subjectKey(subject)}, s.prefix+"k:", subject).Err(); err != nil {
 		return fmt.Errorf("redissession: deleting sessions of subject: %w", err)
 	}
 	return nil
