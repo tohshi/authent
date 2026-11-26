@@ -20,7 +20,7 @@ go get github.com/tohshi/authent
 | `password` | Argon2id password hashing and verification, new-password policy, `Authenticator` |
 | `jwt` | JWS/JWT signing and verification, JWK/JWKS, `RemoteKeySet` with caching and key rotation |
 | `session` | Server-side sessions with idle and absolute timeouts, ID rotation and CSRF tokens |
-| `oidc` | OpenID Connect relying party (authorization code flow with PKCE S256, PAR, DPoP) |
+| `oidc` | OpenID Connect relying party (authorization code flow with PKCE S256, PAR, JAR, DPoP, refresh, logout) |
 | `dpop` | DPoP (RFC 9449): client proofs and transport, resource server verification |
 | `totp` | Time-based one-time passwords (RFC 6238) with replay protection |
 | `webauthn` | WebAuthn relying party: passkeys and security keys |
@@ -394,6 +394,21 @@ req, err := client.PushAuthCodeURL(ctx) // redirect to req.URL before req.Expiry
 `AuthCodeURL` returns `oidc.ErrPARRequired` when the provider sets
 `require_pushed_authorization_requests`. The client authenticates at the PAR
 endpoint as at the token endpoint, with its secret or `private_key_jwt`.
+
+With `Config.JAR` set, authorization requests are signed request objects
+(RFC 9101), so their parameters cannot be altered on the way:
+```go
+client, _ := oidc.NewClient(prov, oidc.Config{ /* ... */ PrivateKeyJWT: &oidc.PrivateKeyJWTConfig{ /* ... */ }, JAR: true})
+req, _ := client.AuthCodeURL()          // URL carries client_id, response_type, scope and request
+req, _ = client.PushAuthCodeURL(ctx)    // the pushed form carries only client_id, request and the client assertion
+```
+- The object is signed with the `private_key_jwt` key and typed
+  `oauth-authz-req+jwt`. It carries every authorization parameter plus
+  `iss` (the client), `aud` (the issuer), `iat`, `nbf`, a five-minute `exp`
+  and a random `jti`; `req.Expiry` says when a by-value URL stops working.
+- `NewClient` fails if the provider sets `require_signed_request_object`
+  without `JAR`, or does not list the key's algorithm in
+  `request_object_signing_alg_values_supported`.
 
 With `Config.DPoP` set, tokens are bound to the client's key (RFC 9449):
 ```go

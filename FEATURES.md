@@ -95,7 +95,7 @@ Legend:
 | `private_key_jwt` client authentication | ✅ | Asymmetric JWT assertion on each code exchange; issuer audience per RFC 10070 |
 | RP-initiated, front-channel and back-channel logout | ✅ | `EndSessionURL` with `id_token_hint`, `post_logout_redirect_uri` and `state`; `FrontChannelLogout` requires `iss` and `sid`; `BackChannelLogout` checks `typ` `logout+jwt`, the event, `sub` or `sid`, no `nonce`, a fresh `iat` and a single-use `jti`. Both return a `Logout` that `Matches` the ID tokens of the ended sessions |
 | Pushed authorization requests (RFC 9126) | ✅ | `PushAuthCodeURL`; honors `require_pushed_authorization_requests`; client secret or `private_key_jwt` |
-| JWT-secured authorization requests (JAR, RFC 9101) | ⬜ | |
+| JWT-secured authorization requests (JAR, RFC 9101) | ✅ | `Config.JAR` signs every request with the `private_key_jwt` key: `typ` `oauth-authz-req+jwt`, `iss`, `aud`, `iat`, `nbf`, a five-minute `exp` and a random `jti`. Sent by value from `AuthCodeURL` or inside the pushed request; honors `require_signed_request_object` |
 | DPoP-bound tokens (RFC 9449) | ✅ | `dpop_jkt` or a proof on the pushed request; `Exchange` rejects a Bearer downgrade |
 | Implicit and hybrid flows (`c_hash`) | ➖ | Discouraged by current OAuth security best practice |
 

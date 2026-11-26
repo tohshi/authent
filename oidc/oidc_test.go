@@ -72,6 +72,11 @@ type fakeProvider struct {
 	pushed     map[string]url.Values // request_uri -> parameters
 	lastPush   *http.Request
 
+	// JAR (RFC 9101)
+	requestObjects *jwt.Verifier // nil: request objects are rejected
+	requestAlgs    []string
+	requireJAR     bool
+
 	// DPoP (RFC 9449)
 	dpopAlgs   []string
 	proofs     *dpop.Verifier
@@ -118,6 +123,8 @@ func newFakeProvider(t testing.TB) *fakeProvider {
 			RequirePushedAuthorizationRequests:         p.requirePAR,
 			DPoPSigningAlgValuesSupported:              p.dpopAlgs,
 			EndSessionEndpoint:                         p.URL + "/end_session?tenant=t1",
+			RequestObjectSigningAlgValuesSupported:     p.requestAlgs,
+			RequireSignedRequestObject:                 p.requireJAR,
 		}
 		if p.par || p.requirePAR {
 			meta.PushedAuthorizationRequestEndpoint = p.URL + "/par"
@@ -158,6 +165,18 @@ func (p *fakeProvider) authorize(t *testing.T, authURL string) (state, code stri
 		}
 	} else if p.requirePAR {
 		t.Fatal("authorization request was not pushed")
+	} else if q.Has("request") {
+		params, err := p.openRequestObject(q.Get("request"), q.Get("client_id"))
+		if err != nil {
+			t.Fatalf("request object: %v", err)
+		}
+		// OpenID Connect Core §6.1: the query must repeat these.
+		if q.Get("response_type") != params.Get("response_type") || q.Get("scope") != params.Get("scope") {
+			t.Fatalf("query %v disagrees with request object %v", q, params)
+		}
+		q = params
+	} else if p.requireJAR {
+		t.Fatal("authorization request was not signed")
 	}
 	if q.Get("client_id") != clientID || q.Get("redirect_uri") != redirectURL ||
 		q.Get("response_type") != "code" || q.Get("code_challenge_method") != "S256" {

@@ -17,8 +17,9 @@ import (
 	"github.com/tohshi/authent/jwt"
 )
 
-// withPrivateKeyJWT makes p require private_key_jwt and returns the
-// matching client configuration.
+// withPrivateKeyJWT makes p require private_key_jwt, and accept request
+// objects signed with the same key, and returns the matching client
+// configuration.
 func withPrivateKeyJWT(t *testing.T, p *fakeProvider) func(*Config) {
 	t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -29,6 +30,13 @@ func withPrivateKeyJWT(t *testing.T, p *fakeProvider) func(*Config) {
 	p.assertionVerifier, err = jwt.NewVerifier(jwt.NewStaticKeySet(signer.VerificationKey()),
 		jwt.WithAlgorithms(jwt.ES256), jwt.WithIssuer(clientID), jwt.WithAudience(p.URL),
 		jwt.WithExpectedType("client-authentication+jwt"), jwt.WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.requestObjects, err = jwt.NewVerifier(jwt.NewStaticKeySet(signer.VerificationKey()),
+		jwt.WithAlgorithms(jwt.ES256), jwt.WithIssuer(clientID), jwt.WithAudience(p.URL),
+		jwt.WithExpectedType("oauth-authz-req+jwt"), jwt.WithReplayCache(jwt.NewMemoryReplayCache()),
+		jwt.WithClock(func() time.Time { return now }))
 	if err != nil {
 		t.Fatal(err)
 	}
