@@ -31,7 +31,7 @@ Legend:
 | HS256/384/512, RS256/384/512, PS256/384/512 | ✅ | RSA keys must be at least 2048 bits; HMAC keys at least the hash size |
 | ES256/384/512 | ✅ | Fixed-width R‖S only; DER is rejected |
 | EdDSA (Ed25519) | ✅ | |
-| EdDSA (Ed448) | ⬜ | No Ed448 in the standard library |
+| EdDSA (Ed448) | ➖ | No Ed448 in the standard library or golang.org/x/crypto |
 | Required algorithm allow-list; `none` always rejected | ✅ | |
 | Key and algorithm binding (algorithm-confusion protection) | ✅ | JWK `alg`, `use` and `key_ops` are honored |
 | Strict parsing | ✅ | Case-sensitive, no duplicate members, canonical base64url, size limit |
@@ -45,14 +45,14 @@ Legend:
 | JWK Set parsing that skips unusable keys | ✅ | |
 | `StaticKeySet` | ✅ | |
 | `RemoteKeySet` | ✅ | TTL, refetch on unknown `kid`, refresh throttling, stale-on-error, concurrent fetch deduplication |
-| Refresh interval from `Cache-Control` | ⬜ | The interval is fixed |
+| Refresh interval from `Cache-Control` | ✅ | `max-age` clamped between the minimum and maximum refresh intervals; `no-store` and `no-cache` use the minimum |
 | JWK thumbprint (RFC 7638) | ✅ | |
 | Rejection of sender-constrained (`cnf`) tokens as bearer tokens | ✅ | Opt out with `WithConfirmationClaim` when the binding is verified elsewhere |
 | Verification with a key embedded in the `jwk` header | ✅ | Separate `VerifyWithEmbeddedKey` API for DPoP proofs; `Verifier` never uses it |
-| Parsing private JWKs | ⬜ | Signing keys are passed as Go crypto keys |
-| `jti` replay detection | ⬜ | Needs a store |
-| Maximum token age / `auth_time` limits | ⬜ | |
-| `x5c` certificate chain validation | ⬜ | |
+| Parsing private JWKs | ✅ | `ParsePrivateJWK` for RSA (all CRT values, validated), EC and Ed25519; private keys are never marshaled, and `ParseJWK`/`ParseJWKSet` reject or drop keys with private members |
+| `jti` replay detection | ✅ | `WithReplayCache`; `jti` then required, scoped by `iss`, recorded only after every other check |
+| Maximum token age / `auth_time` limits | ✅ | `WithMaxTokenAge` (requires `iat`) and `WithMaxAuthAge` (requires `auth_time`); the leeway applies as for `exp` |
+| `x5c` certificate chain validation | ✅ | The leaf must certify the JWK's key when parsed; `WithCertificateRoots` verifies the chain with `crypto/x509`. The token's `x5c` header is never used |
 | JWE (encryption) | ➖ | Large attack surface; not needed for signed tokens |
 | JWS JSON serialization and nested JWTs | ➖ | Rarely needed; increases attack surface |
 | Symmetric keys in JWK JSON | ➖ | Kept out to avoid leaking secrets |
@@ -107,7 +107,7 @@ Legend:
 | Client `http.RoundTripper` | ✅ | Proof per request, `ath` with access tokens, refuses non-DPoP tokens |
 | Server-provided nonces on the client | ✅ | Kept per origin; one retry on `use_dpop_nonce` (400 and 401) |
 | Proof verification (RFC 9449 §4.3) | ✅ | All twelve checks; `htu` compared after RFC 3986 normalization |
-| Replay detection | ✅ | `ReplayCache` interface and `MemoryReplayCache`; opting out must be explicit |
+| Replay detection | ✅ | `jwt.ReplayCache` interface and `jwt.MemoryReplayCache`; opting out must be explicit |
 | Server nonce validation | ✅ | Pluggable `WithNonce`; issuing nonces is up to the caller |
 | Resource server `Authenticator` for JWT access tokens | ✅ | Checks `cnf.jkt` against the proof key |
 | `WWW-Authenticate` challenges | ✅ | `Challenge` with `algs` and error codes |

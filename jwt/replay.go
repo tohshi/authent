@@ -1,4 +1,4 @@
-package dpop
+package jwt
 
 import (
 	"context"
@@ -6,12 +6,13 @@ import (
 	"time"
 )
 
-// ReplayCache remembers proof identifiers for replay detection
-// (RFC 9449 §11.1). Implementations backed by a shared store, such as
-// Redis SET NX with an expiry, let several servers detect replays together.
+// ReplayCache remembers token identifiers for replay detection, as used by
+// WithReplayCache and by dpop.Verifier. Implementations backed by a shared
+// store, such as Redis SET NX with an expiry, let several servers detect
+// replays together.
 type ReplayCache interface {
 	// Add records id for ttl. It reports false if id is already recorded
-	// and has not expired. id is a fixed-length hash, never the raw jti.
+	// and has not expired. id is a fixed-length hash, never a raw "jti".
 	Add(ctx context.Context, id string, ttl time.Duration) (bool, error)
 }
 

@@ -60,7 +60,7 @@ type Proof struct {
 // use.
 type Verifier struct {
 	algs     []jwt.Algorithm
-	replay   ReplayCache
+	replay   jwt.ReplayCache
 	noReplay bool
 	nonce    func(ctx context.Context, nonce string) bool
 	maxAge   time.Duration
@@ -79,7 +79,7 @@ func WithAlgorithms(algs ...jwt.Algorithm) Option {
 
 // WithReplayCache rejects proofs whose "jti" was already seen. Either
 // WithReplayCache or WithoutReplayCheck is required.
-func WithReplayCache(c ReplayCache) Option { return func(v *Verifier) { v.replay = c } }
+func WithReplayCache(c jwt.ReplayCache) Option { return func(v *Verifier) { v.replay = c } }
 
 // WithoutReplayCheck disables replay detection, for deployments where the
 // servers behind an endpoint share no state. Proofs can then be replayed

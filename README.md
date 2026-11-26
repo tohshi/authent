@@ -96,7 +96,7 @@ Safeguards enforced during verification:
     rejected unless `jwt.WithConfirmationClaim()` is set, so a stolen bound
     token cannot be replayed as a bearer token (RFC 9449 §7.2).
   - Headers with `crit`, `b64` or `zip` are rejected.
-  - `jku`, `x5u` and `jwk` headers are never used to find keys.
+  - `jku`, `x5u`, `x5c` and `jwk` headers are never used to find keys.
 - **Encoding**
   - JSON is decoded with `encoding/json/v2`: member names are matched
     case-sensitively and duplicate members are rejected.
@@ -106,6 +106,38 @@ Safeguards enforced during verification:
   - ECDSA signatures must use the fixed-width R‖S form.
   - RSA keys must be at least 2048 bits.
   - HMAC keys must be at least as long as the hash output.
+
+Optional checks:
+- `jwt.WithReplayCache(jwt.NewMemoryReplayCache())` accepts each token
+  once. `jti` becomes required, and the `iss` and `jti` pair is recorded
+  until `exp` once every other check has passed. A cache error rejects the
+  token but does not wrap `authent.ErrUnauthenticated`. `dpop.Verifier`
+  takes the same `jwt.ReplayCache` interface.
+- `jwt.WithMaxTokenAge(d)` rejects tokens issued more than `d` ago and
+  makes `iat` required. `jwt.WithMaxAuthAge(d)` does the same for
+  `auth_time`, as OpenID Connect `max_age` requires. Both allow the
+  leeway on top of `d`. `Claims.AuthTime` reads `auth_time` for
+  per-request checks.
+- `jwt.WithCertificateRoots(pool)` only uses JWKs whose `x5c` chain
+  verifies to `pool` at the verifier's clock, with a leaf allowed to make
+  digital signatures. Keys without `x5c` are not used. Independently of
+  this option, a JWK whose `x5c` leaf certifies a different key is
+  rejected when parsed.
+
+A signing key can come from a private JWK:
+```go
+k, _ := jwt.ParsePrivateJWK(data) // RSA with CRT values, EC or Ed25519; checked against the public members
+signer, _ := jwt.NewSigner(jwt.ES256, k.Key, jwt.WithKeyID(k.KeyID))
+```
+`ParseJWK` rejects any JWK with private members, and `ParseJWKSet` drops
+such keys, so a leaked private key is never used to verify tokens.
+
+`RemoteKeySet` keeps a fetched set for the `max-age` of its
+`Cache-Control` header, clamped between `WithMinRefreshInterval` (default
+1 minute) and `WithMaxRefreshInterval` (default 24 hours). `no-store` and
+`no-cache` keep it for the minimum interval. Without `max-age`,
+`WithRefreshInterval` (default 1 hour) applies. A token with an unknown
+`kid` triggers an early refetch, at most once per minimum interval.
 
 ### Sessions
 ```go
@@ -205,7 +237,7 @@ tokens, _ := jwt.NewVerifier(keys, jwt.WithAlgorithms(jwt.ES256), jwt.WithIssuer
 	jwt.WithAudience("api"), jwt.WithExpectedType("at+jwt"),
 	jwt.WithConfirmationClaim()) // the binding is checked by dpop.Authenticator
 proofs, _ := dpop.NewVerifier(dpop.WithAlgorithms(jwt.ES256),
-	dpop.WithReplayCache(dpop.NewMemoryReplayCache())) // or dpop.WithoutReplayCheck()
+	dpop.WithReplayCache(jwt.NewMemoryReplayCache())) // or dpop.WithoutReplayCheck()
 auth, _ := dpop.NewAuthenticator(tokens, proofs)
 
 at, err := dpop.AccessToken(r.Header.Get("Authorization"))
@@ -437,7 +469,8 @@ go test ./webauthn -run '^$' -fuzz FuzzCBOR -fuzztime 30s
 go test ./apikey -run '^$' -fuzz FuzzParse -fuzztime 30s
 ```
 `jwt/testdata/gen_openssl_vectors.py` generates `jwt/testdata/openssl_vectors.json`
-with OpenSSL. `webauthn/testdata/extract_spec_vectors.py` extracts
+and `jwt/testdata/gen_openssl_x5c.py` generates the certificate chain in
+`jwt/testdata/openssl_x5c.json` with OpenSSL. `webauthn/testdata/extract_spec_vectors.py` extracts
 `webauthn/testdata/spec_vectors.json` from the test vectors in the WebAuthn
 Level 3 specification. The TOTP tests use the RFC 4226 and RFC 6238
 vectors. These vectors come from sources independent of this library.

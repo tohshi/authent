@@ -44,7 +44,7 @@ func newVerifier(t testing.TB, opts ...Option) *Verifier {
 	t.Helper()
 	base := []Option{
 		WithAlgorithms(jwt.ES256, jwt.EdDSA),
-		WithReplayCache(NewMemoryReplayCache()),
+		WithReplayCache(jwt.NewMemoryReplayCache()),
 		WithClock(func() time.Time { return testNow }),
 	}
 	v, err := NewVerifier(append(base, opts...)...)
@@ -294,26 +294,6 @@ func TestReplayCacheFailureFailsClosed(t *testing.T) {
 	}
 }
 
-func TestMemoryReplayCacheExpiry(t *testing.T) {
-	ctx := context.Background()
-	c := NewMemoryReplayCache()
-	now := testNow
-	c.now = func() time.Time { return now }
-	if ok, _ := c.Add(ctx, "a", time.Minute); !ok {
-		t.Fatal("first Add")
-	}
-	if ok, _ := c.Add(ctx, "a", time.Minute); ok {
-		t.Fatal("duplicate accepted")
-	}
-	now = now.Add(2 * time.Minute)
-	if ok, _ := c.Add(ctx, "a", time.Minute); !ok {
-		t.Fatal("expired entry still blocks")
-	}
-	if len(c.seen) != 1 {
-		t.Fatalf("expired entries not swept: %d", len(c.seen))
-	}
-}
-
 func TestNonce(t *testing.T) {
 	ctx := context.Background()
 	v := newVerifier(t, WithNonce(func(_ context.Context, n string) bool { return n == "good" }))
@@ -398,7 +378,7 @@ func TestChallenge(t *testing.T) {
 }
 
 func TestNewVerifierRequiresPolicy(t *testing.T) {
-	cache := WithReplayCache(NewMemoryReplayCache())
+	cache := WithReplayCache(jwt.NewMemoryReplayCache())
 	for name, opts := range map[string][]Option{
 		"no algorithms":     {cache},
 		"HMAC":              {WithAlgorithms(jwt.HS256), cache},
