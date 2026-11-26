@@ -1,19 +1,20 @@
 // Package oidc is an OpenID Connect relying party for the authorization
 // code flow with PKCE (OpenID Connect Core 1.0, RFC 7636), optionally with
-// pushed authorization requests (PAR, RFC 9126) and DPoP-bound tokens
-// (RFC 9449).
+// pushed authorization requests (PAR, RFC 9126), signed request objects
+// (JAR, RFC 9101) and DPoP-bound tokens (RFC 9449). It also refreshes
+// tokens and handles RP-initiated, front-channel and back-channel logout.
 //
 // It is HTTP-framework agnostic: AuthCodeURL (or PushAuthCodeURL) returns
-// the URL to redirect to and the state, nonce and PKCE verifier that the
-// caller must keep (for example in a session) until the callback, where it
-// passes them back to Exchange together with the "state" and "code" query
-// parameters.
+// the URL to redirect to and an AuthRequest that the caller must keep
+// whole (for example in a session) until the callback, where it passes it
+// back to Exchange together with the "state" and "code" query parameters.
 package oidc
 
 import (
 	"context"
 	"crypto"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json/v2"
@@ -76,6 +77,9 @@ type Provider struct {
 	DPoPSigningAlgValuesSupported []string `json:"dpop_signing_alg_values_supported,omitempty"`
 	// OpenID Connect RP-Initiated Logout 1.0 §2.1.
 	EndSessionEndpoint string `json:"end_session_endpoint,omitempty"`
+	// RFC 9101 §10.5 and OpenID Connect Discovery 1.0 §3.
+	RequestObjectSigningAlgValuesSupported []string `json:"request_object_signing_alg_values_supported,omitempty"`
+	RequireSignedRequestObject             bool     `json:"require_signed_request_object,omitempty"`
 }
 
 // Discover fetches the provider metadata for issuer. The issuer in the
@@ -182,6 +186,15 @@ type Config struct {
 	// DPoP-bound access token. Use HTTPClient to call resource servers
 	// with the token.
 	DPoP *dpop.Prover
+	// RequireSignedUserInfo makes UserInfo reject plain JSON responses,
+	// for clients registered with userinfo_signed_response_alg.
+	RequireSignedUserInfo bool
+	// JAR sends authorization requests as request objects (RFC 9101)
+	// signed with the PrivateKeyJWT key: by value in the URL from
+	// AuthCodeURL, and in the pushed request from PushAuthCodeURL. It
+	// requires PrivateKeyJWT, and it is required if the provider sets
+	// require_signed_request_object.
+	JAR bool
 	// ReplayCache records the "jti" of back-channel logout tokens, so that
 	// each is accepted once. The default is an in-memory cache, which
 	// suits a single server; behind a load balancer, use a shared one such
@@ -212,10 +225,13 @@ type Client struct {
 	idTokenVerifier   *jwt.Verifier
 	userInfoVerifier  *jwt.Verifier
 	logoutVerifier    *jwt.Verifier
+	logoutReplay      *jwt.Verifier // logoutVerifier, recording each jti
+	signedUserInfo    bool
 	client            *http.Client // for the token and PAR endpoints; see tokenEndpointClient
 	base              *http.Client // Config.HTTPClient
 	dpop              *dpop.Prover
 	assertionSigner   *jwt.Signer
+	requestSigner     *jwt.Signer
 	assertionAudience string
 	now               func() time.Time
 }
@@ -248,6 +264,10 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("oidc: private_key_jwt: %w", err)
 		}
+	}
+	requestSigner, err := newRequestSigner(p, cfg)
+	if err != nil {
+		return nil, err
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = http.DefaultClient
@@ -293,9 +313,13 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 	if cfg.ReplayCache == nil {
 		cfg.ReplayCache = jwt.NewMemoryReplayCache()
 	}
-	logout, err := jwt.NewVerifier(keys, append(slices.Clip(idTokenOpts),
-		jwt.WithExpectedType(logoutTokenType), jwt.WithMaxTokenAge(maxLogoutTokenAge),
-		jwt.WithReplayCache(cfg.ReplayCache))...)
+	logoutOpts := append(slices.Clip(idTokenOpts),
+		jwt.WithExpectedType(logoutTokenType), jwt.WithMaxTokenAge(maxLogoutTokenAge))
+	logout, err := jwt.NewVerifier(keys, logoutOpts...)
+	if err != nil {
+		return nil, err
+	}
+	logoutReplay, err := jwt.NewVerifier(keys, append(logoutOpts, jwt.WithReplayCache(cfg.ReplayCache))...)
 	if err != nil {
 		return nil, err
 	}
@@ -324,9 +348,12 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 		idTokenVerifier:   verifier,
 		userInfoVerifier:  userinfo,
 		logoutVerifier:    logout,
+		logoutReplay:      logoutReplay,
+		signedUserInfo:    cfg.RequireSignedUserInfo,
 		base:              cfg.HTTPClient,
 		dpop:              cfg.DPoP,
 		assertionSigner:   assertionSigner,
+		requestSigner:     requestSigner,
 		assertionAudience: p.Issuer,
 		now:               cfg.Now,
 	}
@@ -389,6 +416,24 @@ func (t assertionTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return base.RoundTrip(r)
 }
 
+func newRequestSigner(p *Provider, cfg Config) (*jwt.Signer, error) {
+	switch {
+	case !cfg.JAR && p.RequireSignedRequestObject:
+		return nil, errors.New("oidc: provider requires signed request objects; set Config.JAR")
+	case !cfg.JAR:
+		return nil, nil
+	case cfg.PrivateKeyJWT == nil:
+		return nil, errors.New("oidc: JAR requires PrivateKeyJWT")
+	}
+	k := cfg.PrivateKeyJWT
+	if len(p.RequestObjectSigningAlgValuesSupported) > 0 && !slices.Contains(p.RequestObjectSigningAlgValuesSupported, string(k.Algorithm)) {
+		return nil, fmt.Errorf("oidc: provider does not support %s for request objects", k.Algorithm)
+	}
+	// RFC 9101 §10.8: the type keeps a request object from being
+	// accepted as any other kind of JWT signed with the client's key.
+	return jwt.NewSigner(k.Algorithm, k.PrivateKey, jwt.WithKeyID(k.KeyID), jwt.WithType("oauth-authz-req+jwt"))
+}
+
 // defaultAlgorithms keeps the asymmetric algorithms the provider supports.
 // HMAC ID tokens are signed with the client secret and are not accepted by
 // default.
@@ -409,20 +454,23 @@ func defaultAlgorithms(advertised []string) []jwt.Algorithm {
 	return out
 }
 
-// AuthRequest is an authorization request in flight. Keep State, Nonce and
-// CodeVerifier server-side, bound to the user's browser (for example in a
-// pre-login session), and never expose CodeVerifier to the client.
+// AuthRequest is an authorization request in flight. Store all of it
+// server-side, bound to the user's browser (for example in a pre-login
+// session), and never expose CodeVerifier to the client. Exchange fails if
+// MaxAge or ACRValues are lost, since their checks would be skipped.
 type AuthRequest struct {
 	URL          string
 	State        string
 	Nonce        string
 	CodeVerifier string
-	// Expiry is when the pushed request behind URL expires (RFC 9126
-	// §2.2); redirect before then. It is zero for AuthCodeURL.
+	// Expiry is when the pushed request or the request object behind URL
+	// expires; redirect before then. It is zero for AuthCodeURL without
+	// Config.JAR.
 	Expiry time.Time
 	// MaxAge is the "max_age" request parameter, if one was sent. Exchange
-	// then requires an "auth_time" no older than MaxAge (OpenID Connect
-	// Core §3.1.2.1).
+	// then requires an "auth_time" no older than MaxAge plus
+	// Config.Leeway (OpenID Connect Core §3.1.2.1), so zero still accepts
+	// an authentication within the leeway.
 	MaxAge *time.Duration
 	// ACRValues are the values of the "acr_values" request parameter.
 	// Exchange then requires the ID token's "acr" to be one of them, as
@@ -456,6 +504,17 @@ func (c *Client) AuthCodeURL(opts ...oauth2.AuthCodeOption) (AuthRequest, error)
 	if err != nil {
 		return AuthRequest{}, err
 	}
+	if c.requestSigner != nil {
+		object, err := c.requestObject(req, params)
+		if err != nil {
+			return AuthRequest{}, err
+		}
+		// OpenID Connect Core §6.1 also requires response_type and scope
+		// outside the request object; RFC 9101 §5 lets them be repeated.
+		params = url.Values{"client_id": params["client_id"], "response_type": params["response_type"],
+			"scope": params["scope"], "request": {object}}
+		req.Expiry = c.now().Add(requestObjectLifetime)
+	}
 	if req.URL, err = c.authorizationURL(params); err != nil {
 		return AuthRequest{}, err
 	}
@@ -474,10 +533,7 @@ func (c *Client) newAuthRequest(opts []oauth2.AuthCodeOption) (AuthRequest, url.
 		return AuthRequest{}, nil, err
 	}
 	verifier := oauth2.GenerateVerifier()
-	opts = append([]oauth2.AuthCodeOption{
-		oauth2.S256ChallengeOption(verifier),
-		oauth2.SetAuthURLParam("nonce", nonce),
-	}, opts...)
+	opts = append([]oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}, opts...)
 	// A Config without AuthURL renders just "?" and the parameters. It is
 	// built afresh because oauth2.Config must not be copied.
 	cfg := oauth2.Config{ClientID: c.oauth.ClientID, RedirectURL: c.oauth.RedirectURL, Scopes: c.oauth.Scopes}
@@ -498,7 +554,24 @@ func (c *Client) newAuthRequest(opts []oauth2.AuthCodeOption) (AuthRequest, url.
 			return AuthRequest{}, nil, errors.New("oidc: empty acr_values")
 		}
 	}
+	req.Nonce += req.policyTag()
+	params.Set("nonce", req.Nonce)
 	return req, params, nil
+}
+
+// policyTag binds MaxAge and ACRValues to the nonce. Exchange recomputes
+// it, so an AuthRequest stored without them fails instead of skipping
+// their checks.
+func (r AuthRequest) policyTag() string {
+	if r.MaxAge == nil && len(r.ACRValues) == 0 {
+		return ""
+	}
+	maxAge := "-"
+	if r.MaxAge != nil {
+		maxAge = strconv.FormatInt(int64(*r.MaxAge/time.Second), 10)
+	}
+	sum := sha256.Sum256([]byte(maxAge + " " + strings.Join(r.ACRValues, " ")))
+	return "." + base64.RawURLEncoding.EncodeToString(sum[:16])
 }
 
 func parseMaxAge(v []string) (time.Duration, error) {
@@ -547,6 +620,14 @@ func (c *Client) PushAuthCodeURL(ctx context.Context, opts ...oauth2.AuthCodeOpt
 	if params.Has("request_uri") {
 		return AuthRequest{}, errors.New("oidc: request_uri cannot be pushed")
 	}
+	if c.requestSigner != nil {
+		object, err := c.requestObject(req, params)
+		if err != nil {
+			return AuthRequest{}, err
+		}
+		// RFC 9126 §3: only client authentication stays outside.
+		params = url.Values{"client_id": params["client_id"], "request": {object}}
+	}
 
 	if c.oauth.ClientSecret != "" && c.oauth.Endpoint.AuthStyle == oauth2.AuthStyleInParams {
 		params.Set("client_secret", c.oauth.ClientSecret)
@@ -579,6 +660,47 @@ func (c *Client) PushAuthCodeURL(ctx context.Context, opts ...oauth2.AuthCodeOpt
 	}
 	req.Expiry = c.now().Add(time.Duration(par.ExpiresIn) * time.Second)
 	return req, nil
+}
+
+const requestObjectLifetime = 5 * time.Minute
+
+func (c *Client) requestObject(req AuthRequest, params url.Values) (string, error) {
+	claims := make(map[string]any, len(params))
+	for name, values := range params {
+		if len(values) != 1 || name == "request" || name == "request_uri" {
+			return "", fmt.Errorf("oidc: parameter %q cannot be sent in a request object", name)
+		}
+		claims[name] = values[0]
+	}
+	// OpenID Connect Core §6.1: these are JSON values, not strings.
+	if req.MaxAge != nil {
+		claims["max_age"] = int64(*req.MaxAge / time.Second)
+	}
+	if raw, ok := claims["claims"].(string); ok {
+		var v map[string]any
+		if err := json.Unmarshal([]byte(raw), &v); err != nil || v == nil {
+			return "", errors.New("oidc: the claims parameter must be a JSON object")
+		}
+		claims["claims"] = v
+	}
+	id, err := randomString()
+	if err != nil {
+		return "", err
+	}
+	now := c.now()
+	object, err := c.requestSigner.Sign(jwt.Claims{
+		Issuer:    c.oauth.ClientID,
+		Audience:  jwt.Audience{c.provider.Issuer},
+		IssuedAt:  jwt.NewNumericDate(now),
+		NotBefore: jwt.NewNumericDate(now),
+		ExpiresAt: jwt.NewNumericDate(now.Add(requestObjectLifetime)),
+		ID:        id,
+		Extra:     claims,
+	})
+	if err != nil {
+		return "", fmt.Errorf("oidc: signing request object: %w", err)
+	}
+	return object, nil
 }
 
 // push sends one pushed authorization request with the client's
@@ -670,11 +792,14 @@ func (c *Client) Exchange(ctx context.Context, req AuthRequest, state, code stri
 	if code == "" {
 		return nil, fmt.Errorf("%w: empty code", ErrExchangeRejected)
 	}
+	if random, _, _ := strings.Cut(req.Nonce, "."); req.Nonce != random+req.policyTag() {
+		return nil, errors.New("oidc: AuthRequest lacks the MaxAge or ACRValues it was created with; store all of it")
+	}
 
 	tok, err := c.oauth.Exchange(context.WithValue(ctx, oauth2.HTTPClient, c.client), code,
 		oauth2.VerifierOption(req.CodeVerifier))
 	if err != nil {
-		if _, ok := errors.AsType[*oauth2.RetrieveError](err); ok {
+		if tokenRejected(err) {
 			return nil, fmt.Errorf("%w: %w", ErrExchangeRejected, err)
 		}
 		return nil, fmt.Errorf("oidc: token exchange: %w", err)
@@ -713,6 +838,15 @@ func (c *Client) Exchange(ctx context.Context, req AuthRequest, state, code stri
 		return nil, err
 	}
 	return &Result{Principal: p, IDToken: claims, RawIDToken: raw, Token: tok}, nil
+}
+
+// tokenRejected reports whether err is a token endpoint error response
+// (RFC 6749 §5.2): a 400 or 401 with an OAuth error code. Anything else,
+// such as a 408, 429 or 5xx status, is an infrastructure failure.
+func tokenRejected(err error) bool {
+	re, ok := errors.AsType[*oauth2.RetrieveError](err)
+	return ok && re.ErrorCode != "" && re.Response != nil &&
+		(re.Response.StatusCode == http.StatusBadRequest || re.Response.StatusCode == http.StatusUnauthorized)
 }
 
 // checkTokenType refuses a Bearer token when DPoP is configured. RFC 9449

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
+	"time"
 )
 
 var (
@@ -25,6 +27,9 @@ type Engine struct {
 	store          TupleStore
 	maxDepth       int
 	maxEvaluations int
+	concurrency    int
+	watchInterval  time.Duration
+	cache          *checkCache
 }
 
 // Option configures an Engine.
@@ -34,38 +39,130 @@ type Option func(*Engine)
 func WithMaxDepth(n int) Option { return func(e *Engine) { e.maxDepth = n } }
 
 // WithMaxEvaluations limits the number of relation evaluations per check.
+// The count is shared by all branches of the check, including those
+// evaluated in parallel. A check that exceeds it fails with ErrTooComplex,
+// even if a branch evaluated before the limit was reached granted access.
 // The default is 10000.
 func WithMaxEvaluations(n int) Option { return func(e *Engine) { e.maxEvaluations = n } }
+
+// WithConcurrency lets a call evaluate up to n branches of Union and
+// Intersection rewrites, usersets and tuple-to-userset targets, and the
+// items of CheckBulk, at the same time. Once a branch decides its parent,
+// for example a Union branch that grants, the other branches are
+// cancelled. The default, 1, evaluates branches one after another.
+//
+// Results do not depend on the order in which branches finish. How much of
+// the evaluation limit a check uses can, since a cancelled branch may have
+// done some work first, so a check close to the limit may succeed in one
+// run and fail with ErrTooComplex in another.
+func WithConcurrency(n int) Option { return func(e *Engine) { e.concurrency = n } }
+
+// WithCheckCache keeps the results of up to size checks across calls, the
+// least recently used dropped first. A cached result answers a check only
+// if it was computed at the store's latest revision, which every check
+// reads anyway, so any write, a revoke included, takes effect at once. The
+// cache saves evaluation, not the revision read. Errors are not cached.
+func WithCheckCache(size int) Option {
+	return func(e *Engine) {
+		e.cache = nil
+		if size > 0 {
+			e.cache = newCheckCache(size)
+		}
+	}
+}
+
+// WithWatchInterval sets how often Watch asks the store for new changes.
+// The default is one second.
+func WithWatchInterval(d time.Duration) Option { return func(e *Engine) { e.watchInterval = d } }
 
 // NewEngine returns an Engine.
 func NewEngine(schema *Schema, store TupleStore, opts ...Option) (*Engine, error) {
 	if schema == nil || store == nil {
 		return nil, errors.New("rebac: nil schema or store")
 	}
-	e := &Engine{schema: schema, store: store, maxDepth: 50, maxEvaluations: 10000}
+	e := &Engine{schema: schema, store: store, maxDepth: 50, maxEvaluations: 10000, concurrency: 1, watchInterval: time.Second}
 	for _, opt := range opts {
 		opt(e)
 	}
-	if e.maxDepth <= 0 || e.maxEvaluations <= 0 {
+	if e.maxDepth <= 0 || e.maxEvaluations <= 0 || e.concurrency <= 0 || e.watchInterval <= 0 {
 		return nil, errors.New("rebac: limits must be positive")
 	}
 	return e, nil
 }
 
 // Write validates the tuples against the schema and applies them
-// atomically: deletes first, then writes.
-func (e *Engine) Write(ctx context.Context, writes, deletes []Tuple) error {
+// atomically: deletes first, then writes. It returns the revision of the
+// store after the write. Store it with the content the tuples protect and
+// pass it to AtLeast when checking access to that content, so the check
+// sees the write.
+func (e *Engine) Write(ctx context.Context, writes, deletes []Tuple) (Revision, error) {
 	for _, t := range writes {
 		if err := e.validateWrite(t); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	for _, t := range deletes {
 		if err := t.validate(); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	return e.store.Write(ctx, writes, deletes)
+}
+
+// QueryOption configures Check, CheckBulk and Expand.
+type QueryOption func(*queryConfig)
+
+type queryConfig struct {
+	atLeast Revision
+}
+
+// AtLeast makes a query fail with ErrFutureRevision if the store, such as
+// a lagging replica, has not reached revision rev, such as a revision that
+// Write returned. Queries always read the store's latest revision; AtLeast
+// only detects a store that is behind the caller.
+func AtLeast(rev Revision) QueryOption { return func(c *queryConfig) { c.atLeast = rev } }
+
+// Watch yields the changes made after revision after, in the order of
+// Changes, as they are written. It asks the store for new changes at the
+// interval set by WithWatchInterval and ends when ctx is done, or after
+// yielding an error such as ErrRevisionExpired. To resume, pass the
+// revision of the last change whose revision you have received in full.
+func (e *Engine) Watch(ctx context.Context, after Revision) iter.Seq2[Change, error] {
+	return func(yield func(Change, error) bool) {
+		t := time.NewTicker(e.watchInterval)
+		defer t.Stop()
+		for {
+			// Changes after the latest revision read before asking cover it,
+			// so the cursor can move up to it even when nothing changed.
+			latest, err := e.store.Revision(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				yield(Change{}, err)
+				return
+			}
+			for c, err := range e.store.Changes(ctx, after) {
+				if ctx.Err() != nil {
+					return
+				}
+				if err != nil {
+					yield(Change{}, err)
+					return
+				}
+				if !yield(c, nil) {
+					return
+				}
+				after = c.Revision
+			}
+			after = max(after, latest)
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}
 }
 
 func (e *Engine) validateWrite(t Tuple) error {
@@ -88,166 +185,87 @@ func (e *Engine) validateWrite(t Tuple) error {
 //
 // Errors fail closed: if any branch needed to decide the result errors,
 // Check returns false and the error. A grant found through another branch
-// is still returned as true, since it does not depend on the failing one.
-func (e *Engine) Check(ctx context.Context, object Object, permission string, subject Subject) (bool, error) {
-	if err := validateObject(object, false); err != nil {
-		return false, err
-	}
-	if err := validateSubject(subject, false); err != nil {
-		return false, err
-	}
-	if _, ok := e.schema.relation(object.Type, permission); !ok {
-		return false, fmt.Errorf("%w: %s#%s", ErrUnknownRelation, object.Type, permission)
-	}
-	c := &checker{
-		Engine:  e,
-		ctx:     ctx,
-		subject: subject,
-		onPath:  map[objRel]bool{},
-		granted: map[objRel]bool{},
-	}
-	return c.check(object, permission, 0)
+// is still returned as true, since it does not depend on the failing one,
+// and so is a denial decided by another branch, such as an Intersection
+// operand that is false.
+//
+// Cycles in the data are evaluated with the well-founded semantics of the
+// rewrite rules. A cycle never grants by itself: groups that only contain
+// each other have no members, and a cycle cannot cancel the subtraction of
+// an Exclusion. A relation that depends on its own exclusion and is not
+// decided by anything else has no answer; Check returns false with
+// ErrExclusionCycle.
+//
+// All reads of a check are at one revision of the store, the latest.
+func (e *Engine) Check(ctx context.Context, object Object, permission string, subject Subject, opts ...QueryOption) (bool, error) {
+	r := e.newRequest(ctx, opts).check(CheckItem{Object: object, Permission: permission, Subject: subject})
+	return r.Allowed, r.Err
 }
 
-// checker evaluates a single Check.
-type checker struct {
-	*Engine
-	ctx     context.Context
-	subject Subject
-
-	// onPath holds the relations being evaluated on the current path.
-	// Re-entering one is a cycle in the data (such as two groups that
-	// contain each other) and contributes nothing, so it evaluates to
-	// false.
-	onPath map[objRel]bool
-	// granted memoizes positive results. Only positive results are cached,
-	// because a negative one may be an artifact of a cycle cut-off.
-	granted     map[objRel]bool
-	evaluations int
+// CheckItem is one check of a CheckBulk call.
+type CheckItem struct {
+	Object     Object
+	Permission string
+	Subject    Subject
 }
 
-func (c *checker) check(obj Object, rel string, depth int) (bool, error) {
-	if depth > c.maxDepth {
-		return false, fmt.Errorf("%w: depth exceeds %d", ErrTooComplex, c.maxDepth)
-	}
-	if c.evaluations++; c.evaluations > c.maxEvaluations {
-		return false, fmt.Errorf("%w: more than %d evaluations", ErrTooComplex, c.maxEvaluations)
-	}
-	if err := c.ctx.Err(); err != nil {
-		return false, err
-	}
-	// A userset always contains itself: group:eng#member has member on
-	// group:eng.
-	if c.subject.Relation == rel && c.subject.Object == obj {
-		return true, nil
-	}
-	info, ok := c.schema.relation(obj.Type, rel)
-	if !ok {
-		// Tuples may outlive schema changes; an undefined relation grants
-		// nothing.
-		return false, nil
-	}
-	k := objRel{obj, rel}
-	if c.granted[k] {
-		return true, nil
-	}
-	if c.onPath[k] {
-		return false, nil
-	}
-	c.onPath[k] = true
-	ok, err := c.eval(obj, rel, info.rewrite, depth)
-	delete(c.onPath, k)
-	if ok {
-		c.granted[k] = true
-	}
-	return ok, err
+// CheckResult is the result of one CheckItem: the values Check would
+// return for it.
+type CheckResult struct {
+	Allowed bool
+	Err     error
 }
 
-func (c *checker) eval(obj Object, rel string, r Rewrite, depth int) (bool, error) {
-	switch r := r.(type) {
-	case direct:
-		return c.evalDirect(obj, rel, depth)
-	case computed:
-		return c.check(obj, r.relation, depth+1)
-	case tupleToUserset:
-		return c.evalTupleToUserset(obj, r, depth)
-	case union:
-		return c.any(len(r.children), func(i int) (bool, error) {
-			return c.eval(obj, rel, r.children[i], depth)
-		})
-	case intersection:
-		for _, child := range r.children {
-			ok, err := c.eval(obj, rel, child, depth)
-			if err != nil || !ok {
-				return false, err
-			}
-		}
-		return true, nil
-	case exclusion:
-		ok, err := c.eval(obj, rel, r.base, depth)
-		if err != nil || !ok {
-			return false, err
-		}
-		excluded, err := c.eval(obj, rel, r.subtract, depth)
-		if err != nil {
-			return false, err
-		}
-		return !excluded, nil
+// CheckBulk runs many checks in one call and returns their results in the
+// order of items. The checks share the tuples they read from the store and,
+// when they are about the same subject, the relations they decide on the
+// way, and read one revision of the store. Each check has its own
+// evaluation limit and its own error. CheckBulk returns an error only if
+// the store's revision cannot be read or is older than AtLeast asks.
+func (e *Engine) CheckBulk(ctx context.Context, items []CheckItem, opts ...QueryOption) ([]CheckResult, error) {
+	q := e.newRequest(ctx, opts)
+	out := make([]CheckResult, len(items))
+	q.spread(len(items), func(i int) { out[i] = q.check(items[i]) })
+	if q.revErr != nil {
+		return nil, q.revErr
 	}
-	return false, fmt.Errorf("rebac: unknown rewrite %T", r)
+	return out, nil
 }
 
-// any returns true if any of n branches is true. Errors are only reported
-// if no branch grants access.
-func (c *checker) any(n int, branch func(int) (bool, error)) (bool, error) {
-	var firstErr error
-	for i := range n {
-		ok, err := branch(i)
-		if ok {
-			return true, nil
-		}
-		if err != nil && firstErr == nil {
-			firstErr = err
+func (q *request) check(it CheckItem) CheckResult {
+	if err := validateObject(it.Object, false); err != nil {
+		return CheckResult{Err: err}
+	}
+	if err := validateSubject(it.Subject, false); err != nil {
+		return CheckResult{Err: err}
+	}
+	if _, ok := q.e.schema.relation(it.Object.Type, it.Permission); !ok {
+		return CheckResult{Err: fmt.Errorf("%w: %s#%s", ErrUnknownRelation, it.Object.Type, it.Permission)}
+	}
+	cache := q.e.cache
+	rev, err := q.revision()
+	if err != nil {
+		return CheckResult{Err: err}
+	}
+	if cache != nil {
+		if allowed, ok := cache.get(it, rev); ok {
+			return CheckResult{Allowed: allowed}
 		}
 	}
-	return false, firstErr
-}
 
-func (c *checker) evalDirect(obj Object, rel string, depth int) (bool, error) {
-	var usersets []Subject
-	for t, err := range c.store.Read(c.ctx, Filter{ObjectType: obj.Type, ObjectID: obj.ID, Relation: rel}) {
-		if err != nil {
-			return false, fmt.Errorf("rebac: reading tuples: %w", err)
-		}
-		s := t.Subject
-		switch {
-		case s == c.subject:
-			return true, nil
-		case s.isWildcard():
-			if c.subject.Relation == "" && c.subject.Object.Type == s.Object.Type {
-				return true, nil
-			}
-		case s.Relation != "":
-			usersets = append(usersets, s)
-		}
+	r := &run{request: q, subject: it.Subject}
+	res := r.check(q.ctx, nil, it.Object, it.Permission)
+	if r.exceeded() {
+		return CheckResult{Err: r.errTooComplex()}
 	}
-	// Expand usersets only after the cheap direct matches above.
-	return c.any(len(usersets), func(i int) (bool, error) {
-		return c.check(usersets[i].Object, usersets[i].Relation, depth+1)
-	})
-}
-
-func (c *checker) evalTupleToUserset(obj Object, r tupleToUserset, depth int) (bool, error) {
-	var targets []Object
-	for t, err := range c.store.Read(c.ctx, Filter{ObjectType: obj.Type, ObjectID: obj.ID, Relation: r.tupleset}) {
-		if err != nil {
-			return false, fmt.Errorf("rebac: reading tuples: %w", err)
+	switch res.f.op {
+	case opTrue, opFalse:
+		if cache != nil {
+			cache.put(it, rev, res.f.op == opTrue)
 		}
-		if !t.Subject.isWildcard() {
-			targets = append(targets, t.Subject.Object)
-		}
+		return CheckResult{Allowed: res.f.op == opTrue}
+	case opUnknown:
+		return CheckResult{Err: res.f.why}
 	}
-	return c.any(len(targets), func(i int) (bool, error) {
-		return c.check(targets[i], r.computed, depth+1)
-	})
+	return CheckResult{}
 }

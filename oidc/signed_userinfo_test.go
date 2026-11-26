@@ -55,6 +55,21 @@ func TestSignedUserInfo(t *testing.T) {
 	}
 }
 
+func TestRequireSignedUserInfo(t *testing.T) {
+	ctx := context.Background()
+	p := newFakeProvider(t)
+	c := newClient(t, p, func(c *Config) { c.RequireSignedUserInfo = true })
+	res := login(t, p, c)
+	info, err := c.UserInfo(ctx, res.Token, res.Principal.Subject)
+	if info != nil || !errors.Is(err, ErrInvalidUserInfo) {
+		t.Fatalf("plain JSON response: UserInfo = %+v, %v", info, err)
+	}
+	p.userinfo = serveJWT(t, p.signer, userInfoClaims(p))
+	if _, err := c.UserInfo(ctx, res.Token, res.Principal.Subject); err != nil {
+		t.Fatalf("signed response: %v", err)
+	}
+}
+
 func TestSignedUserInfoRejections(t *testing.T) {
 	otherKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	impostor, err := jwt.NewSigner(jwt.ES256, otherKey, jwt.WithKeyID("k1"))

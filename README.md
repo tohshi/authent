@@ -20,7 +20,7 @@ go get github.com/tohshi/authent
 | `password` | Argon2id password hashing and verification, new-password policy, `Authenticator` |
 | `jwt` | JWS/JWT signing and verification, JWK/JWKS, `RemoteKeySet` with caching and key rotation |
 | `session` | Server-side sessions with idle and absolute timeouts, ID rotation and CSRF tokens |
-| `oidc` | OpenID Connect relying party (authorization code flow with PKCE S256, PAR, DPoP) |
+| `oidc` | OpenID Connect relying party (authorization code flow with PKCE S256, PAR, JAR, DPoP, refresh, logout) |
 | `dpop` | DPoP (RFC 9449): client proofs and transport, resource server verification |
 | `totp` | Time-based one-time passwords (RFC 6238) with replay protection |
 | `webauthn` | WebAuthn relying party: passkeys and security keys |
@@ -303,7 +303,7 @@ keys.Revoke(ctx, rec.ID)
 prov, _ := oidc.Discover(ctx, "https://accounts.example.com", nil)
 client, _ := oidc.NewClient(prov, oidc.Config{ClientID: id, ClientSecret: secret, RedirectURL: cb})
 
-req, _ := client.AuthCodeURL() // keep req.State, Nonce and CodeVerifier server-side
+req, _ := client.AuthCodeURL() // store all of req server-side, bound to the browser
 // ... redirect to req.URL and receive the callback ...
 res, err := client.Exchange(ctx, req, r.URL.Query().Get("state"), r.URL.Query().Get("code"))
 
@@ -335,14 +335,18 @@ req, _ := client.AuthCodeURL(
 	oauth2.SetAuthURLParam("acr_values", "urn:example:mfa"))
 ```
   With `max_age`, the ID token must carry an `auth_time` at most that many
-  seconds old. With `acr_values`, its `acr` must be one of the requested
-  values, as for an essential claim. Both are kept in the `AuthRequest`.
+  seconds old, plus `Config.Leeway`, so `max_age=0` still accepts an
+  authentication within the leeway. With `acr_values`, its `acr` must be
+  one of the requested values, as for an essential claim. Both are kept in
+  the `AuthRequest`, so store all of it: `Exchange` fails rather than skip
+  the checks if `MaxAge` or `ACRValues` are lost.
 
 `UserInfo` calls the provider's UserInfo endpoint with the access token and
 rejects the response unless its `sub` exactly matches the ID token's. A
 signed response (`application/jwt`) must also verify with the provider's
 keys and carry the provider as `iss` and the client in `aud`; it needs no
-`exp`. Encrypted responses are rejected. Redirects are not followed, so the
+`exp`. With `Config.RequireSignedUserInfo`, plain JSON responses are
+rejected. Encrypted responses are always rejected. Redirects are not followed, so the
 access token is never sent anywhere but the advertised https endpoint.
 
 `Refresh` uses a `Result`'s refresh token and returns the next `Result`:
@@ -366,6 +370,10 @@ u, _ := client.EndSessionURL(oidc.EndSession{
 l, err := client.FrontChannelLogout(r.URL.Query())
 
 // Back-channel: POST on the backchannel_logout_uri.
+r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/x-www-form-urlencoded" {
+	// reply 400
+}
 l, err := client.BackChannelLogout(ctx, r.PostFormValue("logout_token"))
 // end every local session whose ID token l.Matches; reply 200, or 400 on error
 ```
@@ -386,6 +394,21 @@ req, err := client.PushAuthCodeURL(ctx) // redirect to req.URL before req.Expiry
 `AuthCodeURL` returns `oidc.ErrPARRequired` when the provider sets
 `require_pushed_authorization_requests`. The client authenticates at the PAR
 endpoint as at the token endpoint, with its secret or `private_key_jwt`.
+
+With `Config.JAR` set, authorization requests are signed request objects
+(RFC 9101), so their parameters cannot be altered on the way:
+```go
+client, _ := oidc.NewClient(prov, oidc.Config{ /* ... */ PrivateKeyJWT: &oidc.PrivateKeyJWTConfig{ /* ... */ }, JAR: true})
+req, _ := client.AuthCodeURL()          // URL carries client_id, response_type, scope and request
+req, _ = client.PushAuthCodeURL(ctx)    // the pushed form carries only client_id, request and the client assertion
+```
+- The object is signed with the `private_key_jwt` key and typed
+  `oauth-authz-req+jwt`. It carries every authorization parameter plus
+  `iss` (the client), `aud` (the issuer), `iat`, `nbf`, a five-minute `exp`
+  and a random `jti`; `req.Expiry` says when a by-value URL stops working.
+- `NewClient` fails if the provider sets `require_signed_request_object`
+  without `JAR`, or does not list the key's algorithm in
+  `request_object_signing_alg_values_supported`.
 
 With `Config.DPoP` set, tokens are bound to the client's key (RFC 9449):
 ```go
@@ -671,21 +694,52 @@ schema, _ := rebac.NewSchema(
 	),
 )
 engine, _ := rebac.NewEngine(schema, rebac.NewMemoryStore())
-engine.Write(ctx, []rebac.Tuple{
+rev, err := engine.Write(ctx, []rebac.Tuple{
 	rebac.MustParseTuple("folder:root#viewer@group:eng#member"),
 	rebac.MustParseTuple("doc:readme#parent@folder:root"),
 }, nil)
-ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("user", "alice"))
+// Store rev with the document. AtLeast(rev) makes the check fail rather
+// than read a store that has not seen the write.
+ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("user", "alice"), rebac.AtLeast(rev))
 ```
 - Writes that do not match the schema are rejected. Examples are a subject
   type the relation does not allow, or a write to a computed-only relation.
 - Relations that depend on themselves through `Computed` alone are rejected
   when the schema is built.
-- Cycles in the data, such as groups that contain each other, are detected
-  and cut off during evaluation.
+- Cycles in the data follow the well-founded semantics of the rewrites. A
+  cycle never grants by itself: groups that only contain each other have
+  no members, and a cycle cannot cancel the subtraction of an
+  `Exclusion`. A relation that depends on its own exclusion ("viewers are
+  the users who are not viewers") has no answer, and `Check` fails closed
+  with `ErrExclusionCycle`.
 - Depth and evaluation count are bounded. Exceeding either limit returns
   `false` with `ErrTooComplex`.
 - Store errors fail closed: `Check` returns `false` with the error.
+- Every `Write` moves the store to a new `Revision`, Zanzibar's consistency
+  token ("zookie"). A query reads one revision, the latest, so it never
+  mixes data from before and after a write. `AtLeast(rev)` makes a query
+  fail with `ErrFutureRevision` if the store has not reached `rev`, such as
+  a replica that is behind.
+- `TupleStore.Changes` lists the writes and deletes after a revision, and
+  `Engine.Watch` streams them as they happen. `Prune` on `MemoryStore` and
+  `SQLStore` discards history; reads and changes before the pruned
+  revision then fail with `ErrRevisionExpired`.
+- `WithCheckCache(n)` keeps up to `n` check results across calls. A result
+  answers a later check only if it was computed at the store's latest
+  revision, which every check reads, so a revoke takes effect at once.
+  Errors are not cached.
+- `CheckBulk` runs many checks in one call. They share store reads and
+  the relations they decide on the way; results come back in order, each
+  with its own error.
+- `Expand` returns the userset tree of an `object#relation`: union,
+  intersection and exclusion nodes down to the subjects of tuples. It
+  follows `Computed` and `TupleToUserset`; usersets named by tuples, such
+  as `group:eng#member`, are leaves to expand with another call.
+- `WithConcurrency(n)` evaluates up to `n` branches of a check (and items
+  of `CheckBulk`) in parallel, which helps with network stores. Once a
+  branch decides, its siblings are cancelled. The evaluation limit is
+  shared by all branches: a check that exceeds it fails, even if a branch
+  granted first.
 
 To check permissions for an authenticated request, map its Principal to a
 subject:
@@ -718,9 +772,16 @@ engine, _ := rebac.NewEngine(schema, store)
   different subjects whatever the server collation. Rows that do not
   exactly match a lookup are discarded anyway, and rows that are not valid
   tuples make the read fail.
-- A write is one transaction. A read releases its connection before
-  returning tuples, so a pool with a single connection (common for SQLite)
-  does not deadlock on recursive checks.
+- A write is one transaction. It locks the row of the `<table>_revision`
+  table that holds the latest revision, so writes are serialized and
+  revisions follow commit order. A delete keeps the row with the revision
+  it was deleted at, for reads at older revisions and for `Changes`, until
+  `Prune` removes it.
+- A read releases its connection before returning tuples, so a pool with a
+  single connection (common for SQLite) does not deadlock on recursive
+  checks. It reads the latest and the pruned revision in the same
+  statement, so a concurrent `Prune` is detected, not silently read
+  around.
 - `rebactest.TestTupleStore` is a conformance suite for `TupleStore`
   implementations. Run it against your own store, or against `SQLStore`
   with your database and driver.

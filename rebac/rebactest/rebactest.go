@@ -13,6 +13,7 @@ package rebactest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -42,6 +43,11 @@ func TestTupleStore(t *testing.T, newStore func(t *testing.T) rebac.TupleStore) 
 		{"LargeBatch", testLargeBatch},
 		{"Concurrent", testConcurrent},
 		{"Engine", testEngine},
+		{"Revisions", testRevisions},
+		{"SnapshotReads", testSnapshotReads},
+		{"UnavailableRevisions", testUnavailableRevisions},
+		{"Changes", testChanges},
+		{"Prune", testPrune},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) { tc.fn(t, newStore(t)) })
@@ -61,19 +67,35 @@ func parse(t *testing.T, tuples ...string) []rebac.Tuple {
 	return out
 }
 
-func write(t *testing.T, s rebac.TupleStore, writes, deletes []string) {
+func write(t *testing.T, s rebac.TupleStore, writes, deletes []string) rebac.Revision {
 	t.Helper()
-	if err := s.Write(context.Background(), parse(t, writes...), parse(t, deletes...)); err != nil {
+	rev, err := s.Write(context.Background(), parse(t, writes...), parse(t, deletes...))
+	if err != nil {
 		t.Fatalf("Write(%q, %q): %v", writes, deletes, err)
 	}
+	return rev
+}
+
+func head(t *testing.T, s rebac.TupleStore) rebac.Revision {
+	t.Helper()
+	rev, err := s.Revision(context.Background())
+	if err != nil {
+		t.Fatalf("Revision: %v", err)
+	}
+	return rev
 }
 
 func read(t *testing.T, s rebac.TupleStore, f rebac.Filter) []string {
 	t.Helper()
+	return readAt(t, s, head(t, s), f)
+}
+
+func readAt(t *testing.T, s rebac.TupleStore, rev rebac.Revision, f rebac.Filter) []string {
+	t.Helper()
 	out := []string{}
-	for tp, err := range s.Read(context.Background(), f) {
+	for tp, err := range s.Read(context.Background(), rev, f) {
 		if err != nil {
-			t.Fatalf("Read(%+v): %v", f, err)
+			t.Fatalf("Read(%d, %+v): %v", rev, f, err)
 		}
 		out = append(out, tp.String())
 	}
@@ -229,12 +251,13 @@ func testNestedRead(t *testing.T, s rebac.TupleStore) {
 	}, nil)
 	var got []string
 	ctx := context.Background()
-	for outer, err := range s.Read(ctx, objRel("group", "a", "member")) {
+	rev := head(t, s)
+	for outer, err := range s.Read(ctx, rev, objRel("group", "a", "member")) {
 		if err != nil {
 			t.Fatal(err)
 		}
 		f := objRel(outer.Subject.Object.Type, outer.Subject.Object.ID, outer.Subject.Relation)
-		for inner, err := range s.Read(ctx, f) {
+		for inner, err := range s.Read(ctx, rev, f) {
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -252,9 +275,9 @@ func testEarlyBreak(t *testing.T, s rebac.TupleStore) {
 	for i := range 10 {
 		tuples = append(tuples, fmt.Sprintf("doc:a#viewer@user:u%d", i))
 	}
-	write(t, s, tuples, nil)
+	rev := write(t, s, tuples, nil)
 	for range 3 {
-		for _, err := range s.Read(context.Background(), objRel("doc", "a", "viewer")) {
+		for _, err := range s.Read(context.Background(), rev, objRel("doc", "a", "viewer")) {
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -291,12 +314,13 @@ func testConcurrent(t *testing.T, s rebac.TupleStore) {
 					Relation: "viewer",
 					Subject:  rebac.Sub("user", fmt.Sprintf("u%d", i)),
 				}
-				if err := s.Write(ctx, []rebac.Tuple{tp}, nil); err != nil {
+				rev, err := s.Write(ctx, []rebac.Tuple{tp}, nil)
+				if err != nil {
 					t.Errorf("Write: %v", err)
 					return
 				}
 				found := false
-				for got, err := range s.Read(ctx, objRel("doc", tp.Object.ID, "viewer")) {
+				for got, err := range s.Read(ctx, rev, objRel("doc", tp.Object.ID, "viewer")) {
 					if err != nil {
 						t.Errorf("Read: %v", err)
 						return
@@ -340,7 +364,7 @@ func testEngine(t *testing.T, s rebac.TupleStore) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err := e.Write(ctx, parse(t,
+	if _, err := e.Write(ctx, parse(t,
 		"folder:root#viewer@group:eng#member",
 		"folder:root#owner@user:olivia",
 		"group:eng#member@group:backend#member",
@@ -365,5 +389,171 @@ func testEngine(t *testing.T, s rebac.TupleStore) {
 		if err != nil || got != tc.want {
 			t.Errorf("Check(doc:readme#viewer@user:%s) = %v, %v; want %v", tc.user, got, err, tc.want)
 		}
+	}
+}
+
+func testRevisions(t *testing.T, s rebac.TupleStore) {
+	if rev := head(t, s); rev != 0 {
+		t.Fatalf("empty store at revision %d, want 0", rev)
+	}
+	r1 := write(t, s, []string{"doc:a#viewer@user:alice"}, nil)
+	r2 := write(t, s, nil, []string{"doc:a#viewer@user:alice"})
+	r3 := write(t, s, []string{"doc:a#viewer@user:bob"}, []string{"doc:a#viewer@user:missing"})
+	if !(0 < r1 && r1 < r2 && r2 < r3) {
+		t.Fatalf("revisions %d, %d, %d do not increase", r1, r2, r3)
+	}
+	if rev := head(t, s); rev != r3 {
+		t.Fatalf("Revision() = %d, want %d", rev, r3)
+	}
+	if rev := write(t, s, nil, nil); rev != r3 {
+		t.Fatalf("empty Write returned %d, want %d", rev, r3)
+	}
+}
+
+func testSnapshotReads(t *testing.T, s rebac.TupleStore) {
+	r1 := write(t, s, []string{"doc:a#viewer@user:alice", "doc:a#viewer@user:bob"}, nil)
+	r2 := write(t, s, []string{"doc:a#viewer@user:carol"}, []string{"doc:a#viewer@user:alice"})
+	r3 := write(t, s, []string{"doc:a#viewer@user:alice"}, []string{"doc:a#viewer@user:bob"})
+	f := objRel("doc", "a", "viewer")
+	for _, tc := range []struct {
+		rev  rebac.Revision
+		want []string
+	}{
+		{0, []string{}},
+		{r1, []string{"doc:a#viewer@user:alice", "doc:a#viewer@user:bob"}},
+		{r2, []string{"doc:a#viewer@user:bob", "doc:a#viewer@user:carol"}},
+		{r3, []string{"doc:a#viewer@user:alice", "doc:a#viewer@user:carol"}},
+	} {
+		if got := readAt(t, s, tc.rev, f); !slices.Equal(got, tc.want) {
+			t.Errorf("Read at %d = %q, want %q", tc.rev, got, tc.want)
+		}
+		alice := rebac.Sub("user", "alice")
+		var want []string
+		for _, w := range tc.want {
+			if strings.HasSuffix(w, "@user:alice") {
+				want = append(want, w)
+			}
+		}
+		if got := readAt(t, s, tc.rev, rebac.Filter{Subject: &alice}); len(got) != len(want) {
+			t.Errorf("reverse Read at %d = %q, want %q", tc.rev, got, want)
+		}
+	}
+}
+
+func readErr(s rebac.TupleStore, rev rebac.Revision) error {
+	for _, err := range s.Read(context.Background(), rev, objRel("doc", "a", "viewer")) {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func changesErr(s rebac.TupleStore, after rebac.Revision) error {
+	for _, err := range s.Changes(context.Background(), after) {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func testUnavailableRevisions(t *testing.T, s rebac.TupleStore) {
+	rev := write(t, s, []string{"doc:a#viewer@user:alice"}, nil)
+	for _, r := range []rebac.Revision{rev + 1, rev + 1000, 1<<63 - 1, 1 << 63} {
+		if err := readErr(s, r); !errors.Is(err, rebac.ErrFutureRevision) {
+			t.Errorf("Read at %d: %v, want ErrFutureRevision", r, err)
+		}
+		if err := changesErr(s, r); !errors.Is(err, rebac.ErrFutureRevision) {
+			t.Errorf("Changes after %d: %v, want ErrFutureRevision", r, err)
+		}
+	}
+}
+
+func changes(t *testing.T, s rebac.TupleStore, after rebac.Revision) []string {
+	t.Helper()
+	out := []string{}
+	for c, err := range s.Changes(context.Background(), after) {
+		if err != nil {
+			t.Fatalf("Changes(%d): %v", after, err)
+		}
+		out = append(out, fmt.Sprintf("%d %s %s", c.Revision, c.Op, c.Tuple))
+	}
+	return out
+}
+
+func testChanges(t *testing.T, s rebac.TupleStore) {
+	r1 := write(t, s, []string{"doc:a#viewer@user:bob", "doc:a#viewer@user:alice", "doc:b#owner@user:alice"}, nil)
+	r2 := write(t, s,
+		[]string{"doc:a#viewer@user:alice", "doc:a#viewer@user:carol", "doc:a#viewer@user:dave"},
+		[]string{"doc:a#viewer@user:bob", "doc:b#owner@user:alice", "doc:a#viewer@user:dave", "doc:a#viewer@user:missing"})
+	rNoop := write(t, s, []string{"doc:a#viewer@user:alice"}, []string{"doc:a#viewer@user:missing"})
+	r4 := write(t, s, nil, []string{"doc:a#viewer@user:carol"})
+	all := []string{
+		fmt.Sprintf("%d write doc:a#viewer@user:alice", r1),
+		fmt.Sprintf("%d write doc:a#viewer@user:bob", r1),
+		fmt.Sprintf("%d write doc:b#owner@user:alice", r1),
+		fmt.Sprintf("%d delete doc:a#viewer@user:bob", r2),
+		fmt.Sprintf("%d delete doc:b#owner@user:alice", r2),
+		fmt.Sprintf("%d write doc:a#viewer@user:carol", r2),
+		fmt.Sprintf("%d write doc:a#viewer@user:dave", r2),
+		fmt.Sprintf("%d delete doc:a#viewer@user:carol", r4),
+	}
+	for _, tc := range []struct {
+		after rebac.Revision
+		want  []string
+	}{
+		{0, all},
+		{r1, all[3:]},
+		{r2, all[7:]},
+		{rNoop, all[7:]},
+		{r4, []string{}},
+	} {
+		if got := changes(t, s, tc.after); !slices.Equal(got, tc.want) {
+			t.Errorf("Changes(%d) =\n\t%q\nwant\n\t%q", tc.after, got, tc.want)
+		}
+	}
+}
+
+// Pruner is implemented by stores that can discard history, such as
+// rebac.MemoryStore and rebac.SQLStore. The Prune test runs only for them.
+type Pruner interface {
+	Prune(ctx context.Context, before rebac.Revision) error
+}
+
+func testPrune(t *testing.T, s rebac.TupleStore) {
+	p, ok := s.(Pruner)
+	if !ok {
+		t.Skip("store does not implement Prune")
+	}
+	ctx := context.Background()
+	r1 := write(t, s, []string{"doc:a#viewer@user:alice", "doc:a#viewer@user:bob"}, nil)
+	r2 := write(t, s, []string{"doc:a#viewer@user:carol"}, []string{"doc:a#viewer@user:alice"})
+	r3 := write(t, s, nil, []string{"doc:a#viewer@user:bob"})
+	if err := p.Prune(ctx, r3+1); !errors.Is(err, rebac.ErrFutureRevision) {
+		t.Errorf("Prune after the latest revision: %v, want ErrFutureRevision", err)
+	}
+	if err := p.Prune(ctx, r2); err != nil {
+		t.Fatalf("Prune(%d): %v", r2, err)
+	}
+	if err := readErr(s, r1); !errors.Is(err, rebac.ErrRevisionExpired) {
+		t.Errorf("Read at %d after Prune: %v, want ErrRevisionExpired", r1, err)
+	}
+	if err := changesErr(s, r1); !errors.Is(err, rebac.ErrRevisionExpired) {
+		t.Errorf("Changes after %d after Prune: %v, want ErrRevisionExpired", r1, err)
+	}
+	f := objRel("doc", "a", "viewer")
+	if got, want := readAt(t, s, r2, f), []string{"doc:a#viewer@user:bob", "doc:a#viewer@user:carol"}; !slices.Equal(got, want) {
+		t.Errorf("Read at %d after Prune = %q, want %q", r2, got, want)
+	}
+	if got, want := changes(t, s, r2), []string{fmt.Sprintf("%d delete doc:a#viewer@user:bob", r3)}; !slices.Equal(got, want) {
+		t.Errorf("Changes(%d) after Prune = %q, want %q", r2, got, want)
+	}
+	// Pruning an older revision again is a no-op.
+	if err := p.Prune(ctx, r1); err != nil {
+		t.Errorf("Prune(%d) after Prune(%d): %v", r1, r2, err)
+	}
+	if got := readAt(t, s, r3, f); !slices.Equal(got, []string{"doc:a#viewer@user:carol"}) {
+		t.Errorf("Read at %d = %q", r3, got)
 	}
 }

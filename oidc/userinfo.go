@@ -123,6 +123,9 @@ func (c *Client) parseUserInfo(ctx context.Context, mediaType string, body []byt
 	var claims map[string]any
 	switch mediaType {
 	case "application/json":
+		if c.signedUserInfo {
+			return nil, fmt.Errorf("%w: unsigned response", ErrInvalidUserInfo)
+		}
 		if err := json.Unmarshal(body, &claims); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidUserInfo, err)
 		}

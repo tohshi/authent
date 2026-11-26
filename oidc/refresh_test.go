@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
+	"net/http"
 	"testing"
 	"time"
 
@@ -16,8 +17,9 @@ import (
 	"github.com/tohshi/authent/jwt"
 )
 
-// withPrivateKeyJWT makes p require private_key_jwt and returns the
-// matching client configuration.
+// withPrivateKeyJWT makes p require private_key_jwt, and accept request
+// objects signed with the same key, and returns the matching client
+// configuration.
 func withPrivateKeyJWT(t *testing.T, p *fakeProvider) func(*Config) {
 	t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -28,6 +30,13 @@ func withPrivateKeyJWT(t *testing.T, p *fakeProvider) func(*Config) {
 	p.assertionVerifier, err = jwt.NewVerifier(jwt.NewStaticKeySet(signer.VerificationKey()),
 		jwt.WithAlgorithms(jwt.ES256), jwt.WithIssuer(clientID), jwt.WithAudience(p.URL),
 		jwt.WithExpectedType("client-authentication+jwt"), jwt.WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.requestObjects, err = jwt.NewVerifier(jwt.NewStaticKeySet(signer.VerificationKey()),
+		jwt.WithAlgorithms(jwt.ES256), jwt.WithIssuer(clientID), jwt.WithAudience(p.URL),
+		jwt.WithExpectedType("oauth-authz-req+jwt"), jwt.WithReplayCache(jwt.NewMemoryReplayCache()),
+		jwt.WithClock(func() time.Time { return now }))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,11 +226,28 @@ func TestRefreshFailures(t *testing.T) {
 		t.Fatalf("unknown refresh token: err = %v", err)
 	}
 
-	p.mu.Lock()
-	p.tokenUnavailable = true
-	p.mu.Unlock()
-	if _, err := c.Refresh(ctx, res); err == nil || errors.Is(err, authent.ErrUnauthenticated) {
-		t.Fatalf("provider outage: err = %v, want an error not wrapping ErrUnauthenticated", err)
+	for _, tc := range []struct {
+		status   int
+		body     string
+		rejected bool
+	}{
+		{http.StatusBadRequest, `{"error":"invalid_grant"}`, true},
+		{http.StatusUnauthorized, `{"error":"invalid_client"}`, true},
+		{http.StatusBadRequest, ``, false},
+		{http.StatusBadRequest, `<html>bad gateway</html>`, false},
+		{http.StatusUnauthorized, `{}`, false},
+		{http.StatusForbidden, `{"error":"access_denied"}`, false},
+		{http.StatusRequestTimeout, `{"error":"invalid_grant"}`, false},
+		{http.StatusTooManyRequests, `{"error":"slow_down"}`, false},
+		{http.StatusServiceUnavailable, `{"error":"temporarily_unavailable"}`, false},
+	} {
+		p.mu.Lock()
+		p.tokenFailure.status, p.tokenFailure.body = tc.status, tc.body
+		p.mu.Unlock()
+		_, err := c.Refresh(ctx, res)
+		if err == nil || errors.Is(err, ErrRefreshRejected) != tc.rejected || errors.Is(err, authent.ErrUnauthenticated) != tc.rejected {
+			t.Errorf("%d %s: err = %v, want rejected = %v", tc.status, tc.body, err, tc.rejected)
+		}
 	}
 
 	noIDToken := *res
@@ -277,5 +303,16 @@ func TestHTTPClientRefreshesWithPrivateKeyJWT(t *testing.T) {
 	}
 	if p.assertionCount() != assertions+1 {
 		t.Fatal("refresh was not authenticated with a client assertion")
+	}
+}
+
+func TestExchangeProviderOutage(t *testing.T) {
+	p := newFakeProvider(t)
+	c := newClient(t, p)
+	req, _ := c.AuthCodeURL()
+	state, code := p.authorize(t, req.URL)
+	p.tokenFailure.status, p.tokenFailure.body = http.StatusServiceUnavailable, `{"error":"temporarily_unavailable"}`
+	if _, err := c.Exchange(context.Background(), req, state, code); err == nil || errors.Is(err, authent.ErrUnauthenticated) {
+		t.Fatalf("err = %v, want an error not wrapping ErrUnauthenticated", err)
 	}
 }
