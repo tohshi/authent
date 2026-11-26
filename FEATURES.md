@@ -68,7 +68,7 @@ Legend:
 | Validation of the token format before the store lookup | ✅ | |
 | Per-session CSRF token | ✅ | Synchronizer token pattern; compared in constant time |
 | Pluggable store and `MemoryStore` | ✅ | |
-| Redis or SQL stores | ✅ | `SQLStore` for PostgreSQL, MySQL and SQLite through `database/sql`; bring your own driver. Expiry column with `DeleteExpired` |
+| Redis or SQL stores | ✅ | `SQLStore` for PostgreSQL, MySQL and SQLite through `database/sql`; bring your own driver. Expiry column with `DeleteExpired`. Redis with TTLs in the separate `github.com/tohshi/authent/redis` module (`redissession`) |
 | Revoking all sessions of a subject ("log out everywhere") | ✅ | `RevokeAll`; every `Store` keeps a subject index. A concurrent rotation does not survive it |
 | Listing a subject's active sessions | ✅ | `List` returns sessions without tokens; `Revoke` ends one by its handle, only for its own subject |
 | Conflict detection on concurrent saves | ✅ | Versioned records with compare-and-swap in every store; `ErrConflict` on a lost race |

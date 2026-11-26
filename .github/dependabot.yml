@@ -12,6 +12,12 @@ updates:
       interval: weekly
     commit-message:
       prefix: "integration"
+  - package-ecosystem: gomod
+    directory: /redis
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "redis"
   - package-ecosystem: github-actions
     directory: /
     schedule:
