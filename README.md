@@ -127,7 +127,8 @@ Safeguards enforced during verification:
     prevents algorithm-confusion attacks. If a JWK has an `alg`, the key is
     restricted to that algorithm.
 - **Claims and headers**
-  - `exp` is required.
+  - `exp` is required, unless `jwt.WithOptionalExpiration()` is set for a
+    JWT that is consumed on arrival, such as a signed UserInfo response.
   - Tokens with a `cnf` claim (sender-constrained, e.g. DPoP-bound) are
     rejected unless `jwt.WithConfirmationClaim()` is set, so a stolen bound
     token cannot be replayed as a bearer token (RFC 9449 §7.2).

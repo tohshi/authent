@@ -37,7 +37,7 @@ Legend:
 | Strict parsing | ✅ | Case-sensitive, no duplicate members, canonical base64url, size limit |
 | Rejection of `crit`, `b64`, `zip` and `enc` headers | ✅ | |
 | Never fetching keys from `jku`, `x5u` or `jwk` headers | ✅ | These headers are ignored |
-| Claim validation: `exp` (required), `nbf`, `iat`, `iss`, `aud` | ✅ | `iss` and `aud` checks must be opted out of explicitly |
+| Claim validation: `exp` (required), `nbf`, `iat`, `iss`, `aud` | ✅ | `iss` and `aud` checks must be opted out of explicitly; `WithOptionalExpiration` accepts a missing `exp`, for signed UserInfo responses |
 | Clock skew leeway | ✅ | |
 | `typ` check | ✅ | For example `at+jwt` (RFC 9068) |
 | Conversion to `authent.Principal` | ✅ | Uses `auth_time` when present |
