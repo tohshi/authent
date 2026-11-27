@@ -171,7 +171,7 @@ func (rp *RelyingParty) FinishRegistration(ctx context.Context, ch Challenge, re
 	if err != nil {
 		return Registration{}, fmt.Errorf("%w: %v", ErrAttestation, err)
 	}
-	if err := rp.trustAttestation(att); err != nil {
+	if err := rp.trustAttestation(att, ad.aaguid); err != nil {
 		return Registration{}, err
 	}
 
@@ -206,9 +206,21 @@ func (rp *RelyingParty) FinishRegistration(ctx context.Context, ch Challenge, re
 	}, Extensions: ext}, nil
 }
 
-// trustAttestation enforces Config.AttestationRoots.
-func (rp *RelyingParty) trustAttestation(att attestationResult) error {
-	if rp.cfg.AttestationRoots == nil {
+func (rp *RelyingParty) trustAttestation(att attestationResult, aaguid [16]byte) error {
+	roots := rp.cfg.AttestationRoots
+	var entry *MetadataEntry
+	if rp.cfg.Metadata != nil {
+		if e, ok := rp.cfg.Metadata.Lookup(aaguid); ok {
+			entry = &e
+			roots = x509.NewCertPool()
+			for _, c := range e.AttestationRoots {
+				roots.AddCert(c)
+			}
+		} else if roots == nil {
+			return fmt.Errorf("%w: authenticator %x is not in the metadata", ErrAttestation, aaguid)
+		}
+	}
+	if roots == nil {
 		return nil
 	}
 	if len(att.chain) == 0 {
@@ -218,14 +230,17 @@ func (rp *RelyingParty) trustAttestation(att attestationResult) error {
 	for _, c := range att.chain[1:] {
 		inter.AddCert(c)
 	}
-	_, err := att.chain[0].Verify(x509.VerifyOptions{
-		Roots:         rp.cfg.AttestationRoots,
+	chains, err := att.chain[0].Verify(x509.VerifyOptions{
+		Roots:         roots,
 		Intermediates: inter,
 		CurrentTime:   rp.now(),
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 	})
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrAttestation, err)
+	}
+	if entry != nil && entry.blocked(chains) {
+		return fmt.Errorf("%w: metadata reports %s as compromised or revoked", ErrAttestation, entry.Description)
 	}
 	return nil
 }

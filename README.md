@@ -578,8 +578,8 @@ In the browser, pass the options to
   `android-safetynet`, are rejected. Set `AttestationRoots` to require a
   certificate chain to known roots, such as a TPM vendor's root, Google's
   hardware attestation roots or the Apple WebAuthn root. TPM statements
-  may be signed with RS1 (RSA with SHA-1), which Windows TPMs use;
-  credential keys never may. For `android-key`, the union of the
+  may be signed with RS1 (RSA with SHA-1), which RFC 8812 registers as
+  deprecated, only for TPM attestation; credential keys never may. For `android-key`, the union of the
   software-enforced and TEE-enforced authorization lists is checked, so
   keys outside a TEE are accepted
 - that the credential is not already registered, belongs to the expected
@@ -599,6 +599,41 @@ Origins are matched exactly, never derived from the request:
   [related origin requests](https://www.w3.org/TR/webauthn-3/#sctn-related-origins).
   Serve the same list at `https://<RP ID>/.well-known/webauthn`.
 
+To trust the authenticators listed in the FIDO Metadata Service, verify
+its BLOB and set `Config.Metadata`:
+```go
+roots := x509.NewCertPool()
+roots.AppendCertsFromPEM(globalSignRootR3) // https://secure.globalsign.com/cacert/root-r3.crt
+md, err := webauthn.FetchMetadata(ctx, http.DefaultClient, webauthn.MDS3URL, roots)
+rp, _ := webauthn.New(webauthn.Config{ /* ... */ Attestation: webauthn.ConveyanceDirect, Metadata: md}, store)
+```
+- `FetchMetadata` downloads the BLOB and the CRLs that its signing chain
+  names, with the caller's client. `ParseMetadata` verifies BLOB bytes the
+  caller already has; pass the CRLs with `WithCRLs`. As MDS3 requires, a
+  BLOB is rejected unless a current CRL covers every certificate of its
+  chain except the root, and it is rejected if any current CRL revokes
+  one. The BLOB must come over https, also after the client's redirects,
+  so that a network attacker cannot replay an older signed BLOB. CRLs may
+  come over http because their signatures are checked.
+- A listed authenticator's attestation must chain to the roots in its
+  metadata statement. It is rejected when a status report says `REVOKED`,
+  `USER_VERIFICATION_BYPASS`, `USER_KEY_REMOTE_COMPROMISE`,
+  `USER_KEY_PHYSICAL_COMPROMISE` or `ATTESTATION_KEY_COMPROMISE`. A report
+  that names a certificate applies only to chains that contain it. Any
+  such report blocks the model for good. A later report, such as
+  `FIDO_CERTIFIED_L2`, does not clear it. Authenticators that are not
+  listed need a chain to `AttestationRoots`.
+- The model is looked up by the AAGUID in the authenticator data. A model
+  whose attestation certificate does not carry its AAGUID can claim the
+  AAGUID of a sibling model under the same vendor root, and so escape its
+  own status reports. This is inherent to MDS.
+- Metadata is checked at registration, not at login. When you load a new
+  BLOB, look up each stored `Credential.AAGUID` and decide what to do with
+  credentials whose model is now reported as compromised.
+- A BLOB past its `nextUpdate` is still accepted. Fetch a new BLOB before
+  `NextUpdate()` and keep it only if its `Number()` is higher. To swap it while the RelyingParty runs, implement
+  `MetadataSource` with an atomic pointer.
+
 Ceremony options:
 - `webauthn.WithConditionalCreate()` makes `BeginRegistration` start a
   registration for `navigator.credentials.create({mediation: "conditional",
@@ -613,6 +648,11 @@ Ceremony options:
   extension output from the signed authenticator data. With `appid`,
   `FinishLogin` expects the hash of the AppID instead of the RP ID only
   when the client reports that it used the AppID.
+- The `Challenge` keeps the extension inputs, and Finish rejects outputs
+  that they cannot produce. A `Challenge` serialized by an earlier version
+  of this package with extensions (a list of names) no longer decodes,
+  and its `appid` is dropped, so ceremonies in flight during an upgrade
+  fail closed.
 
 CBOR is decoded strictly: no tags, floats, indefinite lengths, duplicate
 map keys or trailing bytes, with bounds on depth and length.

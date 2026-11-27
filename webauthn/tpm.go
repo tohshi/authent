@@ -40,9 +40,10 @@ const (
 	tpmFirmwareVersionSize = 8
 )
 
-// rs1 is RSASSA-PKCS1-v1_5 with SHA-1. Windows TPMs sign their
-// attestation with it, so it is accepted for TPM statements only, never
-// for credentials.
+// rs1 is RSASSA-PKCS1-v1_5 with SHA-1. RFC 8812 (§2, §5.3) registers it
+// in the IANA COSE Algorithms registry as deprecated, only because
+// deployed TPMs still sign attestations with it. It is accepted for TPM
+// statements, never for credentials.
 const rs1 Algorithm = -65535
 
 var (
