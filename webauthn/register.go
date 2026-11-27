@@ -167,7 +167,7 @@ func (rp *RelyingParty) FinishRegistration(ctx context.Context, ch Challenge, re
 		return Registration{}, fmt.Errorf("%w: %v", ErrAlgorithm, alg)
 	}
 
-	att, err := verifyAttestation(format, stmt, ad, cdHash[:], alg, pub)
+	att, err := verifyAttestation(format, attestationInput{stmt: stmt, ad: ad, clientDataHash: cdHash[:], credAlg: alg, credKey: pub})
 	if err != nil {
 		return Registration{}, fmt.Errorf("%w: %v", ErrAttestation, err)
 	}
@@ -211,7 +211,7 @@ func (rp *RelyingParty) trustAttestation(att attestationResult) error {
 	if rp.cfg.AttestationRoots == nil {
 		return nil
 	}
-	if att.typ != AttestationBasic || len(att.chain) == 0 {
+	if len(att.chain) == 0 {
 		return fmt.Errorf("%w: %s attestation is not trusted", ErrAttestation, att.typ)
 	}
 	inter := x509.NewCertPool()

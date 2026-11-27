@@ -178,7 +178,8 @@ Legend:
 | Backup eligibility and state flags | ✅ | BE must not change; BS is stored |
 | Duplicate credential and user handle checks | ✅ | |
 | WebAuthn Level 3 test vectors | ✅ | §16 vectors, including rejected ones |
-| Attestation formats `tpm`, `android-key`, `android-safetynet`, `apple` | ⬜ | Rejected; browsers send `none` unless attestation is requested |
+| Attestation formats `tpm`, `android-key`, `apple` | ✅ | WebAuthn L3 §8.3, §8.4 and §8.8; tested with real samples from py_webauthn and the §16 vectors. TPM statements may use RS1 (SHA-1), as Windows TPMs do |
+| Attestation format `android-safetynet` | ➖ | Google turned the SafetyNet Attestation API down on 2025-01-31 ([deprecation timeline](https://web.archive.org/web/20250225205612/https://developer.android.com/privacy-and-security/safetynet/deprecation-timeline)) |
 | FIDO Metadata Service (MDS3) | ⬜ | |
 | Ed448 | ➖ | No Ed448 in the standard library or golang.org/x/crypto |
 | Cross-origin iframes (`crossOrigin`, `topOrigin`) | ✅ | `TopOrigins` lists the pages that may embed a ceremony; `crossOrigin` without `topOrigin` is rejected |
