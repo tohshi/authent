@@ -338,16 +338,20 @@ req, _ := client.AuthCodeURL(
   seconds old, plus `Config.Leeway`, so `max_age=0` still accepts an
   authentication within the leeway. With `acr_values`, its `acr` must be
   one of the requested values, as for an essential claim. Both are kept in
-  the `AuthRequest`, so store all of it: `Exchange` fails rather than skip
-  the checks if `MaxAge` or `ACRValues` are lost.
+  the `AuthRequest`, so store all of it: `Exchange` fails with
+  `ErrAuthRequestMismatch` rather than skip the checks if `MaxAge` or
+  `ACRValues` are lost. An `AuthRequest` with `MaxAge` or `ACRValues`
+  created by an earlier version of this package has no such binding in
+  its nonce, so a login in flight during an upgrade fails closed.
 
 `UserInfo` calls the provider's UserInfo endpoint with the access token and
 rejects the response unless its `sub` exactly matches the ID token's. A
 signed response (`application/jwt`) must also verify with the provider's
 keys and carry the provider as `iss` and the client in `aud`; it needs no
 `exp`. With `Config.RequireSignedUserInfo`, plain JSON responses are
-rejected. Encrypted responses are always rejected. Redirects are not followed, so the
-access token is never sent anywhere but the advertised https endpoint.
+rejected. Encrypted responses are always rejected. Redirects are not
+followed, so the access token is never sent anywhere but the advertised
+https endpoint.
 
 `Refresh` uses a `Result`'s refresh token and returns the next `Result`:
 ```go
