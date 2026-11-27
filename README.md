@@ -946,8 +946,12 @@ engine, _ := rebac.NewEngine(schema, tuples, rebac.WithObserver(obs))
   child of the span in the context.
 - `Observe` runs synchronously after the result is decided, so it cannot
   change it. A panic in it is recovered and discarded. It must return
-  quickly; hand slow exports to another goroutine. Without an Observer,
-  nothing is measured.
+  quickly; hand slow exports to another goroutine. It may be called from
+  many goroutines at once, so it must be safe for concurrent use. Without
+  an Observer, nothing is measured.
+- Not observed: registration and enrollment, and `dpop.Verifier` and
+  `dpop.Introspector` when called on their own. `dpop.Authenticator`
+  reports the whole check, including the proof and the introspection.
 
 ## Feature status
 

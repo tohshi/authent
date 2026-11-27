@@ -4,10 +4,30 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/tohshi/authent"
 	"github.com/tohshi/authent/internal/observetest"
 )
+
+func TestObserverReportsExpiredSession(t *testing.T) {
+	rec := &observetest.Recorder{}
+	m, store, c := setup(t, WithObserver(rec))
+	store.now = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
+	ctx := context.Background()
+	token, s, err := m.Create(ctx, alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.advance(31 * time.Minute)
+	if _, err := m.Get(ctx, token); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("Get = %v; want ErrInvalidSession", err)
+	}
+	rec.Expect(t, []authent.Event{{
+		Kind: authent.KindAuthentication, Method: authent.MethodSession,
+		Outcome: authent.OutcomeRejected, Reason: authent.ReasonExpired,
+	}}, token, s.Handle(), s.CSRFToken())
+}
 
 func TestObserver(t *testing.T) {
 	rec := &observetest.Recorder{}
