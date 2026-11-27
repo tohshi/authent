@@ -368,8 +368,32 @@ func (s *Store) List(ctx context.Context, subject string) (map[string]session.Re
 }
 
 func (s *Store) DeleteSubject(ctx context.Context, subject string) error {
+	if s.dialect == PostgreSQL {
+		return s.deleteSubjectPostgreSQL(ctx, subject)
+	}
 	if _, err := s.db.ExecContext(ctx, s.deleteSubjectSQL, subject); err != nil {
 		return fmt.Errorf("session: deleting sessions of subject: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) deleteSubjectPostgreSQL(ctx context.Context, subject string) error {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return fmt.Errorf("session: beginning subject deletion: %w", err)
+	}
+	defer tx.Rollback()
+	// Wait for in-flight writers before taking the DELETE's snapshot, then
+	// prevent new writes until the subject's rows are gone. Without this,
+	// a concurrent rotation can replace the only row after DELETE starts.
+	if _, err := tx.ExecContext(ctx, "LOCK TABLE "+s.table+" IN SHARE ROW EXCLUSIVE MODE"); err != nil {
+		return fmt.Errorf("session: locking sessions for subject deletion: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, s.deleteSubjectSQL, subject); err != nil {
+		return fmt.Errorf("session: deleting sessions of subject: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("session: committing subject deletion: %w", err)
 	}
 	return nil
 }

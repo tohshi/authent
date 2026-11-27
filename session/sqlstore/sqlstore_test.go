@@ -174,6 +174,17 @@ type fakeConn struct{ db *fakeDB }
 func (c *fakeConn) Prepare(query string) (driver.Stmt, error) { return &fakeStmt{c, query}, nil }
 func (c *fakeConn) Close() error                              { return nil }
 func (c *fakeConn) Begin() (driver.Tx, error)                 { return nil, errors.New("fake: no transactions") }
+func (c *fakeConn) BeginTx(_ context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	if opts.Isolation != driver.IsolationLevel(sql.LevelReadCommitted) {
+		return nil, fmt.Errorf("fake: isolation level %d", opts.Isolation)
+	}
+	return fakeTx{}, nil
+}
+
+type fakeTx struct{}
+
+func (fakeTx) Commit() error   { return nil }
+func (fakeTx) Rollback() error { return nil }
 
 func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	f := c.db
@@ -190,6 +201,9 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	}
 	if !f.created {
 		return nil, errors.New("fake: no such table")
+	}
+	if query == "LOCK TABLE \""+sqlstore.DefaultTable+"\" IN SHARE ROW EXCLUSIVE MODE" && f.dialect == sqlstore.PostgreSQL && len(args) == 0 {
+		return driver.RowsAffected(0), nil
 	}
 	terms, err := f.parse(query, args)
 	if err != nil {
