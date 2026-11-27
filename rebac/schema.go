@@ -3,6 +3,8 @@ package rebac
 import (
 	"errors"
 	"fmt"
+	"iter"
+	"slices"
 	"strings"
 )
 
@@ -130,17 +132,40 @@ type Definition interface{ definition() }
 func (TypeDef) definition()   {}
 func (CaveatDef) definition() {}
 
+// relationError is an ErrInvalidSchema about one relation.
+type relationError struct{ typ, rel, msg string }
+
+func (e *relationError) Error() string {
+	return ErrInvalidSchema.Error() + ": " + e.typ + "#" + e.rel + ": " + e.msg
+}
+
+func (e *relationError) Unwrap() error { return ErrInvalidSchema }
+
 // Schema is a validated set of type and caveat definitions. It is
 // immutable.
 type Schema struct {
+	defs    []Definition
 	caveats map[string]*CaveatDef
 	types   map[string]map[string]*relationInfo
 	reverse map[typeRel][]reverseEdge
 }
 
-// NewSchema validates the definitions and returns a Schema.
+// maxRewriteDepth bounds how deeply Union, Intersection and Exclusion nest,
+// so that validating and evaluating a rewrite stays cheap and shallow.
+const maxRewriteDepth = 64
+
+// keywords are the words of the text form, which cannot be names.
+var keywords = map[string]bool{"type": true, "relation": true, "caveat": true, "or": true, "and": true, "but": true, "not": true, "from": true, "with": true}
+
+// validDefName reports whether s can name a type, relation, caveat or
+// caveat parameter.
+func validDefName(s string) bool { return validName(s) && !keywords[s] }
+
+// NewSchema validates the definitions and returns a Schema. Names cannot be
+// the keywords of the text form (see ParseSchema), and Union, Intersection
+// and Exclusion nest at most 64 deep.
 func NewSchema(defs ...Definition) (*Schema, error) {
-	s := &Schema{types: map[string]map[string]*relationInfo{}, caveats: map[string]*CaveatDef{}}
+	s := &Schema{defs: slices.Clone(defs), types: map[string]map[string]*relationInfo{}, caveats: map[string]*CaveatDef{}}
 	var types []TypeDef
 	for _, d := range defs {
 		switch d := d.(type) {
@@ -159,7 +184,7 @@ func NewSchema(defs ...Definition) (*Schema, error) {
 		}
 	}
 	for _, t := range types {
-		if !validName(t.name) {
+		if !validDefName(t.name) {
 			return nil, fmt.Errorf("%w: type name %q", ErrInvalidSchema, t.name)
 		}
 		if _, dup := s.types[t.name]; dup {
@@ -167,7 +192,7 @@ func NewSchema(defs ...Definition) (*Schema, error) {
 		}
 		rels := map[string]*relationInfo{}
 		for _, r := range t.relations {
-			if !validName(r.name) {
+			if !validDefName(r.name) {
 				return nil, fmt.Errorf("%w: %s: relation name %q", ErrInvalidSchema, t.name, r.name)
 			}
 			if _, dup := rels[r.name]; dup {
@@ -182,20 +207,35 @@ func NewSchema(defs ...Definition) (*Schema, error) {
 	}
 
 	// Validate rewrites once every type and relation is known.
-	for typ, rels := range s.types {
-		for name, info := range rels {
-			allowed, err := s.validateRewrite(typ, info.rewrite)
-			if err != nil {
-				return nil, fmt.Errorf("%w: %s#%s: %v", ErrInvalidSchema, typ, name, err)
-			}
-			info.allowed = allowed
+	for typ, name := range s.relationsInOrder() {
+		info := s.types[typ][name]
+		allowed, err := s.validateRewrite(typ, info.rewrite, 0)
+		if err != nil {
+			return nil, &relationError{typ, name, err.Error()}
 		}
+		info.allowed = allowed
 	}
 	if err := s.checkComputedCycles(); err != nil {
 		return nil, err
 	}
 	s.reverse = s.reverseEdges()
 	return s, nil
+}
+
+// relationsInOrder yields every type and relation in definition order, so
+// that validation reports the first error deterministically.
+func (s *Schema) relationsInOrder() iter.Seq2[string, string] {
+	return func(yield func(string, string) bool) {
+		for _, d := range s.defs {
+			if t, ok := d.(TypeDef); ok {
+				for _, r := range t.relations {
+					if !yield(t.name, r.name) {
+						return
+					}
+				}
+			}
+		}
+	}
 }
 
 func (s *Schema) relation(typ, rel string) (*relationInfo, bool) {
@@ -209,8 +249,8 @@ func (s *Schema) hasType(typ string) bool {
 }
 
 // validateRewrite checks references in r and returns the subjects that
-// Direct nodes in r allow.
-func (s *Schema) validateRewrite(typ string, r Rewrite) ([]allowedSubject, error) {
+// Direct nodes in r allow. depth is the number of operators above r.
+func (s *Schema) validateRewrite(typ string, r Rewrite, depth int) ([]allowedSubject, error) {
 	switch r := r.(type) {
 	case direct:
 		if len(r.allowed) == 0 {
@@ -257,20 +297,23 @@ func (s *Schema) validateRewrite(typ string, r Rewrite) ([]allowedSubject, error
 		}
 		return nil, nil
 	case union:
-		return s.validateChildren(typ, r.children, "Union")
+		return s.validateChildren(typ, r.children, "Union", depth)
 	case intersection:
-		return s.validateChildren(typ, r.children, "Intersection")
+		return s.validateChildren(typ, r.children, "Intersection", depth)
 	case exclusion:
 		if r.base == nil || r.subtract == nil {
 			return nil, errors.New("Exclusion: nil operand")
 		}
-		return s.validateChildren(typ, []Rewrite{r.base, r.subtract}, "Exclusion")
+		return s.validateChildren(typ, []Rewrite{r.base, r.subtract}, "Exclusion", depth)
 	default:
 		return nil, fmt.Errorf("unknown rewrite %T", r)
 	}
 }
 
-func (s *Schema) validateChildren(typ string, children []Rewrite, op string) ([]allowedSubject, error) {
+func (s *Schema) validateChildren(typ string, children []Rewrite, op string, depth int) ([]allowedSubject, error) {
+	if depth == maxRewriteDepth {
+		return nil, fmt.Errorf("operators nest more than %d deep", maxRewriteDepth)
+	}
 	if len(children) == 0 {
 		return nil, fmt.Errorf("%s needs at least one operand", op)
 	}
@@ -279,7 +322,7 @@ func (s *Schema) validateChildren(typ string, children []Rewrite, op string) ([]
 		if c == nil {
 			return nil, fmt.Errorf("%s: nil operand", op)
 		}
-		a, err := s.validateRewrite(typ, c)
+		a, err := s.validateRewrite(typ, c, depth+1)
 		if err != nil {
 			return nil, err
 		}
@@ -334,7 +377,7 @@ func (s *Schema) checkComputedCycles() error {
 	visit = func(n node) error {
 		switch state[n] {
 		case visiting:
-			return fmt.Errorf("%w: %s#%s depends on itself through Computed", ErrInvalidSchema, n.typ, n.rel)
+			return &relationError{n.typ, n.rel, "depends on itself through Computed"}
 		case done:
 			return nil
 		}
@@ -347,11 +390,9 @@ func (s *Schema) checkComputedCycles() error {
 		state[n] = done
 		return nil
 	}
-	for typ, rels := range s.types {
-		for rel := range rels {
-			if err := visit(node{typ, rel}); err != nil {
-				return err
-			}
+	for typ, rel := range s.relationsInOrder() {
+		if err := visit(node{typ, rel}); err != nil {
+			return err
 		}
 	}
 	return nil

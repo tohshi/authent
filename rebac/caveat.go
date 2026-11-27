@@ -86,7 +86,7 @@ func (c *CaveatDef) param(name string) (Param, bool) {
 }
 
 func (c *CaveatDef) validate() error {
-	if !validName(c.name) {
+	if !validDefName(c.name) {
 		return fmt.Errorf("caveat name %q", c.name)
 	}
 	if c.fn == nil {
@@ -95,7 +95,7 @@ func (c *CaveatDef) validate() error {
 	seen := map[string]bool{}
 	for _, p := range c.params {
 		switch {
-		case !validName(p.Name):
+		case !validDefName(p.Name):
 			return fmt.Errorf("caveat %s: parameter name %q", c.name, p.Name)
 		case seen[p.Name]:
 			return fmt.Errorf("caveat %s: duplicate parameter %q", c.name, p.Name)
