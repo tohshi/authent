@@ -1,6 +1,7 @@
 package webauthn
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -80,6 +81,7 @@ type tpmParts struct {
 	typ        uint16
 	extraData  []byte
 	aik        *x509.Certificate
+	aikVersion int // rewrites the issued certificate's version if set
 	corruptSig bool
 }
 
@@ -139,6 +141,13 @@ func tpmStatement(t *testing.T, ca *testCA, a *softAuthenticator, modify func(*t
 		certInfo := tpmCertInfo(p.magic, p.typ, p.extraData, p.name)
 		aikKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		der := ca.issue(t, p.aik, &aikKey.PublicKey)
+		if p.aikVersion != 0 {
+			// The version is the first TBSCertificate field, [0] EXPLICIT
+			// INTEGER; rewriting it leaves every length unchanged.
+			v3 := []byte{0xa0, 0x03, 0x02, 0x01, 0x02}
+			i := bytes.Index(der, v3)
+			der = slices.Concat(der[:i], []byte{0xa0, 0x03, 0x02, 0x01, byte(p.aikVersion - 1)}, der[i+len(v3):])
+		}
 		h := sha256.Sum256(certInfo)
 		sig, _ := ecdsa.SignASN1(rand.Reader, aikKey, h[:])
 		if p.corruptSig {
@@ -175,6 +184,7 @@ func TestTPMAttestation(t *testing.T) {
 		{"SHA-1 name algorithm and an empty name", func(p *tpmParts) { p.nameAlg, p.name = tpmAlgSHA1, []byte{} }, false},
 		{"not TPM-generated", func(p *tpmParts) { p.magic = 0 }, false},
 		{"quote instead of certification", func(p *tpmParts) { p.typ = 0x8018 }, false},
+		{"AIK of version 2", func(p *tpmParts) { p.aikVersion = 2 }, false},
 		{"AIK with a subject", func(p *tpmParts) { p.aik.Subject = pkix.Name{CommonName: "aik"} }, false},
 		{"AIK without the AIK key usage", func(p *tpmParts) { p.aik.UnknownExtKeyUsage = nil }, false},
 		{"AIK that is a CA", func(p *tpmParts) { p.aik.IsCA = true }, false},

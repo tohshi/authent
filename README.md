@@ -578,8 +578,8 @@ In the browser, pass the options to
   `android-safetynet`, are rejected. Set `AttestationRoots` to require a
   certificate chain to known roots, such as a TPM vendor's root, Google's
   hardware attestation roots or the Apple WebAuthn root. TPM statements
-  may be signed with RS1 (RSA with SHA-1), which Windows TPMs use;
-  credential keys never may. For `android-key`, the union of the
+  may be signed with RS1 (RSA with SHA-1), which RFC 8812 registers as
+  deprecated, only for TPM attestation; credential keys never may. For `android-key`, the union of the
   software-enforced and TEE-enforced authorization lists is checked, so
   keys outside a TEE are accepted
 - that the credential is not already registered, belongs to the expected
@@ -613,6 +613,11 @@ Ceremony options:
   extension output from the signed authenticator data. With `appid`,
   `FinishLogin` expects the hash of the AppID instead of the RP ID only
   when the client reports that it used the AppID.
+- The `Challenge` keeps the extension inputs, and Finish rejects outputs
+  that they cannot produce. A `Challenge` serialized by an earlier version
+  of this package with extensions (a list of names) no longer decodes,
+  and its `appid` is dropped, so ceremonies in flight during an upgrade
+  fail closed.
 
 CBOR is decoded strictly: no tags, floats, indefinite lengths, duplicate
 map keys or trailing bytes, with bounds on depth and length.
