@@ -193,12 +193,22 @@ func (e *Engine) validateWrite(t Tuple) error {
 	if !ok {
 		return fmt.Errorf("%w: %s#%s", ErrUnknownRelation, t.Object.Type, t.Relation)
 	}
-	for _, a := range info.allowed {
-		if a.matches(t.Subject, t.Caveat.Name) {
-			return nil
+	if !info.admits(t) {
+		return fmt.Errorf("%w: %s", ErrSubjectNotAllowed, t)
+	}
+	return nil
+}
+
+func (e *Engine) validateQuerySubject(s Subject) error {
+	if err := validateSubject(s, false); err != nil {
+		return err
+	}
+	if s.Relation != "" {
+		if _, ok := e.schema.relation(s.Object.Type, s.Relation); !ok {
+			return fmt.Errorf("%w: subject %s", ErrUnknownRelation, s)
 		}
 	}
-	return fmt.Errorf("%w: %s", ErrSubjectNotAllowed, t)
+	return nil
 }
 
 // Check reports whether subject has permission (a relation) on object.
@@ -283,7 +293,7 @@ func (q *request) decide(it CheckItem) (res CheckResult, evals int) {
 	if err := validateObject(it.Object, false); err != nil {
 		return CheckResult{Err: err}, 0
 	}
-	if err := validateSubject(it.Subject, false); err != nil {
+	if err := q.e.validateQuerySubject(it.Subject); err != nil {
 		return CheckResult{Err: err}, 0
 	}
 	if _, ok := q.e.schema.relation(it.Object.Type, it.Permission); !ok {

@@ -8,6 +8,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -243,7 +244,8 @@ func WithObserver(o authent.Observer) AuthenticatorOption {
 // jwt.WithReplayCache: the token is recorded before the proof is checked,
 // so a stolen token sent with a bad proof would lock out its holder.
 func NewAuthenticator(tokens TokenVerifier, proofs *Verifier, opts ...AuthenticatorOption) (*Authenticator, error) {
-	if tokens == nil || proofs == nil {
+	// A typed nil such as (*jwt.Verifier)(nil) is a non-nil interface.
+	if v := reflect.ValueOf(tokens); tokens == nil || v.Kind() == reflect.Pointer && v.IsNil() || proofs == nil {
 		return nil, errors.New("dpop: nil verifier")
 	}
 	a := &Authenticator{tokens: tokens, proofs: proofs}

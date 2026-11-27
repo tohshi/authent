@@ -125,6 +125,15 @@ type relationInfo struct {
 	allowed []allowedSubject // subjects that may be written; empty if not writable
 }
 
+func (info *relationInfo) admits(t Tuple) bool {
+	for _, a := range info.allowed {
+		if a.matches(t.Subject, t.Caveat.Name) {
+			return true
+		}
+	}
+	return false
+}
+
 // Definition is a type or caveat definition for NewSchema. Build one with
 // Type or Caveat.
 type Definition interface{ definition() }
@@ -267,17 +276,17 @@ func (s *Schema) validateRewrite(typ string, r Rewrite, depth int) ([]allowedSub
 		return out, nil
 	case computed:
 		if _, ok := s.relation(typ, r.relation); !ok {
-			return nil, fmt.Errorf("Computed: unknown relation %q", r.relation)
+			return nil, fmt.Errorf("Computed: unknown relation %q", clip(r.relation))
 		}
 		return nil, nil
 	case tupleToUserset:
 		ts, ok := s.relation(typ, r.tupleset)
 		if !ok {
-			return nil, fmt.Errorf("TupleToUserset: unknown tupleset relation %q", r.tupleset)
+			return nil, fmt.Errorf("TupleToUserset: unknown tupleset relation %q", clip(r.tupleset))
 		}
 		d, ok := ts.rewrite.(direct)
 		if !ok {
-			return nil, fmt.Errorf("TupleToUserset: tupleset relation %q must be a plain Direct relation", r.tupleset)
+			return nil, fmt.Errorf("TupleToUserset: tupleset relation %q must be a plain Direct relation", clip(r.tupleset))
 		}
 		found := false
 		for _, spec := range d.allowed {
@@ -286,14 +295,14 @@ func (s *Schema) validateRewrite(typ string, r Rewrite, depth int) ([]allowedSub
 				return nil, err
 			}
 			if a.wildcard || a.relation != "" {
-				return nil, fmt.Errorf("TupleToUserset: tupleset relation %q may only allow plain object types, not %q", r.tupleset, spec)
+				return nil, fmt.Errorf("TupleToUserset: tupleset relation %q may only allow plain object types, not %q", clip(r.tupleset), clip(spec))
 			}
 			if _, ok := s.relation(a.typ, r.computed); ok {
 				found = true
 			}
 		}
 		if !found {
-			return nil, fmt.Errorf("TupleToUserset: no type allowed by %q has relation %q", r.tupleset, r.computed)
+			return nil, fmt.Errorf("TupleToUserset: no type allowed by %q has relation %q", clip(r.tupleset), clip(r.computed))
 		}
 		return nil, nil
 	case union:
@@ -334,7 +343,7 @@ func (s *Schema) validateChildren(typ string, children []Rewrite, op string, dep
 func (s *Schema) parseAllowed(spec string) (allowedSubject, error) {
 	base, caveat, withCaveat := strings.Cut(spec, " with ")
 	if _, ok := s.caveats[caveat]; withCaveat && !ok {
-		return allowedSubject{}, fmt.Errorf("allowed subject %q: unknown caveat %q", spec, caveat)
+		return allowedSubject{}, fmt.Errorf("allowed subject %q: unknown caveat %q", clip(spec), clip(caveat))
 	}
 	a, err := s.parseSubjectType(base)
 	a.caveat = caveat
@@ -350,13 +359,13 @@ func (s *Schema) parseSubjectType(spec string) (allowedSubject, error) {
 		typ, rel, _ := strings.Cut(spec, "#")
 		a = allowedSubject{typ: typ, relation: rel}
 		if _, ok := s.relation(typ, rel); !ok {
-			return a, fmt.Errorf("allowed subject %q: unknown relation", spec)
+			return a, fmt.Errorf("allowed subject %q: unknown relation", clip(spec))
 		}
 	default:
 		a = allowedSubject{typ: spec}
 	}
 	if !s.hasType(a.typ) {
-		return a, fmt.Errorf("allowed subject %q: unknown type", spec)
+		return a, fmt.Errorf("allowed subject %q: unknown type", clip(spec))
 	}
 	return a, nil
 }

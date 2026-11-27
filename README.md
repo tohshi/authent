@@ -338,16 +338,20 @@ req, _ := client.AuthCodeURL(
   seconds old, plus `Config.Leeway`, so `max_age=0` still accepts an
   authentication within the leeway. With `acr_values`, its `acr` must be
   one of the requested values, as for an essential claim. Both are kept in
-  the `AuthRequest`, so store all of it: `Exchange` fails rather than skip
-  the checks if `MaxAge` or `ACRValues` are lost.
+  the `AuthRequest`, so store all of it: `Exchange` fails with
+  `ErrAuthRequestMismatch` rather than skip the checks if `MaxAge` or
+  `ACRValues` are lost. An `AuthRequest` with `MaxAge` or `ACRValues`
+  created by an earlier version of this package has no such binding in
+  its nonce, so a login in flight during an upgrade fails closed.
 
 `UserInfo` calls the provider's UserInfo endpoint with the access token and
 rejects the response unless its `sub` exactly matches the ID token's. A
 signed response (`application/jwt`) must also verify with the provider's
 keys and carry the provider as `iss` and the client in `aud`; it needs no
 `exp`. With `Config.RequireSignedUserInfo`, plain JSON responses are
-rejected. Encrypted responses are always rejected. Redirects are not followed, so the
-access token is never sent anywhere but the advertised https endpoint.
+rejected. Encrypted responses are always rejected. Redirects are not
+followed, so the access token is never sent anywhere but the advertised
+https endpoint.
 
 `Refresh` uses a `Result`'s refresh token and returns the next `Result`:
 ```go
@@ -750,6 +754,12 @@ ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("us
 ```
 - Writes that do not match the schema are rejected. Examples are a subject
   type the relation does not allow, or a write to a computed-only relation.
+- Every query reads stored tuples through the current schema. After a
+  schema change, a tuple the relation no longer allows (a subject type,
+  userset, wildcard or caveat that was removed) grants nothing in `Check`,
+  `CheckBulk`, `ListObjects`, `ListSubjects` and `Expand`. A query subject
+  such as `team:t#viewer` whose relation the schema does not define fails
+  with `ErrUnknownRelation`.
 - Relations that depend on themselves through `Computed` alone are rejected
   when the schema is built.
 - Cycles in the data follow the well-founded semantics of the rewrites. A
@@ -936,8 +946,12 @@ engine, _ := rebac.NewEngine(schema, tuples, rebac.WithObserver(obs))
   child of the span in the context.
 - `Observe` runs synchronously after the result is decided, so it cannot
   change it. A panic in it is recovered and discarded. It must return
-  quickly; hand slow exports to another goroutine. Without an Observer,
-  nothing is measured.
+  quickly; hand slow exports to another goroutine. It may be called from
+  many goroutines at once, so it must be safe for concurrent use. Without
+  an Observer, nothing is measured.
+- Not observed: registration and enrollment, and `dpop.Verifier` and
+  `dpop.Introspector` when called on their own. `dpop.Authenticator`
+  reports the whole check, including the proof and the introspection.
 
 ## Feature status
 
@@ -947,10 +961,7 @@ and what is out of scope.
 ## Testing
 ```
 go test -race ./...
-go test ./jwt -run '^$' -fuzz FuzzVerify -fuzztime 30s
-go test ./webauthn -run '^$' -fuzz FuzzCBOR -fuzztime 30s
-go test ./apikey -run '^$' -fuzz FuzzParse -fuzztime 30s
-go test ./totp -run '^$' -fuzz FuzzParseURI -fuzztime 30s
+scripts/fuzz.sh   # every fuzz target, FUZZTIME each (default 15s)
 ```
 `jwt/testdata/gen_openssl_vectors.py` generates `jwt/testdata/openssl_vectors.json`
 and `jwt/testdata/gen_openssl_x5c.py` generates the certificate chain in

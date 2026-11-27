@@ -38,9 +38,7 @@ Requires the Go version declared in `go.mod`.
 gofmt -l .                # must print nothing
 go vet ./...
 go test -race ./...
-go test ./jwt -run '^$' -fuzz FuzzVerify -fuzztime 30s
-go test ./webauthn -run '^$' -fuzz FuzzCBOR -fuzztime 30s
-go test ./webauthn -run '^$' -fuzz FuzzParseAuthData -fuzztime 30s
+scripts/fuzz.sh           # every fuzz target, FUZZTIME each (default 15s)
 go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 ```
 

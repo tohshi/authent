@@ -30,12 +30,16 @@ import (
 // expired. It wraps authent.ErrUnauthenticated.
 var ErrInvalidSession = fmt.Errorf("session: invalid session: %w", authent.ErrUnauthenticated)
 
-var errMalformedToken = fmt.Errorf("%w: malformed token", ErrInvalidSession)
+var (
+	errMalformedToken = fmt.Errorf("%w: malformed token", ErrInvalidSession)
+	errExpired        = fmt.Errorf("%w: expired", ErrInvalidSession)
+)
 
 func init() {
 	observe.Register(map[error]authent.Reason{
 		ErrInvalidSession: authent.ReasonInvalidCredentials,
 		errMalformedToken: authent.ReasonMalformed,
+		errExpired:        authent.ReasonExpired,
 	})
 }
 
@@ -357,7 +361,7 @@ func (m *Manager) load(ctx context.Context, key string) (*Session, error) {
 		if err := m.store.Delete(ctx, key, 0); err != nil {
 			return nil, fmt.Errorf("session: deleting expired session: %w", err)
 		}
-		return nil, ErrInvalidSession
+		return nil, errExpired
 	}
 	return s, nil
 }
@@ -378,7 +382,7 @@ func (m *Manager) Save(ctx context.Context, s *Session) error {
 func (m *Manager) save(ctx context.Context, s *Session) error {
 	expiresAt := m.expiresAt(s)
 	if !m.now().Before(expiresAt) {
-		return ErrInvalidSession
+		return errExpired
 	}
 	data, err := json.Marshal(s.st)
 	if err != nil {

@@ -105,7 +105,7 @@ func (e *Engine) ListObjects(ctx context.Context, objectType, permission string,
 	if _, ok := e.schema.relation(objectType, permission); !ok {
 		return nil, fmt.Errorf("%w: %s#%s", ErrUnknownRelation, objectType, permission)
 	}
-	if err := validateSubject(subject, false); err != nil {
+	if err := e.validateQuerySubject(subject); err != nil {
 		return nil, err
 	}
 	q := e.newRequest(ctx, opts)
@@ -329,9 +329,7 @@ func (q *request) forEachEdge(n objRel, r Rewrite, subject func(Subject), push f
 			return err
 		}
 		for _, t := range tuples {
-			if !t.Subject.isWildcard() {
-				push(objRel{t.Subject.Object, r.computed})
-			}
+			push(objRel{t.Subject.Object, r.computed})
 		}
 	case union:
 		return q.forEachChild(n, r.children, subject, push)

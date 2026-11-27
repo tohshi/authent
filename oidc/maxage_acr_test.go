@@ -150,8 +150,9 @@ func TestExchangeRejectsTruncatedAuthRequest(t *testing.T) {
 			}
 			state, code := p.authorize(t, req.URL)
 			tc.change(&req)
-			if res, err := c.Exchange(context.Background(), req, state, code); err == nil {
-				t.Fatalf("Exchange = %+v with a changed AuthRequest", res.Principal)
+			res, err := c.Exchange(context.Background(), req, state, code)
+			if !errors.Is(err, ErrAuthRequestMismatch) || !errors.Is(err, authent.ErrUnauthenticated) {
+				t.Fatalf("Exchange = %v, %v; want ErrAuthRequestMismatch", res, err)
 			}
 		})
 	}

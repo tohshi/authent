@@ -61,6 +61,22 @@ func newTokenVerifier(t *testing.T, keys jwt.KeySet, opts ...jwt.VerifierOption)
 	return v
 }
 
+func TestNewAuthenticatorRejectsNilVerifiers(t *testing.T) {
+	cases := map[string]struct {
+		tokens TokenVerifier
+		proofs *Verifier
+	}{
+		"nil tokens":       {nil, newVerifier(t)},
+		"typed nil tokens": {(*jwt.Verifier)(nil), newVerifier(t)},
+		"nil proofs":       {newTokenVerifier(t, jwt.NewStaticKeySet()), nil},
+	}
+	for name, tc := range cases {
+		if a, err := NewAuthenticator(tc.tokens, tc.proofs); a != nil || err == nil {
+			t.Errorf("%s: NewAuthenticator = %v, %v; want an error", name, a, err)
+		}
+	}
+}
+
 func TestAuthenticator(t *testing.T) {
 	ctx := context.Background()
 	signer, keys := newTokenIssuer(t)

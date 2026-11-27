@@ -61,7 +61,7 @@ func ParseSchema(src string, funcs map[string]CaveatFunc) (*Schema, error) {
 	var re *relationError
 	if errors.As(err, &re) {
 		t := p.at[re.typ+"#"+re.rel]
-		return nil, &ParseError{t.line, t.col, re.typ + "#" + re.rel + ": " + re.msg}
+		return nil, &ParseError{t.line, t.col, clip(re.typ) + "#" + clip(re.rel) + ": " + re.msg}
 	}
 	return s, err
 }
@@ -154,7 +154,17 @@ func describe(t token) string {
 	if t.kind == tokEOF {
 		return "end of input"
 	}
-	return fmt.Sprintf("%q", t.text)
+	return fmt.Sprintf("%q", clip(t.text))
+}
+
+// clip shortens a name quoted in an error, so that a huge identifier does
+// not make a huge error.
+func clip(s string) string {
+	const limit = 32
+	if len(s) <= limit {
+		return s
+	}
+	return s[:limit] + "..."
 }
 
 // name reads a type, relation, caveat or parameter name.
@@ -181,7 +191,7 @@ func (p *parser) schema() ([]Definition, error) {
 				return nil, err
 			}
 			if types[t.name] {
-				return nil, p.errorf(start, "duplicate type %q", t.name)
+				return nil, p.errorf(start, "duplicate type %q", clip(t.name))
 			}
 			types[t.name] = true
 			defs = append(defs, t)
@@ -192,7 +202,7 @@ func (p *parser) schema() ([]Definition, error) {
 				return nil, err
 			}
 			if caveats[c.name] {
-				return nil, p.errorf(start, "duplicate caveat %q", c.name)
+				return nil, p.errorf(start, "duplicate caveat %q", clip(c.name))
 			}
 			caveats[c.name] = true
 			defs = append(defs, c)
@@ -224,7 +234,7 @@ func (p *parser) typeDef(start token) (TypeDef, error) {
 			return TypeDef{}, err
 		}
 		if seen[rel] {
-			return TypeDef{}, p.errorf(at, "duplicate relation %q", rel)
+			return TypeDef{}, p.errorf(at, "duplicate relation %q", clip(rel))
 		}
 		seen[rel] = true
 		p.at[name+"#"+rel] = relTok
@@ -256,7 +266,7 @@ func (p *parser) caveatDef() (CaveatDef, error) {
 	}
 	fn, ok := p.funcs[name]
 	if !ok || fn == nil {
-		return CaveatDef{}, p.errorf(nameTok, "no function for caveat %q", name)
+		return CaveatDef{}, p.errorf(nameTok, "no function for caveat %q", clip(name))
 	}
 	if err := p.expect("("); err != nil {
 		return CaveatDef{}, err
@@ -274,7 +284,7 @@ func (p *parser) caveatDef() (CaveatDef, error) {
 			return CaveatDef{}, err
 		}
 		if seen[pname] {
-			return CaveatDef{}, p.errorf(pt, "duplicate parameter %q", pname)
+			return CaveatDef{}, p.errorf(pt, "duplicate parameter %q", clip(pname))
 		}
 		seen[pname] = true
 		typTok := p.tok
@@ -293,7 +303,7 @@ func (p *parser) caveatDef() (CaveatDef, error) {
 		}
 		pty, ok := paramTypes[typ]
 		if !ok || typTok.kind != tokIdent {
-			return CaveatDef{}, p.errorf(typTok, "unknown parameter type %q", typ)
+			return CaveatDef{}, p.errorf(typTok, "unknown parameter type %q", clip(typ))
 		}
 		params = append(params, Param{pname, pty})
 	}

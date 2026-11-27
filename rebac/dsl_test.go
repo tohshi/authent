@@ -145,6 +145,26 @@ func nestedText(depth int) string {
 	return "type user\ntype doc {\n  relation a: [user]\n  relation v: " + e + "\n}\n"
 }
 
+func TestParseErrorClipsLongNames(t *testing.T) {
+	huge := "x" + strings.Repeat("y", 1<<20)
+	for _, src := range []string{
+		"type user { " + huge + " }",
+		"type " + huge + "\ntype " + huge,
+		"type doc { relation viewer: " + huge + " }",
+		"type doc { relation viewer: [" + huge + "] }",
+		"type doc { relation " + huge + ": nope }",
+	} {
+		_, err := ParseSchema(src, nil)
+		var pe *ParseError
+		if !errors.As(err, &pe) {
+			t.Fatalf("ParseSchema = %v; want a *ParseError", err)
+		}
+		if len(err.Error()) > 200 || !strings.Contains(err.Error(), "xyyy") || !strings.Contains(err.Error(), "...") {
+			t.Errorf("error is %d bytes: %.120s", len(err.Error()), err)
+		}
+	}
+}
+
 func TestParseSchemaNestingLimit(t *testing.T) {
 	s, err := ParseSchema(nestedText(64), nil)
 	if err != nil {

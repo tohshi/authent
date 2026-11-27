@@ -12,9 +12,11 @@ import (
 //
 // Observe is called synchronously, after the result is decided and
 // before it is returned, so it cannot change the result. It must return
-// quickly: hand slow work to another goroutine. A panic in Observe is
-// recovered and discarded, so that an Observer bug cannot abort an
-// authentication.
+// quickly: hand slow work to another goroutine. It may be called from
+// many goroutines at once, for example by concurrent requests, CheckBulk
+// or the httpauth middleware, so it must be safe for concurrent use. A
+// panic in Observe is recovered and discarded, so that an Observer bug
+// cannot abort an authentication.
 type Observer interface {
 	Observe(ctx context.Context, e Event)
 }

@@ -49,6 +49,10 @@ var (
 	// specific to OpenID Connect. Signature and standard claim failures
 	// are reported as jwt errors.
 	ErrInvalidIDToken = fmt.Errorf("oidc: invalid ID token: %w", authent.ErrUnauthenticated)
+	// ErrAuthRequestMismatch means the AuthRequest given to Exchange lacks
+	// or changed the MaxAge or ACRValues it was created with, so its
+	// nonce cannot match the ID token. It wraps ErrInvalidIDToken.
+	ErrAuthRequestMismatch = fmt.Errorf("oidc: AuthRequest does not match its nonce: %w", ErrInvalidIDToken)
 	// ErrPushRejected means the provider rejected a pushed authorization
 	// request, typically because of the client's configuration (for
 	// example an unregistered redirect URI or wrong credentials). No user
@@ -568,7 +572,9 @@ func (c *Client) newAuthRequest(opts []oauth2.AuthCodeOption) (AuthRequest, url.
 
 // policyTag binds MaxAge and ACRValues to the nonce. Exchange recomputes
 // it, so an AuthRequest stored without them fails instead of skipping
-// their checks.
+// their checks. The hash is unkeyed: whoever can edit the stored
+// AuthRequest can recompute it. Tampering is caught because the tagged
+// nonce is also inside the provider-signed ID token.
 func (r AuthRequest) policyTag() string {
 	if r.MaxAge == nil && len(r.ACRValues) == 0 {
 		return ""
@@ -818,7 +824,7 @@ func (c *Client) exchange(ctx context.Context, req AuthRequest, state, code stri
 		return nil, fmt.Errorf("%w: empty code", ErrExchangeRejected)
 	}
 	if random, _, _ := strings.Cut(req.Nonce, "."); req.Nonce != random+req.policyTag() {
-		return nil, errors.New("oidc: AuthRequest lacks the MaxAge or ACRValues it was created with; store all of it")
+		return nil, fmt.Errorf("%w: MaxAge or ACRValues differ from AuthCodeURL; store all of it", ErrAuthRequestMismatch)
 	}
 
 	tok, err := c.oauth.Exchange(context.WithValue(ctx, oauth2.HTTPClient, c.client), code,

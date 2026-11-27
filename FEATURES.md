@@ -120,7 +120,7 @@ Legend:
 | Feature | Status | Notes |
 |---|---|---|
 | Schema definition with a Go API | ✅ | |
-| Schema validation | ✅ | Undefined references, tupleset rules, cycles through `Computed` |
+| Schema validation | ✅ | Undefined references, tupleset rules, cycles through `Computed`; queries ignore stored tuples the current schema no longer allows |
 | Rewrites: `Direct`, `Computed`, `TupleToUserset`, `Union`, `Intersection`, `Exclusion` | ✅ | |
 | Usersets as subjects (`group:eng#member`) | ✅ | |
 | Wildcard subjects (`user:*`) | ✅ | |
@@ -136,7 +136,7 @@ Legend:
 | `Expand` (userset tree) | ✅ | Follows `Computed` and `TupleToUserset`; usersets named by tuples are leaves |
 | `ListObjects` / `ListSubjects` | ✅ | Candidates from a walk over the tuples, filtered by `Check`, so every rewrite is exact; wildcards give "all except"; bounded and cancellable |
 | Consistency tokens (zookies) | ✅ | `Write` returns a `Revision`; every query reads one revision; `AtLeast` fails with `ErrFutureRevision` when the store is behind |
-| Text schema DSL | ✅ | `ParseSchema` and `Schema.String`, one to one with the Go API, which accepts the same names and nesting depth; errors carry line and column; fuzzed, and formatting is stable |
+| Text schema DSL | ✅ | `ParseSchema` and `Schema.String`, one to one with the Go API, which accepts the same names and nesting depth; errors carry line and column and quote at most 32 bytes of a name; fuzzed, and formatting is stable |
 | Caveats / conditional tuples (ABAC) | ✅ | `Caveat` declares a Go function with typed parameters; tuples store a context; `WithContext` supplies the rest; missing parameters give `*MissingContextError`, never true |
 | Bulk check | ✅ | `CheckBulk`: shared store reads and decided relations, ordered results, an error per item |
 | Parallel branch evaluation | ✅ | `WithConcurrency`; decided branches cancel their siblings; the evaluation limit is shared by all branches and fails closed |
@@ -199,7 +199,7 @@ Legend:
 | `net/http` middleware | ✅ | `httpauth`: bearer JWTs, session cookies and API keys; `Require` and `Optional`; CSRF check on unsafe methods; Principal in the context via `authent.NewContext` |
 | gRPC interceptors | ➖ | A gRPC dependency is outside the dependency policy; an interceptor is a few lines on top of `jwt.Verifier` and `authent.NewContext` (example in the README) |
 | Mapping a Principal to a ReBAC subject | ✅ | `rebac.SubjectOf`; `httpauth.RequirePermission` checks a permission per request. The issuer is not part of the subject |
-| Observability hooks (logging, metrics, tracing) | ✅ | `authent.Observer` receives an `Event` per authentication, token verification, authorization check and `httpauth` request: outcome, stable reason code, subject on success, duration; `WithObserver` on every authenticator, `jwt.Verifier`, `rebac.Engine` and the middleware, `oidc.Config.Observer`; `authent.SlogObserver` for `log/slog`. Events never carry credentials or their hashes. Registration and enrollment are not observed |
+| Observability hooks (logging, metrics, tracing) | ✅ | `authent.Observer` receives an `Event` per authentication, token verification, authorization check and `httpauth` request: outcome, stable reason code, subject on success, duration; `WithObserver` on every authenticator, `jwt.Verifier`, `rebac.Engine` and the middleware, `oidc.Config.Observer`; `authent.SlogObserver` for `log/slog`. Events never carry credentials or their hashes. Registration and enrollment are not observed, nor are `dpop.Verifier` and `dpop.Introspector` called on their own: `dpop.Authenticator` reports the whole check. Expiry that `session.Manager` detects has the reason `expired` |
 | API keys / opaque tokens | ✅ | `apikey`: prefixed keys with a CRC-32 checksum, SHA-256 at rest, expiry and revocation |
 | Multi-factor authentication (TOTP, WebAuthn) | ✅ | See the `totp` and `webauthn` sections |
 | Recording several factors in a session (`amr`, step-up) | ✅ | `Session.Factors` with times; `Manager.StepUp` rotates the token; `AuthenticatedSince` checks required factors and their age |
