@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/internal/observe"
 )
 
 // Verifier verifies JWTs. It is safe for concurrent use.
@@ -33,10 +34,18 @@ type Verifier struct {
 	maxAuthAge  *time.Duration
 	roots       *x509.CertPool
 	now         func() time.Time
+	observer    authent.Observer
 }
 
 // VerifierOption configures a Verifier.
 type VerifierOption func(*Verifier)
+
+// WithObserver sends an Event for every Verify, VerifyWithHeader and
+// Authenticate call to o: authent.KindTokenVerification for the first
+// two, authent.KindAuthentication for Authenticate.
+func WithObserver(o authent.Observer) VerifierOption {
+	return func(v *Verifier) { v.observer = o }
+}
 
 // WithAlgorithms sets the accepted algorithms. It is required.
 func WithAlgorithms(algs ...Algorithm) VerifierOption {
@@ -184,7 +193,16 @@ type Header struct {
 
 // VerifyWithHeader is like Verify but also returns the token's header.
 func (v *Verifier) VerifyWithHeader(ctx context.Context, token string) (*Claims, Header, error) {
-	return v.verifyToken(ctx, token, false)
+	start := observe.Start(v.observer)
+	c, h, err := v.verifyToken(ctx, token, false)
+	if v.observer != nil {
+		var sub string
+		if c != nil {
+			sub = c.Subject
+		}
+		observe.Done(ctx, v.observer, authent.KindTokenVerification, authent.MethodJWT, start, sub, err)
+	}
+	return c, h, err
 }
 
 func (v *Verifier) verifyToken(ctx context.Context, token string, requireSubject bool) (*Claims, Header, error) {
@@ -341,6 +359,13 @@ func (v *Verifier) olderThan(now, t time.Time, limit time.Duration) bool {
 // Authenticate verifies token and returns its Principal. "sub" is
 // required. AuthTime is taken from "auth_time" if present, else "iat".
 func (v *Verifier) Authenticate(ctx context.Context, token string) (authent.Principal, error) {
+	start := observe.Start(v.observer)
+	p, err := v.authenticate(ctx, token)
+	observe.Done(ctx, v.observer, authent.KindAuthentication, authent.MethodJWT, start, p.Subject, err)
+	return p, err
+}
+
+func (v *Verifier) authenticate(ctx context.Context, token string) (authent.Principal, error) {
 	c, _, err := v.verifyToken(ctx, token, true)
 	if err != nil {
 		return authent.Principal{}, err

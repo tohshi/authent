@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/internal/observe"
 )
 
 // ErrInvalidToken is the root of all token rejections. It wraps
@@ -34,3 +35,25 @@ var (
 	// WithReplayCache.
 	ErrReplayed = fmt.Errorf("%w: replayed", ErrInvalidToken)
 )
+
+func init() {
+	observe.Register(map[error]authent.Reason{
+		ErrInvalidToken:         authent.ReasonInvalidToken,
+		ErrMalformed:            authent.ReasonMalformed,
+		ErrUnsupportedAlgorithm: authent.ReasonUnsupportedAlgorithm,
+		ErrUnsupportedHeader:    authent.ReasonUnsupportedHeader,
+		ErrUnexpectedType:       authent.ReasonUnexpectedType,
+		ErrNoMatchingKey:        authent.ReasonUnknownKey,
+		ErrInvalidSignature:     authent.ReasonBadSignature,
+		ErrMissingClaim:         authent.ReasonMissingClaim,
+		ErrExpired:              authent.ReasonExpired,
+		ErrNotYetValid:          authent.ReasonNotYetValid,
+		ErrIssuedInFuture:       authent.ReasonNotYetValid,
+		ErrTokenTooOld:          authent.ReasonTooOld,
+		ErrAuthenticationTooOld: authent.ReasonAuthTooOld,
+		ErrInvalidIssuer:        authent.ReasonWrongIssuer,
+		ErrInvalidAudience:      authent.ReasonWrongAudience,
+		ErrSenderConstrained:    authent.ReasonSenderConstrained,
+		ErrReplayed:             authent.ReasonReplayed,
+	})
+}

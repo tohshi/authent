@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/internal/observe"
 )
 
 var (
@@ -85,9 +86,10 @@ type Store interface {
 
 // Manager creates, verifies and revokes keys with one prefix.
 type Manager struct {
-	prefix string
-	store  Store
-	now    func() time.Time
+	prefix   string
+	store    Store
+	now      func() time.Time
+	observer authent.Observer
 }
 
 // Option configures a Manager.
@@ -95,6 +97,9 @@ type Option func(*Manager)
 
 // WithClock overrides the clock, for tests.
 func WithClock(now func() time.Time) Option { return func(m *Manager) { m.now = now } }
+
+// WithObserver sends an Event for every Authenticate call to o.
+func WithObserver(o authent.Observer) Option { return func(m *Manager) { m.observer = o } }
 
 // NewManager returns a Manager for keys starting with prefix. The prefix is
 // 2 to 16 lowercase letters and digits, starting with a letter.
@@ -161,6 +166,13 @@ func (m *Manager) Create(ctx context.Context, subject string, expiresAt time.Tim
 // key ID is in Claims["key_id"]. Rejected keys return an error wrapping
 // ErrInvalidKey; store failures do not.
 func (m *Manager) Authenticate(ctx context.Context, key string) (authent.Principal, error) {
+	start := observe.Start(m.observer)
+	p, err := m.authenticate(ctx, key)
+	observe.Done(ctx, m.observer, authent.KindAuthentication, authent.MethodAPIKey, start, p.Subject, err)
+	return p, err
+}
+
+func (m *Manager) authenticate(ctx context.Context, key string) (authent.Principal, error) {
 	id, secret, ok := parse(m.prefix, key)
 	if !ok {
 		return authent.Principal{}, ErrMalformed
@@ -236,4 +248,13 @@ func parse(prefix, key string) (id string, secret []byte, ok bool) {
 		return "", nil, false
 	}
 	return id, secret, true
+}
+
+func init() {
+	observe.Register(map[error]authent.Reason{
+		ErrInvalidKey: authent.ReasonInvalidCredentials,
+		ErrMalformed:  authent.ReasonMalformed,
+		ErrExpired:    authent.ReasonExpired,
+		ErrRevoked:    authent.ReasonRevoked,
+	})
 }

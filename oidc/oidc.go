@@ -34,6 +34,7 @@ import (
 
 	"github.com/tohshi/authent"
 	"github.com/tohshi/authent/dpop"
+	"github.com/tohshi/authent/internal/observe"
 	"github.com/tohshi/authent/jwt"
 )
 
@@ -203,6 +204,10 @@ type Config struct {
 	// Leeway tolerates clock skew when validating ID tokens. The default
 	// is 1 minute.
 	Leeway time.Duration
+	// Observer, if set, receives an Event for every Exchange and Refresh
+	// (authent.KindAuthentication) and BackChannelLogout
+	// (authent.KindTokenVerification).
+	Observer authent.Observer
 	// Now overrides the clock, for tests.
 	Now func() time.Time
 }
@@ -234,6 +239,7 @@ type Client struct {
 	requestSigner     *jwt.Signer
 	assertionAudience string
 	now               func() time.Time
+	observer          authent.Observer
 }
 
 // NewClient returns a Client for the provider.
@@ -356,6 +362,7 @@ func NewClient(p *Provider, cfg Config) (*Client, error) {
 		requestSigner:     requestSigner,
 		assertionAudience: p.Issuer,
 		now:               cfg.Now,
+		observer:          cfg.Observer,
 	}
 	c.client = c.tokenEndpointClient()
 	return c, nil
@@ -786,6 +793,24 @@ type Result struct {
 // Exchange completes the flow started by req. state and code are the
 // query parameters of the callback.
 func (c *Client) Exchange(ctx context.Context, req AuthRequest, state, code string) (*Result, error) {
+	start := observe.Start(c.observer)
+	res, err := c.exchange(ctx, req, state, code)
+	c.observeResult(ctx, start, res, err)
+	return res, err
+}
+
+func (c *Client) observeResult(ctx context.Context, start time.Time, res *Result, err error) {
+	if c.observer == nil {
+		return
+	}
+	var sub string
+	if res != nil {
+		sub = res.Principal.Subject
+	}
+	observe.Done(ctx, c.observer, authent.KindAuthentication, authent.MethodOIDC, start, sub, err)
+}
+
+func (c *Client) exchange(ctx context.Context, req AuthRequest, state, code string) (*Result, error) {
 	if req.State == "" || subtle.ConstantTimeCompare([]byte(state), []byte(req.State)) != 1 {
 		return nil, ErrStateMismatch
 	}
@@ -919,4 +944,14 @@ func leftHalfHash(alg jwt.Algorithm, value string) (string, error) {
 	hh.Write([]byte(value))
 	sum := hh.Sum(nil)
 	return base64.RawURLEncoding.EncodeToString(sum[:len(sum)/2]), nil
+}
+
+func init() {
+	observe.Register(map[error]authent.Reason{
+		ErrStateMismatch:    authent.ReasonStateMismatch,
+		ErrExchangeRejected: authent.ReasonProviderRejected,
+		ErrRefreshRejected:  authent.ReasonProviderRejected,
+		ErrInvalidIDToken:   authent.ReasonInvalidToken,
+		ErrInvalidLogout:    authent.ReasonInvalidToken,
+	})
 }

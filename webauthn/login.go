@@ -9,6 +9,7 @@ import (
 	"slices"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/internal/observe"
 )
 
 // RequestOptions is PublicKeyCredentialRequestOptionsJSON. Marshal it with
@@ -102,6 +103,13 @@ type Login struct {
 // ErrVerificationFailed. Store failures and unusable stored credentials do
 // not wrap authent.ErrUnauthenticated.
 func (rp *RelyingParty) FinishLogin(ctx context.Context, ch Challenge, response []byte) (Login, error) {
+	start := observe.Start(rp.observer)
+	l, err := rp.finishLogin(ctx, ch, response)
+	observe.Done(ctx, rp.observer, authent.KindAuthentication, authent.MethodWebAuthn, start, l.Principal.Subject, err)
+	return l, err
+}
+
+func (rp *RelyingParty) finishLogin(ctx context.Context, ch Challenge, response []byte) (Login, error) {
 	var r authenticationResponse
 	if err := unmarshalResponse(response, &r); err != nil {
 		return Login{}, err

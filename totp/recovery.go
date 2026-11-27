@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/internal/observe"
 )
 
 // ErrInvalidRecoveryCode is returned when a recovery code is malformed,
@@ -90,14 +91,29 @@ type RecoveryStore interface {
 
 // RecoveryAuthenticator verifies single-use recovery codes, the fallback
 // for a lost second factor.
-type RecoveryAuthenticator struct{ store RecoveryStore }
+type RecoveryAuthenticator struct {
+	store    RecoveryStore
+	observer authent.Observer
+}
+
+// RecoveryOption configures a RecoveryAuthenticator.
+type RecoveryOption func(*RecoveryAuthenticator)
+
+// WithRecoveryObserver sends an Event for every Authenticate call to o.
+func WithRecoveryObserver(o authent.Observer) RecoveryOption {
+	return func(a *RecoveryAuthenticator) { a.observer = o }
+}
 
 // NewRecoveryAuthenticator returns a RecoveryAuthenticator backed by store.
-func NewRecoveryAuthenticator(store RecoveryStore) (*RecoveryAuthenticator, error) {
+func NewRecoveryAuthenticator(store RecoveryStore, opts ...RecoveryOption) (*RecoveryAuthenticator, error) {
 	if store == nil {
 		return nil, errors.New("totp: store is required")
 	}
-	return &RecoveryAuthenticator{store: store}, nil
+	a := &RecoveryAuthenticator{store: store}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a, nil
 }
 
 // Authenticate consumes code for subject. It returns
@@ -105,6 +121,13 @@ func NewRecoveryAuthenticator(store RecoveryStore) (*RecoveryAuthenticator, erro
 // Malformed codes do not reach the store. Other errors, such as store
 // failures, do not wrap authent.ErrUnauthenticated.
 func (a *RecoveryAuthenticator) Authenticate(ctx context.Context, subject, code string) (authent.Principal, error) {
+	start := observe.Start(a.observer)
+	p, err := a.authenticate(ctx, subject, code)
+	observe.Done(ctx, a.observer, authent.KindAuthentication, authent.MethodRecovery, start, p.Subject, err)
+	return p, err
+}
+
+func (a *RecoveryAuthenticator) authenticate(ctx context.Context, subject, code string) (authent.Principal, error) {
 	h, ok := parseRecoveryCode(code)
 	if !ok {
 		return authent.Principal{}, ErrInvalidRecoveryCode

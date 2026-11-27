@@ -13,9 +13,11 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/tohshi/authent"
 	"github.com/tohshi/authent/apikey"
+	"github.com/tohshi/authent/internal/observe"
 	"github.com/tohshi/authent/jwt"
 	"github.com/tohshi/authent/session"
 )
@@ -65,13 +67,33 @@ type Challenger interface {
 // ErrorHandler writes the response for a rejected request.
 type ErrorHandler func(w http.ResponseWriter, r *http.Request, err error)
 
-type config struct{ onError ErrorHandler }
+type config struct {
+	onError  ErrorHandler
+	observer authent.Observer
+}
 
 // Option configures Require, Optional and RequirePermission.
 type Option func(*config)
 
 // WithErrorHandler replaces the default error responses.
 func WithErrorHandler(h ErrorHandler) Option { return func(c *config) { c.onError = h } }
+
+// WithObserver sends an Event of kind authent.KindHTTPRequest for every
+// request to o. Requests rejected with ErrForbidden have the outcome
+// authent.OutcomeRejected, and an anonymous request that Optional lets
+// through is a success without a Subject.
+func WithObserver(o authent.Observer) Option { return func(c *config) { c.observer = o } }
+
+func (c *config) observe(r *http.Request, start time.Time, p authent.Principal, err error) {
+	if c.observer == nil {
+		return
+	}
+	e := observe.Result(authent.KindHTTPRequest, p.Method, start, p.Subject, err)
+	if errors.Is(err, ErrForbidden) {
+		e.Outcome = authent.OutcomeRejected
+	}
+	observe.Emit(r.Context(), c.observer, e)
+}
 
 func newConfig(a Authenticator, opts []Option) config {
 	c := config{onError: defaultErrorHandler(a)}
@@ -117,16 +139,23 @@ func middleware(a Authenticator, required bool, opts []Option) func(http.Handler
 	c := newConfig(a, opts)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := observe.Start(c.observer)
 			p, err := a.AuthenticateRequest(r)
+			anonymous := !required && errors.Is(err, ErrNoCredentials)
 			switch {
+			case anonymous:
+				err = nil
 			case err == nil && p.Subject == "":
-				c.onError(w, r, errEmptySubject)
-			case err == nil:
-				next.ServeHTTP(w, r.WithContext(authent.NewContext(r.Context(), p)))
-			case !required && errors.Is(err, ErrNoCredentials):
+				err = errEmptySubject
+			}
+			c.observe(r, start, p, err)
+			switch {
+			case err != nil:
+				c.onError(w, r, err)
+			case anonymous:
 				next.ServeHTTP(w, r)
 			default:
-				c.onError(w, r, err)
+				next.ServeHTTP(w, r.WithContext(authent.NewContext(r.Context(), p)))
 			}
 		})
 	}
@@ -344,4 +373,13 @@ func safeMethod(method string) bool {
 		return true
 	}
 	return false
+}
+
+func init() {
+	observe.Register(map[error]authent.Reason{
+		ErrNoCredentials:   authent.ReasonNoCredentials,
+		ErrForbidden:       authent.ReasonForbidden,
+		ErrCSRF:            authent.ReasonCSRF,
+		errMalformedHeader: authent.ReasonMalformed,
+	})
 }
