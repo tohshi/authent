@@ -66,16 +66,16 @@ func ParseSchema(src string, funcs map[string]CaveatFunc) (*Schema, error) {
 	return s, err
 }
 
-type tokenKind int
+type dslTokenKind int
 
 const (
-	tokEOF tokenKind = iota
+	tokEOF dslTokenKind = iota
 	tokIdent
 	tokPunct
 )
 
 type token struct {
-	kind      tokenKind
+	kind      dslTokenKind
 	text      string
 	line, col int
 }
