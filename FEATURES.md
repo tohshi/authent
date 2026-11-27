@@ -68,7 +68,7 @@ Legend:
 | Validation of the token format before the store lookup | ✅ | |
 | Per-session CSRF token | ✅ | Synchronizer token pattern; compared in constant time |
 | Pluggable store and `MemoryStore` | ✅ | |
-| Redis or SQL stores | ✅ | `SQLStore` for PostgreSQL, MySQL and SQLite through `database/sql`; bring your own driver. Expiry column with `DeleteExpired`. Redis with TTLs in the separate `github.com/tohshi/authent/redis` module (`redissession`) |
+| Redis or SQL stores | ✅ | `session/sqlstore.Store` for PostgreSQL, MySQL and SQLite through `database/sql`; bring your own driver. Expiry column with `DeleteExpired`. Redis with TTLs in the separate `github.com/tohshi/authent/redis` module (`redissession`) |
 | Revoking all sessions of a subject ("log out everywhere") | ✅ | `RevokeAll`; every `Store` keeps a subject index. A concurrent rotation does not survive it |
 | Listing a subject's active sessions | ✅ | `List` returns sessions without tokens; `Revoke` ends one by its handle, only for its own subject |
 | Conflict detection on concurrent saves | ✅ | Versioned records with compare-and-swap in every store; `ErrConflict` on a lost race |
@@ -131,7 +131,7 @@ Legend:
 | Write validation against the schema | ✅ | Batches are atomic |
 | Tuple string format (parse and format) | ✅ | `doc:readme#viewer@user:alice`, with a caveat `...@user:alice[office:{"ip":"10.0.0.1"}]`; fuzzed |
 | `TupleStore` interface and `MemoryStore` | ✅ | `MemoryStore` indexes subjects for reverse (subject) filters |
-| Persistent stores: `SQLStore` for PostgreSQL, MySQL and SQLite | ✅ | Through `database/sql`; bring your own driver. Byte-wise identifier comparison |
+| Persistent stores: `rebac/sqlstore.Store` for PostgreSQL, MySQL and SQLite | ✅ | Through `database/sql`; bring your own driver. Byte-wise identifier comparison |
 | `TupleStore` conformance suite | ✅ | `rebactest.TestTupleStore` |
 | `Expand` (userset tree) | ✅ | Follows `Computed` and `TupleToUserset`; usersets named by tuples are leaves |
 | `ListObjects` / `ListSubjects` | ✅ | Candidates from a walk over the tuples, filtered by `Check`, so every rewrite is exact; wildcards give "all except"; bounded and cancellable |

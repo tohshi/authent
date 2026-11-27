@@ -53,7 +53,7 @@ ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("us
   a replica that is behind.
 - `TupleStore.Changes` lists the writes and deletes after a revision, and
   `Engine.Watch` streams them as they happen. `Prune` on `MemoryStore` and
-  `SQLStore` discards history; reads and changes before the pruned
+  `sqlstore.Store` discards history; reads and changes before the pruned
   revision then fail with `ErrRevisionExpired`.
 - `WithCheckCache(n)` keeps up to `n` check results across calls. A result
   answers a later check only if it was computed at the store's latest
@@ -165,13 +165,14 @@ ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("us
 ## Persistent tuple storage
 ```go
 import _ "github.com/jackc/pgx/v5/stdlib" // or any database/sql driver
+import "github.com/tohshi/authent/rebac/sqlstore"
 
 db, _ := sql.Open("pgx", dsn)
-store, _ := rebac.NewSQLStore(db, rebac.PostgreSQL) // also rebac.MySQL, rebac.SQLite
+store, _ := sqlstore.New(db, sqlstore.PostgreSQL) // also sqlstore.MySQL, sqlstore.SQLite
 store.CreateTable(ctx) // or apply store.CreateTableStatements() with your migration tool
 engine, _ := rebac.NewEngine(schema, store)
 ```
-- `SQLStore` works through `database/sql` and imports no driver; you choose
+- `sqlstore.Store` works through `database/sql` and imports no driver; you choose
   one.
 - Identifiers are compared byte by byte. `CreateTable` uses `COLLATE "C"`
   on PostgreSQL and `VARBINARY` on MySQL, so `Alice` and `alice` are
@@ -189,5 +190,5 @@ engine, _ := rebac.NewEngine(schema, store)
   statement, so a concurrent `Prune` is detected, not silently read
   around.
 - `rebactest.TestTupleStore` is a conformance suite for `TupleStore`
-  implementations. Run it against your own store, or against `SQLStore`
+  implementations. Run it against your own store, or against `sqlstore.Store`
   with your database and driver.

@@ -14,7 +14,7 @@ import (
 	"github.com/tohshi/authent/session"
 )
 
-// Dialect selects the SQL syntax an Store generates.
+// Dialect selects the SQL syntax a Store generates.
 type Dialect int
 
 const (
@@ -54,17 +54,17 @@ func (d Dialect) quote(ident string) string {
 	return `"` + ident + `"`
 }
 
-// DefaultTable is the table name an Store uses unless WithTable is
+// DefaultTable is the table name a Store uses unless WithTable is
 // given.
 const DefaultTable = "authent_sessions"
 
-// maxSQLSubject is the longest subject, in bytes, an Store accepts. It
+// maxSQLSubject is the longest subject, in bytes, a Store accepts. It
 // sizes the MySQL column.
 const maxSQLSubject = 1024
 
 const sqlColumns = "token_hash, subject, version, expires_at, data"
 
-// Store is a Store backed by a SQL database through database/sql. It
+// Store implements session.Store through database/sql. It
 // does not import a driver: open db with the driver of your choice, such
 // as github.com/jackc/pgx/v5/stdlib, github.com/go-sql-driver/mysql or
 // modernc.org/sqlite, and pass the matching Dialect.
@@ -99,7 +99,7 @@ type Store struct {
 	deleteExpiredKeySQL string
 }
 
-// Option configures an Store.
+// Option configures a Store.
 type Option func(*config)
 
 type config struct {
@@ -115,7 +115,7 @@ func WithTable(name string) Option {
 	return func(c *config) { c.table = name }
 }
 
-// New returns an Store that stores sessions in db using
+// New returns a Store that stores sessions in db using
 // dialect. It does not touch the database; see CreateTable.
 func New(db *sql.DB, dialect Dialect, opts ...Option) (*Store, error) {
 	cfg := config{table: DefaultTable}

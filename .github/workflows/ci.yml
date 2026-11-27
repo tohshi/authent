@@ -57,6 +57,8 @@ jobs:
             echo "$disallowed"
             exit 1
           fi
+      - name: Redis consumer module
+        run: bash .github/scripts/check-redis-consumer.sh
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 

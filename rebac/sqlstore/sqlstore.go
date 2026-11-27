@@ -14,7 +14,7 @@ import (
 	"github.com/tohshi/authent/rebac"
 )
 
-// Dialect selects the SQL syntax an Store generates.
+// Dialect selects the SQL syntax a Store generates.
 type Dialect int
 
 const (
@@ -54,7 +54,7 @@ func (d Dialect) quote(ident string) string {
 	return `"` + ident + `"`
 }
 
-// DefaultTable is the table name an Store uses unless WithTable is
+// DefaultTable is the table name a Store uses unless WithTable is
 // given.
 const DefaultTable = "rebac_tuples"
 
@@ -77,7 +77,7 @@ func tupleArgs(t rebac.Tuple) []any {
 	return []any{t.Object.Type, t.Object.ID, t.Relation, t.Subject.Object.Type, t.Subject.Object.ID, t.Subject.Relation}
 }
 
-// Store is a TupleStore backed by a SQL database through database/sql.
+// Store implements rebac.TupleStore through database/sql.
 // It does not import a driver: open db with the driver of your choice, such
 // as github.com/jackc/pgx/v5/stdlib, github.com/go-sql-driver/mysql or
 // modernc.org/sqlite, and pass the matching Dialect.
@@ -115,7 +115,7 @@ type Store struct {
 	pruneSQL      string
 }
 
-// Option configures an Store.
+// Option configures a Store.
 type Option func(*config)
 
 type config struct {
@@ -131,7 +131,7 @@ func WithTable(name string) Option {
 	return func(c *config) { c.table = name }
 }
 
-// New returns an Store that stores tuples in db using dialect.
+// New returns a Store that stores tuples in db using dialect.
 // It does not touch the database; see CreateTable.
 func New(db *sql.DB, dialect Dialect, opts ...Option) (*Store, error) {
 	cfg := config{table: DefaultTable}
