@@ -947,10 +947,7 @@ and what is out of scope.
 ## Testing
 ```
 go test -race ./...
-go test ./jwt -run '^$' -fuzz FuzzVerify -fuzztime 30s
-go test ./webauthn -run '^$' -fuzz FuzzCBOR -fuzztime 30s
-go test ./apikey -run '^$' -fuzz FuzzParse -fuzztime 30s
-go test ./totp -run '^$' -fuzz FuzzParseURI -fuzztime 30s
+scripts/fuzz.sh   # every fuzz target, FUZZTIME each (default 15s)
 ```
 `jwt/testdata/gen_openssl_vectors.py` generates `jwt/testdata/openssl_vectors.json`
 and `jwt/testdata/gen_openssl_x5c.py` generates the certificate chain in

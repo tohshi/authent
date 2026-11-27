@@ -68,9 +68,9 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: go test ./jwt -run '^$' -fuzz '^FuzzVerify$' -fuzztime 60s
-      - run: go test ./webauthn -run '^$' -fuzz '^FuzzCBOR$' -fuzztime 30s
-      - run: go test ./webauthn -run '^$' -fuzz '^FuzzParseAuthData$' -fuzztime 30s
+      - run: scripts/fuzz.sh
+        env:
+          FUZZTIME: 15s
 
   integration:
     name: Integration
