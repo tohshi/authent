@@ -60,6 +60,16 @@ guides below.
 | `httpauth` | `net/http` middleware for JWTs, sessions and API keys | [HTTP middleware](docs/http-middleware.md) |
 | `rebac` | Relationship-based access control | [ReBAC](docs/rebac.md) |
 
+## Storage adapters
+
+Each feature accepts a store interface, such as `session.Store`,
+`rebac.TupleStore`, or `jwt.ReplayCache`. The root module includes in-memory
+stores and optional `database/sql` adapters in `session/sqlstore`,
+`rebac/sqlstore`, and `jwt/sqlreplay`; these adapters import no SQL driver.
+Redis adapters live in the separate `github.com/tohshi/authent/redis` module,
+so the core module has no go-redis requirement. Applications can provide their
+own store implementations and run the conformance suites against them.
+
 For logging, metrics and tracing across packages, see
 [observability](docs/observability.md).
 

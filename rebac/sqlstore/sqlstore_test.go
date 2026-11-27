@@ -1,4 +1,4 @@
-package rebac_test
+package sqlstore_test
 
 import (
 	"context"
@@ -17,6 +17,7 @@ import (
 
 	"github.com/tohshi/authent/rebac"
 	"github.com/tohshi/authent/rebac/rebactest"
+	"github.com/tohshi/authent/rebac/sqlstore"
 )
 
 // fakeDB is an in-memory database/sql driver that understands exactly the
@@ -25,7 +26,7 @@ import (
 // inject failures and rows. Real databases are exercised by running
 // rebactest.TestTupleStore against them.
 type fakeDB struct {
-	dialect rebac.SQLDialect
+	dialect sqlstore.Dialect
 	// foldCase makes tuple column conditions compare case-insensitively,
 	// like a table created with a case-insensitive collation.
 	foldCase bool
@@ -56,7 +57,7 @@ func (d fakeData) clone() fakeData {
 	return d
 }
 
-func newFakeDB(t *testing.T, d rebac.SQLDialect) (*fakeDB, *sql.DB) {
+func newFakeDB(t *testing.T, d sqlstore.Dialect) (*fakeDB, *sql.DB) {
 	f := &fakeDB{dialect: d}
 	db := sql.OpenDB(f)
 	// One connection proves that recursive reads do not need two.
@@ -65,9 +66,9 @@ func newFakeDB(t *testing.T, d rebac.SQLDialect) (*fakeDB, *sql.DB) {
 	return f, db
 }
 
-func newFakeStore(t *testing.T, d rebac.SQLDialect) (*fakeDB, *rebac.SQLStore) {
+func newFakeStore(t *testing.T, d sqlstore.Dialect) (*fakeDB, *sqlstore.Store) {
 	f, db := newFakeDB(t, d)
-	s, err := rebac.NewSQLStore(db, d)
+	s, err := sqlstore.New(db, d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +111,7 @@ type cond struct {
 func (f *fakeDB) parse(query string, args []driver.NamedValue) ([]cond, error) {
 	for _, m := range tableRE.FindAllStringSubmatch(query, -1) {
 		name := strings.Trim(m[1], "\"`")
-		if name != rebac.DefaultSQLTable && name != rebac.DefaultSQLTable+"_revision" {
+		if name != sqlstore.DefaultTable && name != sqlstore.DefaultTable+"_revision" {
 			return nil, fmt.Errorf("fake: unexpected table %q in %q", name, query)
 		}
 	}
@@ -119,7 +120,7 @@ func (f *fakeDB) parse(query string, args []driver.NamedValue) ([]cond, error) {
 		return nil, fmt.Errorf("fake: %d placeholders, %d args", len(phs), len(args))
 	}
 	for i, p := range phs {
-		if want := map[bool]string{true: "$" + strconv.Itoa(i+1), false: "?"}[f.dialect == rebac.PostgreSQL]; p != want {
+		if want := map[bool]string{true: "$" + strconv.Itoa(i+1), false: "?"}[f.dialect == sqlstore.PostgreSQL]; p != want {
 			return nil, fmt.Errorf("fake: placeholder %s, want %s", p, want)
 		}
 	}
@@ -344,7 +345,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 				}
 				v := []driver.Value{d.rev, d.pruned}
 				for _, col := range append(row.cols[:], row.caveat[:]...) {
-					if c.db.dialect == rebac.MySQL {
+					if c.db.dialect == sqlstore.MySQL {
 						v = append(v, []byte(col))
 					} else {
 						v = append(v, col)
@@ -444,7 +445,7 @@ func (r *fakeRows) Next(dest []driver.Value) error {
 	return nil
 }
 
-var dialects = []rebac.SQLDialect{rebac.PostgreSQL, rebac.MySQL, rebac.SQLite}
+var dialects = []sqlstore.Dialect{sqlstore.PostgreSQL, sqlstore.MySQL, sqlstore.SQLite}
 
 func TestSQLStoreConformance(t *testing.T) {
 	for _, d := range dialects {
@@ -478,7 +479,7 @@ func TestSQLStoreWriteIsAtomic(t *testing.T) {
 	ctx := context.Background()
 	for _, failOn := range []string{"INSERT", "COMMIT"} {
 		t.Run(failOn, func(t *testing.T) {
-			f, s := newFakeStore(t, rebac.PostgreSQL)
+			f, s := newFakeStore(t, sqlstore.PostgreSQL)
 			old := rebac.MustParseTuple("doc:a#viewer@user:old")
 			if _, err := s.Write(ctx, []rebac.Tuple{old}, nil); err != nil {
 				t.Fatal(err)
@@ -509,7 +510,7 @@ func TestSQLStoreWriteIsAtomic(t *testing.T) {
 }
 
 func TestSQLStoreErrorsFailClosed(t *testing.T) {
-	f, s := newFakeStore(t, rebac.SQLite)
+	f, s := newFakeStore(t, sqlstore.SQLite)
 	schema, err := rebac.NewSchema(rebac.Type("user"), rebac.Type("doc", rebac.Relation("viewer", rebac.Direct("user"))))
 	if err != nil {
 		t.Fatal(err)
@@ -540,7 +541,7 @@ func TestSQLStoreRejectsInvalidRows(t *testing.T) {
 		{"doc", "a", "viewer", "user", "", ""},          // empty ID
 		{"doc", "a", "viewer", "user", "a\x00lice", ""}, // control character
 	} {
-		f, s := newFakeStore(t, rebac.MySQL)
+		f, s := newFakeStore(t, sqlstore.MySQL)
 		f.insert(row)
 		_, err := readAll(s, rebac.Filter{ObjectType: "doc", ObjectID: row[1], Relation: row[2]})
 		if !errors.Is(err, rebac.ErrInvalidTuple) {
@@ -562,7 +563,7 @@ func TestSQLStoreRejectsInvalidRows(t *testing.T) {
 }
 
 func TestSQLStoreRejectsInvalidWrites(t *testing.T) {
-	_, s := newFakeStore(t, rebac.PostgreSQL)
+	_, s := newFakeStore(t, sqlstore.PostgreSQL)
 	good := rebac.MustParseTuple("doc:a#viewer@user:alice")
 	bad := rebac.Tuple{Object: rebac.Obj("doc", "*"), Relation: "viewer", Subject: rebac.Sub("user", "bob")}
 	if _, err := s.Write(context.Background(), []rebac.Tuple{good, bad}, nil); !errors.Is(err, rebac.ErrInvalidTuple) {
@@ -576,7 +577,7 @@ func TestSQLStoreRejectsInvalidWrites(t *testing.T) {
 func TestSQLStoreDiscardsInexactRows(t *testing.T) {
 	// A table with a case-insensitive collation returns rows for other IDs.
 	// They must not grant access.
-	f, s := newFakeStore(t, rebac.MySQL)
+	f, s := newFakeStore(t, sqlstore.MySQL)
 	f.foldCase = true
 	f.insert([6]string{"doc", "README", "viewer", "user", "eve", ""})
 	f.insert([6]string{"doc", "readme", "viewer", "user", "Eve", ""})
@@ -597,8 +598,8 @@ func TestSQLStoreDiscardsInexactRows(t *testing.T) {
 }
 
 func TestSQLStoreRequiresTable(t *testing.T) {
-	_, db := newFakeDB(t, rebac.SQLite)
-	s, err := rebac.NewSQLStore(db, rebac.SQLite)
+	_, db := newFakeDB(t, sqlstore.SQLite)
+	s, err := sqlstore.New(db, sqlstore.SQLite)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -617,9 +618,9 @@ func TestSQLStoreRequiresTable(t *testing.T) {
 }
 
 func TestSQLStoreCreateTableStatements(t *testing.T) {
-	_, db := newFakeDB(t, rebac.PostgreSQL)
+	_, db := newFakeDB(t, sqlstore.PostgreSQL)
 	for _, d := range dialects {
-		s, err := rebac.NewSQLStore(db, d, rebac.WithSQLTable("authz.tuples"))
+		s, err := sqlstore.New(db, d, sqlstore.WithTable("authz.tuples"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -635,17 +636,17 @@ func TestSQLStoreCreateTableStatements(t *testing.T) {
 }
 
 func TestNewSQLStore(t *testing.T) {
-	_, db := newFakeDB(t, rebac.PostgreSQL)
-	if _, err := rebac.NewSQLStore(nil, rebac.PostgreSQL); err == nil {
+	_, db := newFakeDB(t, sqlstore.PostgreSQL)
+	if _, err := sqlstore.New(nil, sqlstore.PostgreSQL); err == nil {
 		t.Error("nil db accepted")
 	}
-	for _, d := range []rebac.SQLDialect{0, 4} {
-		if _, err := rebac.NewSQLStore(db, d); err == nil {
+	for _, d := range []sqlstore.Dialect{0, 4} {
+		if _, err := sqlstore.New(db, d); err == nil {
 			t.Errorf("dialect %v accepted", d)
 		}
 	}
 	for _, name := range []string{"tuples", "_t1", "authz.tuples", "A_B.c9", strings.Repeat("t", 51), strings.Repeat("s", 63) + ".t"} {
-		if _, err := rebac.NewSQLStore(db, rebac.PostgreSQL, rebac.WithSQLTable(name)); err != nil {
+		if _, err := sqlstore.New(db, sqlstore.PostgreSQL, sqlstore.WithTable(name)); err != nil {
 			t.Errorf("table %q rejected: %v", name, err)
 		}
 	}
@@ -653,7 +654,7 @@ func TestNewSQLStore(t *testing.T) {
 		"", ".", "a.", ".a", "a.b.c", "1abc", "a-b", "a b", `a"b`, "a`b", "a;DROP TABLE x",
 		"tuples\x00", "té", strings.Repeat("t", 52), strings.Repeat("s", 64) + ".t",
 	} {
-		if _, err := rebac.NewSQLStore(db, rebac.PostgreSQL, rebac.WithSQLTable(name)); err == nil {
+		if _, err := sqlstore.New(db, sqlstore.PostgreSQL, sqlstore.WithTable(name)); err == nil {
 			t.Errorf("table %q accepted", name)
 		}
 	}

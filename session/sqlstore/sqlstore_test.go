@@ -1,4 +1,4 @@
-package session_test
+package sqlstore_test
 
 import (
 	"context"
@@ -17,6 +17,7 @@ import (
 	"github.com/tohshi/authent"
 	"github.com/tohshi/authent/session"
 	"github.com/tohshi/authent/session/sessiontest"
+	"github.com/tohshi/authent/session/sqlstore"
 )
 
 // fakeDB is an in-memory database/sql driver that understands exactly the
@@ -24,7 +25,7 @@ import (
 // and lets tests inject failures and rows. Real databases are exercised by
 // running sessiontest.TestStore against them.
 type fakeDB struct {
-	dialect session.SQLDialect
+	dialect sqlstore.Dialect
 	// foldCase makes WHERE clauses compare text case-insensitively, like a
 	// table created with a case-insensitive collation.
 	foldCase bool
@@ -43,16 +44,16 @@ type fakeRow struct {
 	data             []byte
 }
 
-func newFakeDB(t *testing.T, d session.SQLDialect) (*fakeDB, *sql.DB) {
+func newFakeDB(t *testing.T, d sqlstore.Dialect) (*fakeDB, *sql.DB) {
 	f := &fakeDB{dialect: d, rows: map[string]fakeRow{}}
 	db := sql.OpenDB(f)
 	t.Cleanup(func() { db.Close() })
 	return f, db
 }
 
-func newFakeStore(t *testing.T, d session.SQLDialect) (*fakeDB, *session.SQLStore) {
+func newFakeStore(t *testing.T, d sqlstore.Dialect) (*fakeDB, *sqlstore.Store) {
 	f, db := newFakeDB(t, d)
-	s, err := session.NewSQLStore(db, d)
+	s, err := sqlstore.New(db, d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +106,7 @@ type term struct {
 // parse checks the statement's table and placeholders and returns its
 // terms with their arguments.
 func (f *fakeDB) parse(query string, args []driver.NamedValue) ([]term, error) {
-	if m := tableRE.FindStringSubmatch(query); m == nil || strings.Trim(m[1], "\"`") != session.DefaultSQLTable {
+	if m := tableRE.FindStringSubmatch(query); m == nil || strings.Trim(m[1], "\"`") != sqlstore.DefaultTable {
 		return nil, fmt.Errorf("fake: unexpected table in %q", query)
 	}
 	phs := placeholderRE.FindAllString(query, -1)
@@ -114,7 +115,7 @@ func (f *fakeDB) parse(query string, args []driver.NamedValue) ([]term, error) {
 	}
 	for i, p := range phs {
 		want := "?"
-		if f.dialect == session.PostgreSQL {
+		if f.dialect == sqlstore.PostgreSQL {
 			want = "$" + strconv.Itoa(i+1)
 		}
 		if p != want {
@@ -173,6 +174,17 @@ type fakeConn struct{ db *fakeDB }
 func (c *fakeConn) Prepare(query string) (driver.Stmt, error) { return &fakeStmt{c, query}, nil }
 func (c *fakeConn) Close() error                              { return nil }
 func (c *fakeConn) Begin() (driver.Tx, error)                 { return nil, errors.New("fake: no transactions") }
+func (c *fakeConn) BeginTx(_ context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	if opts.Isolation != driver.IsolationLevel(sql.LevelReadCommitted) {
+		return nil, fmt.Errorf("fake: isolation level %d", opts.Isolation)
+	}
+	return fakeTx{}, nil
+}
+
+type fakeTx struct{}
+
+func (fakeTx) Commit() error   { return nil }
+func (fakeTx) Rollback() error { return nil }
 
 func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	f := c.db
@@ -189,6 +201,9 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	}
 	if !f.created {
 		return nil, errors.New("fake: no such table")
+	}
+	if query == "LOCK TABLE \""+sqlstore.DefaultTable+"\" IN SHARE ROW EXCLUSIVE MODE" && f.dialect == sqlstore.PostgreSQL && len(args) == 0 {
+		return driver.RowsAffected(0), nil
 	}
 	terms, err := f.parse(query, args)
 	if err != nil {
@@ -260,7 +275,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	if err != nil {
 		return nil, err
 	}
-	rows := &fakeRows{bytes: f.dialect == session.MySQL}
+	rows := &fakeRows{bytes: f.dialect == sqlstore.MySQL}
 	for key, r := range f.rows {
 		ok, err := f.match(key, r, terms)
 		if err != nil {
@@ -323,7 +338,7 @@ func (r *fakeRows) Next(dest []driver.Value) error {
 	return nil
 }
 
-var dialects = []session.SQLDialect{session.PostgreSQL, session.MySQL, session.SQLite}
+var dialects = []sqlstore.Dialect{sqlstore.PostgreSQL, sqlstore.MySQL, sqlstore.SQLite}
 
 func TestSQLStoreConformance(t *testing.T) {
 	for _, d := range dialects {
@@ -346,7 +361,7 @@ func record(subject string, version uint64, expires time.Time) session.Record {
 }
 
 func TestSQLStoreDeleteExpired(t *testing.T) {
-	f, s := newFakeStore(t, session.SQLite)
+	f, s := newFakeStore(t, sqlstore.SQLite)
 	live, dead := "live", "dead"
 	if err := s.Save(ctx, live, record("alice", 1, time.Now().Add(time.Hour))); err != nil {
 		t.Fatal(err)
@@ -371,7 +386,7 @@ func TestSQLStoreDeleteExpired(t *testing.T) {
 func TestSQLStoreDiscardsInexactRows(t *testing.T) {
 	// A table with a case-insensitive collation returns rows for other
 	// keys and subjects. They must not be loaded or listed.
-	f, s := newFakeStore(t, session.MySQL)
+	f, s := newFakeStore(t, sqlstore.MySQL)
 	f.foldCase = true
 	exp := time.Now().Add(time.Hour).UnixNano()
 	f.insert("KEY", fakeRow{"Alice", 1, exp, []byte("{}")})
@@ -387,7 +402,7 @@ func TestSQLStoreDiscardsInexactRows(t *testing.T) {
 }
 
 func TestSQLStoreErrorsFailClosed(t *testing.T) {
-	f, s := newFakeStore(t, session.PostgreSQL)
+	f, s := newFakeStore(t, sqlstore.PostgreSQL)
 	m, err := session.NewManager(s)
 	if err != nil {
 		t.Fatal(err)
@@ -440,7 +455,7 @@ func TestSQLStoreErrorsFailClosed(t *testing.T) {
 }
 
 func TestSQLStoreRejectsLongSubject(t *testing.T) {
-	_, s := newFakeStore(t, session.MySQL)
+	_, s := newFakeStore(t, sqlstore.MySQL)
 	long := strings.Repeat("a", 1025)
 	if err := s.Save(ctx, "k", record(long, 1, time.Now().Add(time.Hour))); err == nil || errors.Is(err, session.ErrConflict) {
 		t.Fatalf("Save with a 1025-byte subject: err = %v", err)
@@ -451,8 +466,8 @@ func TestSQLStoreRejectsLongSubject(t *testing.T) {
 }
 
 func TestSQLStoreRequiresTable(t *testing.T) {
-	_, db := newFakeDB(t, session.SQLite)
-	s, err := session.NewSQLStore(db, session.SQLite)
+	_, db := newFakeDB(t, sqlstore.SQLite)
+	s, err := sqlstore.New(db, sqlstore.SQLite)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,9 +485,9 @@ func TestSQLStoreRequiresTable(t *testing.T) {
 }
 
 func TestSQLStoreCreateTableStatements(t *testing.T) {
-	_, db := newFakeDB(t, session.PostgreSQL)
+	_, db := newFakeDB(t, sqlstore.PostgreSQL)
 	for _, d := range dialects {
-		s, err := session.NewSQLStore(db, d, session.WithSQLTable("auth.sessions"))
+		s, err := sqlstore.New(db, d, sqlstore.WithTable("auth.sessions"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -488,17 +503,17 @@ func TestSQLStoreCreateTableStatements(t *testing.T) {
 }
 
 func TestNewSQLStore(t *testing.T) {
-	_, db := newFakeDB(t, session.PostgreSQL)
-	if _, err := session.NewSQLStore(nil, session.PostgreSQL); err == nil {
+	_, db := newFakeDB(t, sqlstore.PostgreSQL)
+	if _, err := sqlstore.New(nil, sqlstore.PostgreSQL); err == nil {
 		t.Error("nil db accepted")
 	}
-	for _, d := range []session.SQLDialect{0, 4} {
-		if _, err := session.NewSQLStore(db, d); err == nil {
+	for _, d := range []sqlstore.Dialect{0, 4} {
+		if _, err := sqlstore.New(db, d); err == nil {
 			t.Errorf("dialect %v accepted", d)
 		}
 	}
 	for _, name := range []string{"sessions", "_t1", "auth.sessions", "A_B.c9", strings.Repeat("t", 51), strings.Repeat("s", 63) + ".t"} {
-		if _, err := session.NewSQLStore(db, session.PostgreSQL, session.WithSQLTable(name)); err != nil {
+		if _, err := sqlstore.New(db, sqlstore.PostgreSQL, sqlstore.WithTable(name)); err != nil {
 			t.Errorf("table %q rejected: %v", name, err)
 		}
 	}
@@ -506,7 +521,7 @@ func TestNewSQLStore(t *testing.T) {
 		"", ".", "a.", ".a", "a.b.c", "1abc", "a-b", "a b", `a"b`, "a`b", "a;DROP TABLE x",
 		"sessions\x00", "té", strings.Repeat("t", 52), strings.Repeat("s", 64) + ".t",
 	} {
-		if _, err := session.NewSQLStore(db, session.PostgreSQL, session.WithSQLTable(name)); err == nil {
+		if _, err := sqlstore.New(db, sqlstore.PostgreSQL, sqlstore.WithTable(name)); err == nil {
 			t.Errorf("table %q accepted", name)
 		}
 	}

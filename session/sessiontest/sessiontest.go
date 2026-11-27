@@ -1,7 +1,7 @@
 // Package sessiontest provides a conformance test suite for session.Store
 // implementations.
 //
-// Use it to test your own store, or to check session.SQLStore against your
+// Use it to test your own store, or to check session/sqlstore.Store against your
 // database and driver:
 //
 //	func TestStore(t *testing.T) {

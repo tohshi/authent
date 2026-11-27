@@ -1,7 +1,7 @@
 // Package rebactest provides a conformance test suite for rebac.TupleStore
 // implementations.
 //
-// Use it to test your own store, or to check rebac.SQLStore against your
+// Use it to test your own store, or to check rebac/sqlstore.Store against your
 // database and driver:
 //
 //	func TestStore(t *testing.T) {
@@ -517,7 +517,7 @@ func testChanges(t *testing.T, s rebac.TupleStore) {
 }
 
 // Pruner is implemented by stores that can discard history, such as
-// rebac.MemoryStore and rebac.SQLStore. The Prune test runs only for them.
+// rebac.MemoryStore and rebac/sqlstore.Store. The Prune test runs only for them.
 type Pruner interface {
 	Prune(ctx context.Context, before rebac.Revision) error
 }

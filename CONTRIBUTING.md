@@ -15,10 +15,13 @@ library, so changes are reviewed with correctness and safety first.
 
 ## Ground rules
 
-- **Dependencies.** Only the Go standard library and `golang.org/x/*` modules
-  are allowed. Pull requests that add any other module to `go.mod` will not
-  be merged. Cryptographic formats such as JWS and JWK are implemented here on
-  top of `crypto/*`.
+- **Dependencies.** Direct requirements in the root module are limited to
+  `golang.org/x/*`; CI checks that compiled dependencies follow this policy.
+  SQL adapters use `database/sql` without a driver; the separate `redis/`
+  module alone depends on `go-redis`. Pull requests that add another direct
+  requirement to the root `go.mod` will not be merged.
+  Cryptographic formats such as JWS and JWK are implemented here on top of
+  `crypto/*`.
 - **Fail closed.** When in doubt, reject. Ambiguous input, unknown parameters
   and store errors must never result in a successful authentication or a
   granted permission.
@@ -57,6 +60,19 @@ export AUTHENT_REQUIRE_INTEGRATION=1   # fail instead of skip when a service is 
 
 CI runs the same checks on every pull request, with
 `AUTHENT_REQUIRE_INTEGRATION=1`.
+
+## Releasing the Redis module
+
+`redis/` is a separate Go module. Its `require github.com/tohshi/authent`
+must name a resolvable core version that contains the store interfaces it
+uses. The local `replace github.com/tohshi/authent => ../` is for development;
+Go ignores it when another module imports the Redis module. Before releasing
+the Redis module, update that requirement to the intended core tag or commit,
+run `go mod tidy` in `redis/`, then run
+`bash .github/scripts/check-redis-consumer.sh` from the repository root. The
+check builds both Redis adapters from a fresh consumer module without a core
+`replace`. A release tag for this nested module must start with `redis/`, for
+example `redis/v0.1.0`; a root-module tag does not release it.
 
 ## Commit messages
 

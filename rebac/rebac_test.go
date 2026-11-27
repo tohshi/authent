@@ -9,6 +9,18 @@ import (
 	"testing"
 )
 
+func TestTupleValidate(t *testing.T) {
+	valid := Tuple{Object: Obj("doc", "readme"), Relation: "viewer", Subject: Sub("user", "alice")}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid tuple: %v", err)
+	}
+	invalid := valid
+	invalid.Subject = Sub("user", "")
+	if err := invalid.Validate(); !errors.Is(err, ErrInvalidTuple) {
+		t.Fatalf("invalid tuple: got %v, want ErrInvalidTuple", err)
+	}
+}
+
 func driveSchema(t testing.TB) *Schema {
 	t.Helper()
 	s, err := NewSchema(

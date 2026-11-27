@@ -50,20 +50,23 @@ or stepped up while `RevokeAll` runs does not survive under its new token.
 ## Persistent session storage
 ```go
 import _ "github.com/jackc/pgx/v5/stdlib" // or any database/sql driver
+import "github.com/tohshi/authent/session/sqlstore"
 
 db, _ := sql.Open("pgx", dsn)
-store, _ := session.NewSQLStore(db, session.PostgreSQL) // also session.MySQL, session.SQLite
+store, _ := sqlstore.New(db, sqlstore.PostgreSQL) // also sqlstore.MySQL, sqlstore.SQLite
 store.CreateTable(ctx) // or apply store.CreateTableStatements() with your migration tool
 m, _ := session.NewManager(store)
 // periodically: store.DeleteExpired(ctx)
 ```
-- `SQLStore` works through `database/sql` and imports no driver; you
+- `sqlstore.Store` works through `database/sql` and imports no driver; you
   choose one.
 - Each session is one row keyed by the token hash, with an expiry column.
   `Load` and `List` ignore expired rows, and `DeleteExpired` removes them.
   The Manager still enforces the timeouts itself.
-- Every operation is a single statement, and versions are compared in its
-  `WHERE` clause, so concurrent saves are detected without transactions.
+- Versions are compared in each write's `WHERE` clause, so concurrent saves
+  are detected. On PostgreSQL, `RevokeAll` briefly locks the sessions table
+  against writes to include rotations already in progress; other writes wait
+  for it to commit.
 - Token hashes and subjects are compared byte by byte (`COLLATE "C"` on
   PostgreSQL, `VARBINARY` on MySQL). Subjects may be up to 1024 bytes.
 
