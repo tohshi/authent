@@ -132,6 +132,13 @@ type Config struct {
 	// requires Attestation to be ConveyanceDirect. If nil, attestation
 	// statements are verified but not trusted.
 	AttestationRoots *x509.CertPool
+	// Metadata, if set, checks new credentials against the FIDO Metadata
+	// Service. The attestation of an authenticator listed by AAGUID must
+	// chain to the attestation roots of its metadata statement, and no
+	// status report of compromise or revocation may apply to it. Other
+	// authenticators need a chain to AttestationRoots and are rejected if
+	// it is nil. It requires Attestation to be ConveyanceDirect.
+	Metadata MetadataSource
 	// Algorithms lists the accepted credential algorithms in order of
 	// preference. The default is EdDSA, ES256 and RS256.
 	Algorithms []Algorithm
@@ -362,8 +369,8 @@ func New(cfg Config, store CredentialStore, opts ...Option) (*RelyingParty, erro
 	if !slices.Contains([]Conveyance{ConveyanceNone, ConveyanceIndirect, ConveyanceDirect}, cfg.Attestation) {
 		return nil, fmt.Errorf("webauthn: unknown attestation conveyance %q", cfg.Attestation)
 	}
-	if cfg.AttestationRoots != nil && cfg.Attestation != ConveyanceDirect {
-		return nil, errors.New("webauthn: AttestationRoots requires ConveyanceDirect")
+	if (cfg.AttestationRoots != nil || cfg.Metadata != nil) && cfg.Attestation != ConveyanceDirect {
+		return nil, errors.New("webauthn: AttestationRoots and Metadata require ConveyanceDirect")
 	}
 	if len(cfg.Algorithms) == 0 {
 		cfg.Algorithms = []Algorithm{EdDSA, ES256, RS256}

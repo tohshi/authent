@@ -180,7 +180,7 @@ Legend:
 | WebAuthn Level 3 test vectors | ✅ | §16 vectors, including rejected ones |
 | Attestation formats `tpm`, `android-key`, `apple` | ✅ | WebAuthn L3 §8.3, §8.4 and §8.8; tested with real samples from py_webauthn and the §16 vectors. TPM statements may use RS1 (-65535, SHA-1), which RFC 8812 §2 and §5.3 register as deprecated, only for TPM attestation; credentials may not |
 | Attestation format `android-safetynet` | ➖ | Google: the full turndown of the SafetyNet Attestation API "will happen gradually starting January 31, 2025" ([deprecation timeline](https://web.archive.org/web/20250225205612/https://developer.android.com/privacy-and-security/safetynet/deprecation-timeline)) |
-| FIDO Metadata Service (MDS3) | ⬜ | |
+| FIDO Metadata Service (MDS3) | ✅ | `ParseMetadata` and `FetchMetadata` verify the BLOB's x5c chain to a caller-provided root and require current CRLs for it (MDS3 §3.1.8); `Config.Metadata` supplies attestation roots by AAGUID and rejects models reported as compromised or revoked |
 | Ed448 | ➖ | No Ed448 in the standard library or golang.org/x/crypto |
 | Cross-origin iframes (`crossOrigin`, `topOrigin`) | ✅ | `TopOrigins` lists the pages that may embed a ceremony; `crossOrigin` without `topOrigin` is rejected |
 | Related origins and native app origins | ✅ | `RelatedOrigins` (WebAuthn L3 §5.11); `android:apk-key-hash:` app origins in `Origins`; iOS apps report `https://<RP ID>` |

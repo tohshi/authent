@@ -599,6 +599,29 @@ Origins are matched exactly, never derived from the request:
   [related origin requests](https://www.w3.org/TR/webauthn-3/#sctn-related-origins).
   Serve the same list at `https://<RP ID>/.well-known/webauthn`.
 
+To trust the authenticators listed in the FIDO Metadata Service, verify
+its BLOB and set `Config.Metadata`:
+```go
+roots := x509.NewCertPool()
+roots.AppendCertsFromPEM(globalSignRootR3) // https://secure.globalsign.com/cacert/root-r3.crt
+md, err := webauthn.FetchMetadata(ctx, http.DefaultClient, webauthn.MDS3URL, roots)
+rp, _ := webauthn.New(webauthn.Config{ /* ... */ Attestation: webauthn.ConveyanceDirect, Metadata: md}, store)
+```
+- `FetchMetadata` downloads the BLOB and the CRLs that its signing chain
+  names, with the caller's client. `ParseMetadata` verifies BLOB bytes the
+  caller already has; pass the CRLs with `WithCRLs`. As MDS3 requires, a
+  BLOB is rejected unless a current CRL covers every certificate of its
+  chain except the root and does not revoke it.
+- A listed authenticator's attestation must chain to the roots in its
+  metadata statement. It is rejected when a status report says `REVOKED`,
+  `USER_VERIFICATION_BYPASS`, `USER_KEY_REMOTE_COMPROMISE`,
+  `USER_KEY_PHYSICAL_COMPROMISE` or `ATTESTATION_KEY_COMPROMISE`. A report
+  that names a certificate applies only to chains that contain it.
+  Authenticators that are not listed need a chain to `AttestationRoots`.
+- Fetch a new BLOB before `NextUpdate()` and keep it only if its
+  `Number()` is higher. To swap it while the RelyingParty runs, implement
+  `MetadataSource` with an atomic pointer.
+
 Ceremony options:
 - `webauthn.WithConditionalCreate()` makes `BeginRegistration` start a
   registration for `navigator.credentials.create({mediation: "conditional",

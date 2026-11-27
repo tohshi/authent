@@ -139,6 +139,7 @@ type softAuthenticator struct {
 	rpID      string
 	flags     byte
 	signCount uint32
+	aaguid    [16]byte
 	// Response.
 	userHandle []byte
 	rawID      []byte // overrides credID in id/rawId when set
@@ -190,7 +191,7 @@ func (a *softAuthenticator) authData(attested bool) []byte {
 	out := append(h[:], flags)
 	out = binary.BigEndian.AppendUint32(out, a.signCount)
 	if attested {
-		out = append(out, make([]byte, 16)...) // AAGUID
+		out = append(out, a.aaguid[:]...)
 		out = binary.BigEndian.AppendUint16(out, uint16(len(a.credID)))
 		out = append(out, a.credID...)
 		out = append(out, a.coseKey()...)
