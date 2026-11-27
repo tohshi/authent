@@ -136,7 +136,7 @@ Legend:
 | `Expand` (userset tree) | ✅ | Follows `Computed` and `TupleToUserset`; usersets named by tuples are leaves |
 | `ListObjects` / `ListSubjects` | ✅ | Candidates from a walk over the tuples, filtered by `Check`, so every rewrite is exact; wildcards give "all except"; bounded and cancellable |
 | Consistency tokens (zookies) | ✅ | `Write` returns a `Revision`; every query reads one revision; `AtLeast` fails with `ErrFutureRevision` when the store is behind |
-| Text schema DSL | ⬜ | |
+| Text schema DSL | ✅ | `ParseSchema` and `Schema.String`, one to one with the Go API, which accepts the same names and nesting depth; errors carry line and column; fuzzed, and formatting is stable |
 | Caveats / conditional tuples (ABAC) | ✅ | `Caveat` declares a Go function with typed parameters; tuples store a context; `WithContext` supplies the rest; missing parameters give `*MissingContextError`, never true |
 | Bulk check | ✅ | `CheckBulk`: shared store reads and decided relations, ordered results, an error per item |
 | Parallel branch evaluation | ✅ | `WithConcurrency`; decided branches cancel their siblings; the evaluation limit is shared by all branches and fails closed |
