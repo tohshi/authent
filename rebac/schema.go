@@ -125,6 +125,15 @@ type relationInfo struct {
 	allowed []allowedSubject // subjects that may be written; empty if not writable
 }
 
+func (info *relationInfo) admits(t Tuple) bool {
+	for _, a := range info.allowed {
+		if a.matches(t.Subject, t.Caveat.Name) {
+			return true
+		}
+	}
+	return false
+}
+
 // Definition is a type or caveat definition for NewSchema. Build one with
 // Type or Caveat.
 type Definition interface{ definition() }

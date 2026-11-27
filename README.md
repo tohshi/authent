@@ -750,6 +750,12 @@ ok, err := engine.Check(ctx, rebac.Obj("doc", "readme"), "viewer", rebac.Sub("us
 ```
 - Writes that do not match the schema are rejected. Examples are a subject
   type the relation does not allow, or a write to a computed-only relation.
+- Every query reads stored tuples through the current schema. After a
+  schema change, a tuple the relation no longer allows (a subject type,
+  userset, wildcard or caveat that was removed) grants nothing in `Check`,
+  `CheckBulk`, `ListObjects`, `ListSubjects` and `Expand`. A query subject
+  such as `team:t#viewer` whose relation the schema does not define fails
+  with `ErrUnknownRelation`.
 - Relations that depend on themselves through `Computed` alone are rejected
   when the schema is built.
 - Cycles in the data follow the well-founded semantics of the rewrites. A

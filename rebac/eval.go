@@ -97,12 +97,20 @@ func (q *request) fetch(ctx context.Context, k objRel) ([]Tuple, error) {
 	if err != nil {
 		return nil, err
 	}
+	info, ok := q.e.schema.relation(k.obj.Type, k.rel)
+	if !ok {
+		return nil, nil
+	}
 	var out []Tuple
 	for t, err := range q.e.store.Read(ctx, rev, Filter{ObjectType: k.obj.Type, ObjectID: k.obj.ID, Relation: k.rel}) {
 		if err != nil {
 			return nil, fmt.Errorf("rebac: reading tuples: %w", err)
 		}
-		out = append(out, t)
+		// Tuples written under an older schema grant nothing once the
+		// schema no longer allows them.
+		if info.admits(t) {
+			out = append(out, t)
+		}
 	}
 	// A store may end a read early, without an error, once ctx is done.
 	// Such a read is incomplete and must not be cached or decide anything.
@@ -346,14 +354,8 @@ func (r *run) tupleToUserset(ctx context.Context, p *path, obj Object, rw tupleT
 	if err != nil {
 		return resUnknown(err)
 	}
-	var targets []Tuple
-	for _, t := range tuples {
-		if !t.Subject.isWildcard() {
-			targets = append(targets, t)
-		}
-	}
-	return join(opOr, r.branches(ctx, len(targets), opTrue, func(ctx context.Context, i int) result {
-		t := targets[i]
+	return join(opOr, r.branches(ctx, len(tuples), opTrue, func(ctx context.Context, i int) result {
+		t := tuples[i]
 		return r.conditional(t.Caveat, func() result { return r.check(ctx, p, t.Subject.Object, rw.computed) })
 	}))
 }

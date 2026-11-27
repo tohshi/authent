@@ -118,7 +118,7 @@ func (x *expander) rewrite(p *path, obj Object, rel string, rw Rewrite) (*Userse
 		t := &UsersetTree{Op: TreeUnion}
 		for _, tp := range sortedTuples(tuples) {
 			s := tp.Subject
-			if _, ok := x.e.schema.relation(s.Object.Type, rw.computed); !ok || s.isWildcard() {
+			if _, ok := x.e.schema.relation(s.Object.Type, rw.computed); !ok {
 				continue
 			}
 			child, err := x.relation(p, s.Object, rw.computed)

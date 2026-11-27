@@ -120,7 +120,7 @@ Legend:
 | Feature | Status | Notes |
 |---|---|---|
 | Schema definition with a Go API | ✅ | |
-| Schema validation | ✅ | Undefined references, tupleset rules, cycles through `Computed` |
+| Schema validation | ✅ | Undefined references, tupleset rules, cycles through `Computed`; queries ignore stored tuples the current schema no longer allows |
 | Rewrites: `Direct`, `Computed`, `TupleToUserset`, `Union`, `Intersection`, `Exclusion` | ✅ | |
 | Usersets as subjects (`group:eng#member`) | ✅ | |
 | Wildcard subjects (`user:*`) | ✅ | |
