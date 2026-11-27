@@ -573,9 +573,15 @@ In the browser, pass the options to
   `UserVerification` is `required`
 - the credential algorithm against an allow-list, with the key type and
   curve bound to the algorithm (ES256/384/512, EdDSA, RS256, PS256)
-- the attestation statement for the `none`, `packed` and `fido-u2f`
-  formats. Other formats are rejected. Set `AttestationRoots` to require a
-  certificate chain to known roots.
+- the attestation statement for the `none`, `packed`, `fido-u2f`, `tpm`,
+  `android-key` and `apple` formats. Other formats, including
+  `android-safetynet`, are rejected. Set `AttestationRoots` to require a
+  certificate chain to known roots, such as a TPM vendor's root, Google's
+  hardware attestation roots or the Apple WebAuthn root. TPM statements
+  may be signed with RS1 (RSA with SHA-1), which Windows TPMs use;
+  credential keys never may. For `android-key`, the union of the
+  software-enforced and TEE-enforced authorization lists is checked, so
+  keys outside a TEE are accepted
 - that the credential is not already registered, belongs to the expected
   user, and was in `allowCredentials`
 - the signature counter, which must increase unless it is always 0, and
@@ -878,7 +884,11 @@ go test ./totp -run '^$' -fuzz FuzzParseURI -fuzztime 30s
 and `jwt/testdata/gen_openssl_x5c.py` generates the certificate chain in
 `jwt/testdata/openssl_x5c.json` with OpenSSL. `webauthn/testdata/extract_spec_vectors.py` extracts
 `webauthn/testdata/spec_vectors.json` from the test vectors in the WebAuthn
-Level 3 specification. The TOTP tests use the RFC 4226 and RFC 6238
+Level 3 specification. `webauthn/testdata/extract_py_webauthn_samples.py`
+extracts `webauthn/testdata/py_webauthn_samples.json`, registrations
+captured from real TPMs, Android phones and an iPhone, from the
+[py_webauthn](https://github.com/duo-labs/py_webauthn) test suite.
+The TOTP tests use the RFC 4226 and RFC 6238
 vectors. These vectors come from sources independent of this library.
 
 ## Contributing

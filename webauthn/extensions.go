@@ -63,12 +63,6 @@ const (
 	LargeBlobPreferred LargeBlobSupport = "preferred"
 )
 
-const (
-	extCredProps = "credProps"
-	extPRF       = "prf"
-	extLargeBlob = "largeBlob"
-)
-
 // prfOutputSize is the length of every PRF output (WebAuthn L3 §10.1.4).
 const prfOutputSize = 32
 
@@ -116,20 +110,6 @@ func (in ExtensionInputs) check(ceremony string, allowed [][]byte) error {
 	return nil
 }
 
-func (in ExtensionInputs) requested() []string {
-	var ids []string
-	if in.CredProps {
-		ids = append(ids, extCredProps)
-	}
-	if in.PRF != nil {
-		ids = append(ids, extPRF)
-	}
-	if in.LargeBlob != nil {
-		ids = append(ids, extLargeBlob)
-	}
-	return ids
-}
-
 // ExtensionOutputs holds the outputs of the extensions requested with
 // WithExtensions. The browser reports the client outputs, and nothing
 // signs them. A nil field means the output was absent.
@@ -158,7 +138,12 @@ type ExtensionOutputs struct {
 	Authenticator map[string]any
 }
 
-func parseClientOutputs(raw map[string]jsontext.Value, ch Challenge) (ExtensionOutputs, error) {
+// parseClientOutputs decodes the client outputs of the extensions that ch
+// requested, for the credential credID. Outputs of other extensions are
+// ignored. An output that the request cannot produce, such as a large blob
+// at registration, is rejected.
+func parseClientOutputs(raw map[string]jsontext.Value, ch Challenge, credID []byte) (ExtensionOutputs, error) {
+	in, reg := ch.Extensions, ch.Ceremony == ceremonyCreate
 	var out ExtensionOutputs
 	decode := func(id string, v any) error {
 		b, ok := raw[id]
@@ -170,39 +155,62 @@ func parseClientOutputs(raw map[string]jsontext.Value, ch Challenge) (ExtensionO
 		}
 		return nil
 	}
-	for _, id := range ch.Extensions {
-		var err error
-		switch id {
-		case extCredProps:
-			var o struct {
-				RK *bool `json:"rk"`
-			}
-			err = decode(id, &o)
-			out.Discoverable = o.RK
-		case extPRF:
-			var o struct {
-				Enabled *bool      `json:"enabled"`
-				Results *PRFValues `json:"results"`
-			}
-			err = decode(id, &o)
-			if r := o.Results; err == nil && r != nil && (len(r.First) != prfOutputSize || r.Second != nil && len(r.Second) != prfOutputSize) {
-				err = fmt.Errorf("%w: prf results are not %d bytes", ErrMalformed, prfOutputSize)
-			}
-			out.PRFEnabled, out.PRFResults = o.Enabled, o.Results
-		case extLargeBlob:
-			var o struct {
-				Supported *bool     `json:"supported"`
-				Blob      Base64URL `json:"blob"`
-				Written   *bool     `json:"written"`
-			}
-			err = decode(id, &o)
-			out.LargeBlobSupported, out.LargeBlob, out.LargeBlobWritten = o.Supported, o.Blob, o.Written
+	unexpected := func(output string) error {
+		return fmt.Errorf("%w: %s output was not requested", ErrMalformed, output)
+	}
+	if in.CredProps {
+		var o struct {
+			RK *bool `json:"rk"`
 		}
-		if err != nil {
+		if err := decode("credProps", &o); err != nil {
 			return ExtensionOutputs{}, err
 		}
+		out.Discoverable = o.RK
 	}
-	if ch.AppID != "" {
+	if in.PRF != nil {
+		var o struct {
+			Enabled *bool      `json:"enabled"`
+			Results *PRFValues `json:"results"`
+		}
+		if err := decode("prf", &o); err != nil {
+			return ExtensionOutputs{}, err
+		}
+		ev := in.PRF.Eval
+		if v, ok := in.PRF.EvalByCredential[b64.EncodeToString(credID)]; ok {
+			ev = &v
+		}
+		switch r := o.Results; {
+		case o.Enabled != nil && !reg:
+			return ExtensionOutputs{}, unexpected("prf.enabled")
+		case r != nil && ev == nil:
+			return ExtensionOutputs{}, unexpected("prf.results")
+		case r != nil && r.Second != nil && ev.Second == nil:
+			return ExtensionOutputs{}, unexpected("prf.results.second")
+		case r != nil && (len(r.First) != prfOutputSize || r.Second != nil && len(r.Second) != prfOutputSize):
+			return ExtensionOutputs{}, fmt.Errorf("%w: prf results are not %d bytes", ErrMalformed, prfOutputSize)
+		}
+		out.PRFEnabled, out.PRFResults = o.Enabled, o.Results
+	}
+	if lb := in.LargeBlob; lb != nil {
+		var o struct {
+			Supported *bool     `json:"supported"`
+			Blob      Base64URL `json:"blob"`
+			Written   *bool     `json:"written"`
+		}
+		if err := decode("largeBlob", &o); err != nil {
+			return ExtensionOutputs{}, err
+		}
+		switch {
+		case o.Supported != nil && !reg:
+			return ExtensionOutputs{}, unexpected("largeBlob.supported")
+		case o.Blob != nil && !lb.Read:
+			return ExtensionOutputs{}, unexpected("largeBlob.blob")
+		case o.Written != nil && lb.Write == nil:
+			return ExtensionOutputs{}, unexpected("largeBlob.written")
+		}
+		out.LargeBlobSupported, out.LargeBlob, out.LargeBlobWritten = o.Supported, o.Blob, o.Written
+	}
+	if in.AppID != "" {
 		if err := decode("appid", &out.AppIDUsed); err != nil {
 			return ExtensionOutputs{}, err
 		}

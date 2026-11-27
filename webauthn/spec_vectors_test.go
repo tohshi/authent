@@ -82,12 +82,9 @@ func TestSpecVectors(t *testing.T) {
 	// The error each registration is expected to fail with; nil means the
 	// registration and the following login must succeed.
 	want := map[string]error{
-		"16.4":  ErrOrigin,      // crossOrigin without topOrigin
-		"16.5":  ErrOrigin,      // cross-origin iframe, but TopOrigins is empty
-		"16.12": ErrAlgorithm,   // Ed448
-		"16.13": ErrAttestation, // tpm
-		"16.14": ErrAttestation, // android-key
-		"16.15": ErrAttestation, // apple
+		"16.4":  ErrOrigin,    // crossOrigin without topOrigin
+		"16.5":  ErrOrigin,    // cross-origin iframe, but TopOrigins is empty
+		"16.12": ErrAlgorithm, // Ed448
 	}
 	ctx := context.Background()
 	for _, v := range vs.Vectors {
@@ -154,6 +151,9 @@ func TestSpecVectorsAttestationRoots(t *testing.T) {
 		"16.9":  AttestationBasic,
 		"16.10": AttestationBasic,
 		"16.11": AttestationBasic,
+		"16.13": AttestationAttCA,
+		"16.14": AttestationBasic,
+		"16.15": AttestationAnonCA,
 		"16.16": AttestationBasic,
 	}
 	for _, v := range vs.Vectors {

@@ -146,13 +146,13 @@ func (rp *RelyingParty) FinishLogin(ctx context.Context, ch Challenge, response 
 	if ad.has(flagAT) {
 		return Login{}, fmt.Errorf("%w: attested credential data in an assertion", ErrMalformed)
 	}
-	ext, err := parseClientOutputs(r.ClientExtensionResults, ch)
+	ext, err := parseClientOutputs(r.ClientExtensionResults, ch, r.RawID)
 	if err != nil {
 		return Login{}, err
 	}
 	rpIDHash := rp.rpIDHash[:]
 	if ext.AppIDUsed {
-		h := sha256.Sum256([]byte(ch.AppID))
+		h := sha256.Sum256([]byte(ch.Extensions.AppID))
 		rpIDHash = h[:]
 	}
 	if err := rp.verifyAuthData(ad, rpIDHash, true); err != nil {
