@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/internal/observe"
 )
 
 // ErrVerificationFailed is the root of all rejected registration and
@@ -286,6 +287,7 @@ type RelyingParty struct {
 	rpIDHash [32]byte
 	store    CredentialStore
 	now      func() time.Time
+	observer authent.Observer
 }
 
 // Option configures a RelyingParty.
@@ -293,6 +295,9 @@ type Option func(*RelyingParty)
 
 // WithClock overrides the clock, for tests.
 func WithClock(now func() time.Time) Option { return func(rp *RelyingParty) { rp.now = now } }
+
+// WithObserver sends an Event for every FinishLogin call to o.
+func WithObserver(o authent.Observer) Option { return func(rp *RelyingParty) { rp.observer = o } }
 
 // CeremonyOption configures one ceremony started by BeginRegistration,
 // BeginLogin or BeginDiscoverableLogin.
@@ -542,4 +547,20 @@ func unmarshalResponse(data []byte, v any) error {
 		return fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
 	return nil
+}
+
+func init() {
+	observe.Register(map[error]authent.Reason{
+		ErrVerificationFailed: authent.ReasonInvalidCredentials,
+		ErrMalformed:          authent.ReasonMalformed,
+		ErrChallenge:          authent.ReasonChallengeMismatch,
+		ErrOrigin:             authent.ReasonWrongOrigin,
+		ErrRPID:               authent.ReasonWrongRPID,
+		ErrUserNotPresent:     authent.ReasonUserNotPresent,
+		ErrUserNotVerified:    authent.ReasonUserNotVerified,
+		ErrAlgorithm:          authent.ReasonUnsupportedAlgorithm,
+		ErrInvalidSignature:   authent.ReasonBadSignature,
+		ErrCredentialRejected: authent.ReasonInvalidCredentials,
+		ErrSignCount:          authent.ReasonSignCount,
+	})
 }

@@ -127,6 +127,15 @@ const (
 	ReasonWrongAudience        Reason = "wrong_audience"
 	ReasonSenderConstrained    Reason = "sender_constrained"
 
+	ReasonChallengeMismatch Reason = "challenge_mismatch"
+	ReasonWrongOrigin       Reason = "wrong_origin"
+	ReasonWrongRPID         Reason = "wrong_rp_id"
+	ReasonUserNotPresent    Reason = "user_not_present"
+	ReasonUserNotVerified   Reason = "user_not_verified"
+	// ReasonSignCount is a WebAuthn signature counter that did not
+	// increase, a sign of a cloned authenticator.
+	ReasonSignCount Reason = "sign_count"
+
 	ReasonInvalidProof  Reason = "invalid_proof"
 	ReasonNonceRequired Reason = "nonce_required"
 	ReasonKeyMismatch   Reason = "key_mismatch"

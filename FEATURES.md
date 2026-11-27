@@ -199,7 +199,7 @@ Legend:
 | `net/http` middleware | ✅ | `httpauth`: bearer JWTs, session cookies and API keys; `Require` and `Optional`; CSRF check on unsafe methods; Principal in the context via `authent.NewContext` |
 | gRPC interceptors | ➖ | A gRPC dependency is outside the dependency policy; an interceptor is a few lines on top of `jwt.Verifier` and `authent.NewContext` (example in the README) |
 | Mapping a Principal to a ReBAC subject | ✅ | `rebac.SubjectOf`; `httpauth.RequirePermission` checks a permission per request. The issuer is not part of the subject |
-| Observability hooks (logging, metrics, tracing) | ⬜ | |
+| Observability hooks (logging, metrics, tracing) | ✅ | `authent.Observer` receives an `Event` per authentication, token verification, authorization check and `httpauth` request: outcome, stable reason code, subject on success, duration; `WithObserver` on every authenticator, `jwt.Verifier`, `rebac.Engine` and the middleware, `oidc.Config.Observer`; `authent.SlogObserver` for `log/slog`. Events never carry credentials or their hashes. Registration and enrollment are not observed |
 | API keys / opaque tokens | ✅ | `apikey`: prefixed keys with a CRC-32 checksum, SHA-256 at rest, expiry and revocation |
 | Multi-factor authentication (TOTP, WebAuthn) | ✅ | See the `totp` and `webauthn` sections |
 | Recording several factors in a session (`amr`, step-up) | ✅ | `Session.Factors` with times; `Manager.StepUp` rotates the token; `AuthenticatedSince` checks required factors and their age |
