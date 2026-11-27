@@ -88,7 +88,8 @@ func (m *Metadata) Number() int { return m.number }
 func (m *Metadata) NextUpdate() time.Time { return m.nextUpdate }
 
 // Lookup returns the metadata of the authenticator model with the given
-// AAGUID.
+// AAGUID. The AAGUID comes from the authenticator data, so a model can
+// claim the AAGUID of another model whose attestation roots also trust it.
 func (m *Metadata) Lookup(aaguid [16]byte) (MetadataEntry, bool) {
 	e, ok := m.entries[aaguid]
 	return e, ok
@@ -133,8 +134,10 @@ func WithMetadataClock(now func() time.Time) MetadataOption {
 
 // ParseMetadata verifies and parses an MDS3 BLOB, a JWT whose x5c chain
 // must lead to one of roots. As MDS3 §3.1.8 requires, every certificate in
-// the chain but the root must be covered by a current CRL from WithCRLs
-// that does not revoke it. Its errors do not wrap authent.ErrUnauthenticated.
+// the chain but the root must be covered by a current CRL from WithCRLs,
+// and none of those CRLs may revoke it. A BLOB past its nextUpdate is
+// accepted: the caller fetches a newer one by NextUpdate and keeps it only
+// if its Number is higher. Its errors do not wrap authent.ErrUnauthenticated.
 func ParseMetadata(blob []byte, roots *x509.CertPool, opts ...MetadataOption) (*Metadata, error) {
 	o := metadataOptions{now: time.Now}
 	for _, opt := range opts {
@@ -153,12 +156,15 @@ func ParseMetadata(blob []byte, roots *x509.CertPool, opts ...MetadataOption) (*
 
 // FetchMetadata downloads an MDS3 BLOB from url, such as MDS3URL, and the
 // CRLs named by its signing chain with client, then verifies it as
-// ParseMetadata does.
+// ParseMetadata does. It follows the client's redirects. The BLOB must
+// come over https, so that a network attacker cannot replay an older
+// signed BLOB. CRLs may come over http, as CAs publish them, because
+// their signatures are verified.
 func FetchMetadata(ctx context.Context, client *http.Client, url string, roots *x509.CertPool, opts ...MetadataOption) (*Metadata, error) {
 	if client == nil {
 		return nil, errors.New("webauthn: metadata: client is required")
 	}
-	blob, err := download(ctx, client, url, maxMetadataSize)
+	blob, err := download(ctx, client, url, maxMetadataSize, true)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +185,7 @@ func FetchMetadata(ctx context.Context, client *http.Client, url string, roots *
 					continue
 				}
 				seen[u] = true
-				der, err := download(ctx, client, u, maxCRLSize)
+				der, err := download(ctx, client, u, maxCRLSize, false)
 				if err != nil {
 					return nil, err
 				}
@@ -194,7 +200,7 @@ func FetchMetadata(ctx context.Context, client *http.Client, url string, roots *
 	return ParseMetadata(blob, roots, append(opts, WithCRLs(crls...))...)
 }
 
-func download(ctx context.Context, client *http.Client, url string, limit int64) ([]byte, error) {
+func download(ctx context.Context, client *http.Client, url string, limit int64, httpsOnly bool) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("webauthn: metadata: %w", err)
@@ -204,6 +210,9 @@ func download(ctx context.Context, client *http.Client, url string, limit int64)
 		return nil, fmt.Errorf("webauthn: metadata: %w", err)
 	}
 	defer resp.Body.Close()
+	if httpsOnly && resp.Request.URL.Scheme != "https" {
+		return nil, fmt.Errorf("webauthn: metadata: GET %s: not served over https", url)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("webauthn: metadata: GET %s: %s", url, resp.Status)
 	}
@@ -318,20 +327,20 @@ func checkRevocation(chains [][]*x509.Certificate, crls []*x509.RevocationList, 
 func checkChainRevocation(chain []*x509.Certificate, crls []*x509.RevocationList, now time.Time) error {
 	for i, c := range chain[:len(chain)-1] {
 		issuer := chain[i+1]
-		var crl *x509.RevocationList
+		covered := false
 		for _, l := range crls {
-			if bytes.Equal(l.RawIssuer, c.RawIssuer) && !now.Before(l.ThisUpdate) && now.Before(l.NextUpdate) && l.CheckSignatureFrom(issuer) == nil {
-				crl = l
-				break
+			if !bytes.Equal(l.RawIssuer, c.RawIssuer) || now.Before(l.ThisUpdate) || !now.Before(l.NextUpdate) || l.CheckSignatureFrom(issuer) != nil {
+				continue
+			}
+			covered = true
+			for _, r := range l.RevokedCertificateEntries {
+				if r.SerialNumber.Cmp(c.SerialNumber) == 0 {
+					return fmt.Errorf("certificate %q is revoked", c.Subject)
+				}
 			}
 		}
-		if crl == nil {
+		if !covered {
 			return fmt.Errorf("no current CRL for %q", c.Subject)
-		}
-		for _, r := range crl.RevokedCertificateEntries {
-			if r.SerialNumber.Cmp(c.SerialNumber) == 0 {
-				return fmt.Errorf("certificate %q is revoked", c.Subject)
-			}
 		}
 	}
 	return nil
@@ -362,8 +371,8 @@ func parseMetadataPayload(b []byte) (*Metadata, error) {
 		return fail("%v", err)
 	}
 	next, err := time.Parse(time.DateOnly, p.NextUpdate)
-	if err != nil || p.No == nil {
-		return fail("payload lacks no or nextUpdate")
+	if err != nil || p.No == nil || *p.No < 0 {
+		return fail("payload lacks a valid no or nextUpdate")
 	}
 	m := &Metadata{number: *p.No, nextUpdate: next, entries: map[[16]byte]MetadataEntry{}}
 	for _, pe := range p.Entries {

@@ -611,15 +611,27 @@ rp, _ := webauthn.New(webauthn.Config{ /* ... */ Attestation: webauthn.Conveyanc
   names, with the caller's client. `ParseMetadata` verifies BLOB bytes the
   caller already has; pass the CRLs with `WithCRLs`. As MDS3 requires, a
   BLOB is rejected unless a current CRL covers every certificate of its
-  chain except the root and does not revoke it.
+  chain except the root, and it is rejected if any current CRL revokes
+  one. The BLOB must come over https, also after the client's redirects,
+  so that a network attacker cannot replay an older signed BLOB. CRLs may
+  come over http because their signatures are checked.
 - A listed authenticator's attestation must chain to the roots in its
   metadata statement. It is rejected when a status report says `REVOKED`,
   `USER_VERIFICATION_BYPASS`, `USER_KEY_REMOTE_COMPROMISE`,
   `USER_KEY_PHYSICAL_COMPROMISE` or `ATTESTATION_KEY_COMPROMISE`. A report
-  that names a certificate applies only to chains that contain it.
-  Authenticators that are not listed need a chain to `AttestationRoots`.
-- Fetch a new BLOB before `NextUpdate()` and keep it only if its
-  `Number()` is higher. To swap it while the RelyingParty runs, implement
+  that names a certificate applies only to chains that contain it. Any
+  such report blocks the model for good. A later report, such as
+  `FIDO_CERTIFIED_L2`, does not clear it. Authenticators that are not
+  listed need a chain to `AttestationRoots`.
+- The model is looked up by the AAGUID in the authenticator data. A model
+  whose attestation certificate does not carry its AAGUID can claim the
+  AAGUID of a sibling model under the same vendor root, and so escape its
+  own status reports. This is inherent to MDS.
+- Metadata is checked at registration, not at login. When you load a new
+  BLOB, look up each stored `Credential.AAGUID` and decide what to do with
+  credentials whose model is now reported as compromised.
+- A BLOB past its `nextUpdate` is still accepted. Fetch a new BLOB before
+  `NextUpdate()` and keep it only if its `Number()` is higher. To swap it while the RelyingParty runs, implement
   `MetadataSource` with an atomic pointer.
 
 Ceremony options:

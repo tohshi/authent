@@ -1,9 +1,11 @@
 package webauthn
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -100,6 +102,15 @@ func (p *mdsPKI) sign(header map[string]any, payload any) []byte {
 	return []byte(input + "." + b64.EncodeToString(sig))
 }
 
+func hmacSign(header map[string]any, payload any, key []byte) []byte {
+	h, _ := json.Marshal(header)
+	b, _ := json.Marshal(payload)
+	input := b64.EncodeToString(h) + "." + b64.EncodeToString(b)
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(input))
+	return []byte(input + "." + b64.EncodeToString(mac.Sum(nil)))
+}
+
 func (p *mdsPKI) header() map[string]any {
 	return map[string]any{"alg": "ES256", "typ": "JWT", "x5c": []string{b64std(p.leaf), b64std(p.inter)}}
 }
@@ -172,6 +183,17 @@ func TestParseMetadataRejects(t *testing.T) {
 	}
 	crls := p.crls(t)
 	rootCRL, interCRL := crls[0], crls[1]
+	forgedInterCRL := other.crls(t)[1]
+	if !bytes.Equal(forgedInterCRL.RawIssuer, interCRL.RawIssuer) {
+		t.Fatal("the forged CRL must carry the intermediate's name")
+	}
+	revokingInterCRL := newCRL(t, p.inter, p.interKey, testNow.Add(time.Hour), p.leaf)
+	tampered := func() []byte {
+		parts := strings.Split(string(p.sign(p.header(), good)), ".")
+		evil, _ := json.Marshal(mdsPayload(mdsEntry(testAAGUID, []*x509.Certificate{p.root})))
+		parts[1] = b64.EncodeToString(evil)
+		return []byte(strings.Join(parts, "."))
+	}()
 	for _, tc := range []struct {
 		name  string
 		blob  []byte
@@ -188,18 +210,24 @@ func TestParseMetadataRejects(t *testing.T) {
 		{name: "jwk header", blob: p.sign(with("jwk", map[string]any{}), good)},
 		{name: "alg none", blob: p.sign(with("alg", "none"), good)},
 		{name: "RS256 with an EC key", blob: p.sign(with("alg", "RS256"), good)},
+		{name: "HS256 keyed with the leaf certificate", blob: hmacSign(with("alg", "HS256"), good, p.leaf.Raw)},
+		{name: "HS256 keyed with the leaf public key", blob: hmacSign(with("alg", "HS256"), good, p.leaf.RawSubjectPublicKeyInfo)},
+		{name: "tampered payload with the original signature", blob: tampered},
 		{name: "no x5c", blob: p.sign(without("x5c"), good)},
 		{name: "x5c in base64url", blob: p.sign(with("x5c", []string{b64.EncodeToString(p.leaf.Raw)}), good)},
 		{name: "two parts", blob: []byte(strings.Join(strings.Split(string(p.sign(p.header(), good)), ".")[:2], "."))},
 		{name: "no CRLs", blob: p.sign(p.header(), good), crls: []*x509.RevocationList{}},
 		{name: "no CRL for the leaf", blob: p.sign(p.header(), good), crls: []*x509.RevocationList{rootCRL}},
 		{name: "no CRL for the intermediate", blob: p.sign(p.header(), good), crls: []*x509.RevocationList{interCRL}},
-		{name: "CRL from another issuer", blob: p.sign(p.header(), good), crls: []*x509.RevocationList{rootCRL, other.crls(t)[1]}},
+		{name: "CRL with the intermediate's name signed by another key", blob: p.sign(p.header(), good), crls: []*x509.RevocationList{rootCRL, forgedInterCRL}},
 		{name: "stale CRL", blob: p.sign(p.header(), good), crls: []*x509.RevocationList{rootCRL, newCRL(t, p.inter, p.interKey, testNow.Add(-time.Minute))}},
-		{name: "revoked leaf", blob: p.sign(p.header(), good), crls: []*x509.RevocationList{rootCRL, newCRL(t, p.inter, p.interKey, testNow.Add(time.Hour), p.leaf)}},
+		{name: "revoked leaf", blob: p.sign(p.header(), good), crls: []*x509.RevocationList{rootCRL, revokingInterCRL}},
+		{name: "revoked leaf, revoking CRL last", blob: p.sign(p.header(), good), crls: []*x509.RevocationList{rootCRL, interCRL, revokingInterCRL}},
+		{name: "revoked leaf, revoking CRL first", blob: p.sign(p.header(), good), crls: []*x509.RevocationList{rootCRL, revokingInterCRL, interCRL}},
 		{name: "revoked intermediate", blob: p.sign(p.header(), good), crls: []*x509.RevocationList{newCRL(t, p.root, p.rootKey, testNow.Add(time.Hour), p.inter), interCRL}},
 		{name: "payload not JSON", blob: p.sign(p.header(), []byte("{"))},
 		{name: "payload without no", blob: p.sign(p.header(), map[string]any{"nextUpdate": "2026-07-01", "entries": []any{}})},
+		{name: "payload with a negative no", blob: p.sign(p.header(), map[string]any{"no": -1, "nextUpdate": "2026-07-01", "entries": []any{}})},
 		{name: "payload with a bad nextUpdate", blob: p.sign(p.header(), map[string]any{"no": 1, "nextUpdate": "July", "entries": []any{}})},
 		{name: "invalid AAGUID", blob: p.sign(p.header(), mdsPayload(mdsEntry("f8a011f38c0a4d15800617111f9edc7d", nil)))},
 		{name: "duplicate AAGUID", blob: p.sign(p.header(), mdsPayload(mdsEntry(testAAGUID, nil), mdsEntry(testAAGUID, nil)))},
@@ -258,6 +286,8 @@ func TestMetadataRegistration(t *testing.T) {
 		{name: "revoked", md: metadata(mdsEntry(testAAGUID, roots, report("FIDO_CERTIFIED", nil), report("REVOKED", nil)))},
 		{name: "user verification bypass, then an update", md: metadata(mdsEntry(testAAGUID, roots, report("USER_VERIFICATION_BYPASS", nil), report("UPDATE_AVAILABLE", nil)))},
 		{name: "user key compromise", md: metadata(mdsEntry(testAAGUID, roots, report("USER_KEY_REMOTE_COMPROMISE", nil)))},
+		{name: "user key physical compromise", md: metadata(mdsEntry(testAAGUID, roots, report("USER_KEY_PHYSICAL_COMPROMISE", nil)))},
+		{name: "attestation key compromise of the whole model", md: metadata(mdsEntry(testAAGUID, roots, report("ATTESTATION_KEY_COMPROMISE", nil)))},
 		{name: "attestation key compromise of another batch", md: metadata(mdsEntry(testAAGUID, roots, report("ATTESTATION_KEY_COMPROMISE", unrelated))), ok: true},
 		{name: "attestation key compromise of this batch", md: metadata(mdsEntry(testAAGUID, roots, report("ATTESTATION_KEY_COMPROMISE", ca.cert)))},
 		{name: "compromise report with an unparsable certificate", md: metadata(mdsEntry(testAAGUID, roots, map[string]any{"status": "ATTESTATION_KEY_COMPROMISE", "certificate": "AAAA"}))},
@@ -290,8 +320,9 @@ func TestMetadataRegistration(t *testing.T) {
 func TestFetchMetadata(t *testing.T) {
 	var p *mdsPKI
 	var blob []byte
+	var plain *httptest.Server
 	fail := map[string]bool{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if fail[r.URL.Path] {
 			http.NotFound(w, r)
 			return
@@ -299,6 +330,8 @@ func TestFetchMetadata(t *testing.T) {
 		switch r.URL.Path {
 		case "/blob":
 			w.Write(blob)
+		case "/to-http":
+			http.Redirect(w, r, plain.URL+"/blob", http.StatusFound)
 		case "/root.crl":
 			w.Write(newCRL(t, p.root, p.rootKey, testNow.Add(time.Hour)).Raw)
 		case "/inter.crl":
@@ -306,9 +339,12 @@ func TestFetchMetadata(t *testing.T) {
 		default:
 			http.NotFound(w, r)
 		}
-	}))
+	})
+	srv := httptest.NewTLSServer(handler)
 	defer srv.Close()
-	p = newMDSPKI(t, srv.URL)
+	plain = httptest.NewServer(handler)
+	defer plain.Close()
+	p = newMDSPKI(t, plain.URL)
 	blob = p.sign(p.header(), mdsPayload(mdsEntry(testAAGUID, nil)))
 	ctx := context.Background()
 
@@ -318,6 +354,12 @@ func TestFetchMetadata(t *testing.T) {
 	}
 	if aaguid, _ := parseAAGUID(testAAGUID); md.Number() != 7 || func() bool { _, ok := md.Lookup(aaguid); return !ok }() {
 		t.Fatalf("FetchMetadata = %+v", md)
+	}
+	if _, err := FetchMetadata(ctx, plain.Client(), plain.URL+"/blob", p.roots(), atTestNow); err == nil {
+		t.Fatal("FetchMetadata accepted a BLOB over http")
+	}
+	if _, err := FetchMetadata(ctx, srv.Client(), srv.URL+"/to-http", p.roots(), atTestNow); err == nil {
+		t.Fatal("FetchMetadata accepted a BLOB redirected to http")
 	}
 	fail["/inter.crl"] = true
 	if _, err := FetchMetadata(ctx, srv.Client(), srv.URL+"/blob", p.roots(), atTestNow); err == nil {

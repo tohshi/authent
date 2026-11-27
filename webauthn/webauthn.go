@@ -135,9 +135,11 @@ type Config struct {
 	// Metadata, if set, checks new credentials against the FIDO Metadata
 	// Service. The attestation of an authenticator listed by AAGUID must
 	// chain to the attestation roots of its metadata statement, and no
-	// status report of compromise or revocation may apply to it. Other
-	// authenticators need a chain to AttestationRoots and are rejected if
-	// it is nil. It requires Attestation to be ConveyanceDirect.
+	// status report of compromise or revocation may apply to it, whatever
+	// its date and whatever reports follow it. Other authenticators need a
+	// chain to AttestationRoots and are rejected if it is nil. It requires
+	// Attestation to be ConveyanceDirect. Metadata is checked at
+	// registration only, so re-check stored credentials when it changes.
 	Metadata MetadataSource
 	// Algorithms lists the accepted credential algorithms in order of
 	// preference. The default is EdDSA, ES256 and RS256.
