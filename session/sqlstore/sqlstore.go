@@ -1,4 +1,4 @@
-package session
+package sqlstore
 
 import (
 	"context"
@@ -10,14 +10,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tohshi/authent/session"
 )
 
-// SQLDialect selects the SQL syntax an SQLStore generates.
-type SQLDialect int
+// Dialect selects the SQL syntax an Store generates.
+type Dialect int
 
 const (
 	// PostgreSQL uses $1-style placeholders and TEXT COLLATE "C" columns.
-	PostgreSQL SQLDialect = iota + 1
+	PostgreSQL Dialect = iota + 1
 	// MySQL uses ?-style placeholders and VARBINARY columns, so that
 	// comparisons are byte-wise regardless of the server's collation.
 	MySQL
@@ -26,7 +28,7 @@ const (
 	SQLite
 )
 
-func (d SQLDialect) String() string {
+func (d Dialect) String() string {
 	switch d {
 	case PostgreSQL:
 		return "PostgreSQL"
@@ -35,37 +37,37 @@ func (d SQLDialect) String() string {
 	case SQLite:
 		return "SQLite"
 	}
-	return "SQLDialect(" + strconv.Itoa(int(d)) + ")"
+	return "Dialect(" + strconv.Itoa(int(d)) + ")"
 }
 
-func (d SQLDialect) placeholder(n int) string {
+func (d Dialect) placeholder(n int) string {
 	if d == PostgreSQL {
 		return "$" + strconv.Itoa(n)
 	}
 	return "?"
 }
 
-func (d SQLDialect) quote(ident string) string {
+func (d Dialect) quote(ident string) string {
 	if d == MySQL {
 		return "`" + ident + "`"
 	}
 	return `"` + ident + `"`
 }
 
-// DefaultSQLTable is the table name an SQLStore uses unless WithSQLTable is
+// DefaultTable is the table name an Store uses unless WithTable is
 // given.
-const DefaultSQLTable = "authent_sessions"
+const DefaultTable = "authent_sessions"
 
-// maxSQLSubject is the longest subject, in bytes, an SQLStore accepts. It
+// maxSQLSubject is the longest subject, in bytes, an Store accepts. It
 // sizes the MySQL column.
 const maxSQLSubject = 1024
 
 const sqlColumns = "token_hash, subject, version, expires_at, data"
 
-// SQLStore is a Store backed by a SQL database through database/sql. It
+// Store is a Store backed by a SQL database through database/sql. It
 // does not import a driver: open db with the driver of your choice, such
 // as github.com/jackc/pgx/v5/stdlib, github.com/go-sql-driver/mysql or
-// modernc.org/sqlite, and pass the matching SQLDialect.
+// modernc.org/sqlite, and pass the matching Dialect.
 //
 // Each session is one row keyed by the token hash, with the subject, the
 // version, the expiry in Unix nanoseconds and the encoded session. Every
@@ -77,9 +79,9 @@ const sqlColumns = "token_hash, subject, version, expires_at, data"
 // As a defense against case-insensitive or otherwise non-binary
 // collations on tables not created by CreateTable, rows whose token hash
 // or subject does not exactly match the lookup are ignored.
-type SQLStore struct {
+type Store struct {
 	db      *sql.DB
-	dialect SQLDialect
+	dialect Dialect
 	table   string
 	now     func() time.Time
 
@@ -97,26 +99,26 @@ type SQLStore struct {
 	deleteExpiredKeySQL string
 }
 
-// SQLStoreOption configures an SQLStore.
-type SQLStoreOption func(*sqlStoreConfig)
+// Option configures an Store.
+type Option func(*config)
 
-type sqlStoreConfig struct {
+type config struct {
 	table string
 }
 
-// WithSQLTable sets the table name. It may be qualified by a schema, as in
+// WithTable sets the table name. It may be qualified by a schema, as in
 // "auth.sessions". Each part must start with a letter or underscore and
 // contain only ASCII letters, digits and underscores. The schema may be up
 // to 63 bytes long and the table up to 51, so that the index names derived
-// from it fit PostgreSQL's limit. The default is DefaultSQLTable.
-func WithSQLTable(name string) SQLStoreOption {
-	return func(c *sqlStoreConfig) { c.table = name }
+// from it fit PostgreSQL's limit. The default is DefaultTable.
+func WithTable(name string) Option {
+	return func(c *config) { c.table = name }
 }
 
-// NewSQLStore returns an SQLStore that stores sessions in db using
+// New returns an Store that stores sessions in db using
 // dialect. It does not touch the database; see CreateTable.
-func NewSQLStore(db *sql.DB, dialect SQLDialect, opts ...SQLStoreOption) (*SQLStore, error) {
-	cfg := sqlStoreConfig{table: DefaultSQLTable}
+func New(db *sql.DB, dialect Dialect, opts ...Option) (*Store, error) {
+	cfg := config{table: DefaultTable}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -130,7 +132,7 @@ func NewSQLStore(db *sql.DB, dialect SQLDialect, opts ...SQLStoreOption) (*SQLSt
 	if err != nil {
 		return nil, err
 	}
-	s := &SQLStore{db: db, dialect: dialect, now: time.Now}
+	s := &Store{db: db, dialect: dialect, now: time.Now}
 	s.buildStatements(schema, table)
 	return s, nil
 }
@@ -162,7 +164,7 @@ func validSQLIdent(s string, maxLen int) bool {
 	return true
 }
 
-func (s *SQLStore) buildStatements(schema, table string) {
+func (s *Store) buildStatements(schema, table string) {
 	d := s.dialect
 	qualified := d.quote(table)
 	if schema != "" {
@@ -227,13 +229,13 @@ func (s *SQLStore) buildStatements(schema, table string) {
 // with a migration tool. Besides the table, they create indexes on the
 // subject, for List and DeleteSubject, and on the expiry, for
 // DeleteExpired.
-func (s *SQLStore) CreateTableStatements() []string {
+func (s *Store) CreateTableStatements() []string {
 	return slices.Clone(s.createSQL)
 }
 
 // CreateTable creates the session table and its indexes if they do not
 // exist.
-func (s *SQLStore) CreateTable(ctx context.Context) error {
+func (s *Store) CreateTable(ctx context.Context) error {
 	for _, q := range s.createSQL {
 		if _, err := s.db.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("session: creating table %s: %w", s.table, err)
@@ -242,17 +244,17 @@ func (s *SQLStore) CreateTable(ctx context.Context) error {
 	return nil
 }
 
-func (s *SQLStore) Load(ctx context.Context, key string) (Record, error) {
+func (s *Store) Load(ctx context.Context, key string) (session.Record, error) {
 	r, err := s.scanOne(s.db.QueryRowContext(ctx, s.selectLiveSQL, key, s.now().UnixNano()), key)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Record{}, ErrNotFound
+		return session.Record{}, session.ErrNotFound
 	}
 	return r, err
 }
 
 // scanOne scans the row for key, reporting a row for another key as
 // sql.ErrNoRows.
-func (s *SQLStore) scanOne(row *sql.Row, key string) (Record, error) {
+func (s *Store) scanOne(row *sql.Row, key string) (session.Record, error) {
 	got, r, err := s.scan(row)
 	if err == nil && got != key {
 		err = sql.ErrNoRows
@@ -260,32 +262,32 @@ func (s *SQLStore) scanOne(row *sql.Row, key string) (Record, error) {
 	return r, err
 }
 
-func (s *SQLStore) scan(row interface{ Scan(...any) error }) (string, Record, error) {
+func (s *Store) scan(row interface{ Scan(...any) error }) (string, session.Record, error) {
 	var (
 		key              string
-		r                Record
+		r                session.Record
 		version, expires int64
 	)
 	if err := row.Scan(&key, &r.Subject, &version, &expires, &r.Data); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", Record{}, err
+			return "", session.Record{}, err
 		}
-		return "", Record{}, fmt.Errorf("session: reading session from %s: %w", s.table, err)
+		return "", session.Record{}, fmt.Errorf("session: reading session from %s: %w", s.table, err)
 	}
 	if version < 1 {
-		return "", Record{}, fmt.Errorf("session: invalid version %d in %s", version, s.table)
+		return "", session.Record{}, fmt.Errorf("session: invalid version %d in %s", version, s.table)
 	}
 	r.Version = uint64(version)
 	r.ExpiresAt = time.Unix(0, expires)
 	return key, r, nil
 }
 
-func (s *SQLStore) Save(ctx context.Context, key string, r Record) error {
+func (s *Store) Save(ctx context.Context, key string, r session.Record) error {
 	switch {
 	case len(r.Subject) > maxSQLSubject:
 		return fmt.Errorf("session: subject longer than %d bytes", maxSQLSubject)
 	case r.Version == 0:
-		return ErrConflict
+		return session.ErrConflict
 	case r.Version > math.MaxInt64:
 		return fmt.Errorf("session: version %d out of range", r.Version)
 	case r.Version == 1:
@@ -296,7 +298,7 @@ func (s *SQLStore) Save(ctx context.Context, key string, r Record) error {
 	return s.changed(res, err, "saving")
 }
 
-func (s *SQLStore) insert(ctx context.Context, key string, r Record) error {
+func (s *Store) insert(ctx context.Context, key string, r session.Record) error {
 	// An expired row counts as deleted, so it must not block the insert.
 	// Removing it first is safe without a transaction: only another insert
 	// could take the key in between, and then this one fails as it should.
@@ -309,13 +311,13 @@ func (s *SQLStore) insert(ctx context.Context, key string, r Record) error {
 	}
 	// Drivers report duplicate keys differently, so look for the row.
 	if _, lookErr := s.scanOne(s.db.QueryRowContext(ctx, s.selectKeySQL, key), key); lookErr == nil {
-		return ErrConflict
+		return session.ErrConflict
 	}
 	return fmt.Errorf("session: inserting session: %w", err)
 }
 
-// changed returns ErrConflict unless the statement affected a row.
-func (s *SQLStore) changed(res sql.Result, err error, op string) error {
+// changed returns session.ErrConflict unless the statement affected a row.
+func (s *Store) changed(res sql.Result, err error, op string) error {
 	if err != nil {
 		return fmt.Errorf("session: %s session: %w", op, err)
 	}
@@ -324,12 +326,12 @@ func (s *SQLStore) changed(res sql.Result, err error, op string) error {
 		return fmt.Errorf("session: %s session: %w", op, err)
 	}
 	if n == 0 {
-		return ErrConflict
+		return session.ErrConflict
 	}
 	return nil
 }
 
-func (s *SQLStore) Delete(ctx context.Context, key string, version uint64) error {
+func (s *Store) Delete(ctx context.Context, key string, version uint64) error {
 	if version == 0 {
 		if _, err := s.db.ExecContext(ctx, s.deleteSQL, key); err != nil {
 			return fmt.Errorf("session: deleting session: %w", err)
@@ -337,19 +339,19 @@ func (s *SQLStore) Delete(ctx context.Context, key string, version uint64) error
 		return nil
 	}
 	if version > math.MaxInt64 {
-		return ErrConflict
+		return session.ErrConflict
 	}
 	res, err := s.db.ExecContext(ctx, s.deleteVersionSQL, key, int64(version), s.now().UnixNano())
 	return s.changed(res, err, "deleting")
 }
 
-func (s *SQLStore) List(ctx context.Context, subject string) (map[string]Record, error) {
+func (s *Store) List(ctx context.Context, subject string) (map[string]session.Record, error) {
 	rows, err := s.db.QueryContext(ctx, s.selectSubjectSQL, subject, s.now().UnixNano())
 	if err != nil {
 		return nil, fmt.Errorf("session: listing sessions: %w", err)
 	}
 	defer rows.Close()
-	out := map[string]Record{}
+	out := map[string]session.Record{}
 	for rows.Next() {
 		key, r, err := s.scan(rows)
 		if err != nil {
@@ -365,7 +367,7 @@ func (s *SQLStore) List(ctx context.Context, subject string) (map[string]Record,
 	return out, nil
 }
 
-func (s *SQLStore) DeleteSubject(ctx context.Context, subject string) error {
+func (s *Store) DeleteSubject(ctx context.Context, subject string) error {
 	if _, err := s.db.ExecContext(ctx, s.deleteSubjectSQL, subject); err != nil {
 		return fmt.Errorf("session: deleting sessions of subject: %w", err)
 	}
@@ -374,9 +376,11 @@ func (s *SQLStore) DeleteSubject(ctx context.Context, subject string) error {
 
 // DeleteExpired removes expired sessions. Load and List already ignore
 // them; call DeleteExpired periodically so that they do not accumulate.
-func (s *SQLStore) DeleteExpired(ctx context.Context) error {
+func (s *Store) DeleteExpired(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, s.deleteExpiredSQL, s.now().UnixNano()); err != nil {
 		return fmt.Errorf("session: deleting expired sessions: %w", err)
 	}
 	return nil
 }
+
+var _ session.Store = (*Store)(nil)

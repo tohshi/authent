@@ -10,13 +10,14 @@ import (
 	"github.com/tohshi/authent/integration/testenv"
 	"github.com/tohshi/authent/session"
 	"github.com/tohshi/authent/session/sessiontest"
+	"github.com/tohshi/authent/session/sqlstore"
 )
 
-func newPostgresStore(t *testing.T) *session.SQLStore {
+func newPostgresStore(t *testing.T) *sqlstore.Store {
 	t.Helper()
 	db := testenv.Postgres(t)
 	table := "sessions_" + strings.ToLower(rand.Text()[:12])
-	s, err := session.NewSQLStore(db, session.PostgreSQL, session.WithSQLTable(table))
+	s, err := sqlstore.New(db, sqlstore.PostgreSQL, sqlstore.WithTable(table))
 	if err != nil {
 		t.Fatal(err)
 	}
