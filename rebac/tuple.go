@@ -85,8 +85,8 @@ type TupleCaveat struct {
 	Context string
 }
 
-// maxContextLength bounds the stored context of a caveat, in bytes.
-const maxContextLength = 4096
+// MaxCaveatContextLength bounds the stored context of a caveat, in bytes.
+const MaxCaveatContextLength = 4096
 
 func (t Tuple) String() string {
 	s := t.Object.String() + "#" + t.Relation + "@" + t.Subject.String()
@@ -183,7 +183,8 @@ func ParseSubject(s string) (Subject, error) {
 
 var errWildcard = fmt.Errorf("%w: wildcard not allowed here", ErrInvalidTuple)
 
-const maxIDLength = 256
+// MaxIDLength is the longest object or subject ID, in bytes.
+const MaxIDLength = 256
 
 // validName reports whether s is a valid type or relation name.
 func validName(s string) bool {
@@ -209,7 +210,7 @@ func validateObject(o Object, allowWildcard bool) error {
 		}
 		return nil
 	}
-	if len(o.ID) == 0 || len(o.ID) > maxIDLength {
+	if len(o.ID) == 0 || len(o.ID) > MaxIDLength {
 		return fmt.Errorf("%w: id length %d", ErrInvalidTuple, len(o.ID))
 	}
 	for _, r := range o.ID {
@@ -235,6 +236,10 @@ func validateSubject(s Subject, allowWildcard bool) error {
 	return nil
 }
 
+// Validate checks the syntax of a tuple. It does not check whether a Schema
+// permits the tuple; Engine.Write performs that check separately.
+func (t Tuple) Validate() error { return t.validate() }
+
 func (t Tuple) validate() error {
 	if err := validateObject(t.Object, false); err != nil {
 		return err
@@ -253,8 +258,8 @@ func (t Tuple) validate() error {
 		return nil
 	case !validName(c.Name):
 		return fmt.Errorf("%w: caveat %q", ErrInvalidTuple, c.Name)
-	case len(c.Context) > maxContextLength:
-		return fmt.Errorf("%w: caveat context longer than %d bytes", ErrInvalidTuple, maxContextLength)
+	case len(c.Context) > MaxCaveatContextLength:
+		return fmt.Errorf("%w: caveat context longer than %d bytes", ErrInvalidTuple, MaxCaveatContextLength)
 	case c.Context != "":
 		if _, err := parseObject(c.Context); err != nil {
 			return fmt.Errorf("%w: caveat context: %v", ErrInvalidTuple, err)

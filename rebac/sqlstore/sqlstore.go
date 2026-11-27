@@ -1,4 +1,4 @@
-package rebac
+package sqlstore
 
 import (
 	"context"
@@ -10,14 +10,16 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/tohshi/authent/rebac"
 )
 
-// SQLDialect selects the SQL syntax an SQLStore generates.
-type SQLDialect int
+// Dialect selects the SQL syntax an Store generates.
+type Dialect int
 
 const (
 	// PostgreSQL uses $1-style placeholders and TEXT COLLATE "C" columns.
-	PostgreSQL SQLDialect = iota + 1
+	PostgreSQL Dialect = iota + 1
 	// MySQL uses ?-style placeholders and VARBINARY columns, so that
 	// comparisons are byte-wise regardless of the server's collation.
 	MySQL
@@ -26,7 +28,7 @@ const (
 	SQLite
 )
 
-func (d SQLDialect) String() string {
+func (d Dialect) String() string {
 	switch d {
 	case PostgreSQL:
 		return "PostgreSQL"
@@ -35,26 +37,26 @@ func (d SQLDialect) String() string {
 	case SQLite:
 		return "SQLite"
 	}
-	return "SQLDialect(" + strconv.Itoa(int(d)) + ")"
+	return "Dialect(" + strconv.Itoa(int(d)) + ")"
 }
 
-func (d SQLDialect) placeholder(n int) string {
+func (d Dialect) placeholder(n int) string {
 	if d == PostgreSQL {
 		return "$" + strconv.Itoa(n)
 	}
 	return "?"
 }
 
-func (d SQLDialect) quote(ident string) string {
+func (d Dialect) quote(ident string) string {
 	if d == MySQL {
 		return "`" + ident + "`"
 	}
 	return `"` + ident + `"`
 }
 
-// DefaultSQLTable is the table name an SQLStore uses unless WithSQLTable is
+// DefaultTable is the table name an Store uses unless WithTable is
 // given.
-const DefaultSQLTable = "rebac_tuples"
+const DefaultTable = "rebac_tuples"
 
 // sqlColumns are the tuple columns of the table, in the order used by
 // every statement. The primary key starts with them, so lookups by object
@@ -71,14 +73,14 @@ const (
 	sqlMaxTableName   = 63 - len("_subject_idx")
 )
 
-func tupleArgs(t Tuple) []any {
+func tupleArgs(t rebac.Tuple) []any {
 	return []any{t.Object.Type, t.Object.ID, t.Relation, t.Subject.Object.Type, t.Subject.Object.ID, t.Subject.Relation}
 }
 
-// SQLStore is a TupleStore backed by a SQL database through database/sql.
+// Store is a TupleStore backed by a SQL database through database/sql.
 // It does not import a driver: open db with the driver of your choice, such
 // as github.com/jackc/pgx/v5/stdlib, github.com/go-sql-driver/mysql or
-// modernc.org/sqlite, and pass the matching SQLDialect.
+// modernc.org/sqlite, and pass the matching Dialect.
 //
 // Each version of a tuple is one row, with the revisions it was created
 // and deleted at; an empty subject relation is stored as the empty string.
@@ -96,9 +98,9 @@ func tupleArgs(t Tuple) []any {
 // non-binary collations on tables not created by CreateTable, rows that do
 // not exactly match the filter are discarded, and rows that are not valid
 // tuples make Read fail.
-type SQLStore struct {
+type Store struct {
 	db            *sql.DB
-	dialect       SQLDialect
+	dialect       Dialect
 	table         string // quoted and qualified
 	revTable      string
 	createSQL     []string
@@ -113,26 +115,26 @@ type SQLStore struct {
 	pruneSQL      string
 }
 
-// SQLStoreOption configures an SQLStore.
-type SQLStoreOption func(*sqlStoreConfig)
+// Option configures an Store.
+type Option func(*config)
 
-type sqlStoreConfig struct {
+type config struct {
 	table string
 }
 
-// WithSQLTable sets the table name. It may be qualified by a schema, as in
+// WithTable sets the table name. It may be qualified by a schema, as in
 // "authz.tuples". Each part must start with a letter or underscore and
 // contain only ASCII letters, digits and underscores. The schema may be up
 // to 63 bytes long and the table up to 51, which leaves room for the names
-// derived from it. The default is DefaultSQLTable.
-func WithSQLTable(name string) SQLStoreOption {
-	return func(c *sqlStoreConfig) { c.table = name }
+// derived from it. The default is DefaultTable.
+func WithTable(name string) Option {
+	return func(c *config) { c.table = name }
 }
 
-// NewSQLStore returns an SQLStore that stores tuples in db using dialect.
+// New returns an Store that stores tuples in db using dialect.
 // It does not touch the database; see CreateTable.
-func NewSQLStore(db *sql.DB, dialect SQLDialect, opts ...SQLStoreOption) (*SQLStore, error) {
-	cfg := sqlStoreConfig{table: DefaultSQLTable}
+func New(db *sql.DB, dialect Dialect, opts ...Option) (*Store, error) {
+	cfg := config{table: DefaultTable}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -146,7 +148,7 @@ func NewSQLStore(db *sql.DB, dialect SQLDialect, opts ...SQLStoreOption) (*SQLSt
 	if err != nil {
 		return nil, err
 	}
-	s := &SQLStore{db: db, dialect: dialect}
+	s := &Store{db: db, dialect: dialect}
 	s.buildStatements(schema, table)
 	return s, nil
 }
@@ -187,7 +189,7 @@ func validSQLIdent(s string) bool {
 	return true
 }
 
-func (s *SQLStore) buildStatements(schema, table string) {
+func (s *Store) buildStatements(schema, table string) {
 	d := s.dialect
 	qualify := func(name string) string {
 		if schema != "" {
@@ -209,7 +211,7 @@ func (s *SQLStore) buildStatements(schema, table string) {
 		case d == SQLite:
 			typ = "TEXT"
 		case c == "object_id" || c == "subject_id":
-			typ = "VARBINARY(" + strconv.Itoa(maxIDLength) + ")"
+			typ = "VARBINARY(" + strconv.Itoa(rebac.MaxIDLength) + ")"
 		default:
 			typ = "VARBINARY(64)"
 		}
@@ -220,7 +222,7 @@ func (s *SQLStore) buildStatements(schema, table string) {
 	case SQLite:
 		caveatName = "TEXT"
 	case MySQL:
-		caveatName, caveatContext = "VARBINARY(64)", "VARBINARY("+strconv.Itoa(maxContextLength)+")"
+		caveatName, caveatContext = "VARBINARY(64)", "VARBINARY("+strconv.Itoa(rebac.MaxCaveatContextLength)+")"
 	}
 	defs = append(defs, "caveat_name "+caveatName+" NOT NULL", "caveat_context "+caveatContext+" NOT NULL")
 	defs = append(defs, "created_rev BIGINT NOT NULL", "deleted_rev BIGINT NOT NULL", "PRIMARY KEY ("+cols+", deleted_rev)")
@@ -299,12 +301,12 @@ func (s *SQLStore) buildStatements(schema, table string) {
 // with a migration tool. The tuple table's primary key starts with the
 // tuple columns; secondary indexes serve reverse (subject) lookups and
 // Changes.
-func (s *SQLStore) CreateTableStatements() []string {
+func (s *Store) CreateTableStatements() []string {
 	return slices.Clone(s.createSQL)
 }
 
 // CreateTable creates the tables and indexes if they do not exist.
-func (s *SQLStore) CreateTable(ctx context.Context) error {
+func (s *Store) CreateTable(ctx context.Context) error {
 	for _, q := range s.createSQL {
 		if _, err := s.db.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("rebac: creating table %s: %w", s.table, err)
@@ -316,9 +318,9 @@ func (s *SQLStore) CreateTable(ctx context.Context) error {
 // Write atomically deletes and then adds tuples in one transaction.
 // Tuples to add must be valid; tuples to delete need not be, so that
 // invalid rows written by other means can be removed.
-func (s *SQLStore) Write(ctx context.Context, writes, deletes []Tuple) (Revision, error) {
+func (s *Store) Write(ctx context.Context, writes, deletes []rebac.Tuple) (rebac.Revision, error) {
 	for _, t := range writes {
-		if err := t.validate(); err != nil {
+		if err := t.Validate(); err != nil {
 			return 0, err
 		}
 	}
@@ -338,7 +340,7 @@ func (s *SQLStore) Write(ctx context.Context, writes, deletes []Tuple) (Revision
 	if err := tx.QueryRowContext(ctx, s.headSQL).Scan(&rev); err != nil {
 		return 0, fmt.Errorf("rebac: reading revision: %w", err)
 	}
-	var adds, dels []Tuple
+	var adds, dels []rebac.Tuple
 	for _, nc := range netChanges(writes, deletes) {
 		if nc.present {
 			adds = append(adds, nc.t)
@@ -346,17 +348,17 @@ func (s *SQLStore) Write(ctx context.Context, writes, deletes []Tuple) (Revision
 			dels = append(dels, nc.t)
 		}
 	}
-	if err := execEach(ctx, tx, s.deleteSQL, dels, func(t Tuple) []any {
+	if err := execEach(ctx, tx, s.deleteSQL, dels, func(t rebac.Tuple) []any {
 		return append(append([]any{rev}, tupleArgs(t)...), int64(sqlLive))
 	}); err != nil {
 		return 0, fmt.Errorf("rebac: deleting tuple: %w", err)
 	}
-	if err := execEach(ctx, tx, s.replaceSQL, adds, func(t Tuple) []any {
+	if err := execEach(ctx, tx, s.replaceSQL, adds, func(t rebac.Tuple) []any {
 		return append(append([]any{rev}, tupleArgs(t)...), int64(sqlLive), t.Caveat.Name, t.Caveat.Context)
 	}); err != nil {
 		return 0, fmt.Errorf("rebac: replacing tuple: %w", err)
 	}
-	if err := execEach(ctx, tx, s.insertSQL, adds, func(t Tuple) []any {
+	if err := execEach(ctx, tx, s.insertSQL, adds, func(t rebac.Tuple) []any {
 		return append(tupleArgs(t), t.Caveat.Name, t.Caveat.Context, rev, int64(sqlLive))
 	}); err != nil {
 		return 0, fmt.Errorf("rebac: writing tuple: %w", err)
@@ -364,14 +366,14 @@ func (s *SQLStore) Write(ctx context.Context, writes, deletes []Tuple) (Revision
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("rebac: committing tuples: %w", err)
 	}
-	return Revision(rev), nil
+	return rebac.Revision(rev), nil
 }
 
-func execEach(ctx context.Context, tx *sql.Tx, query string, tuples []Tuple, args func(Tuple) []any) error {
+func execEach(ctx context.Context, tx *sql.Tx, query string, tuples []rebac.Tuple, args func(rebac.Tuple) []any) error {
 	if len(tuples) == 0 {
 		return nil
 	}
-	slices.SortFunc(tuples, func(a, b Tuple) int { return strings.Compare(a.String(), b.String()) })
+	slices.SortFunc(tuples, func(a, b rebac.Tuple) int { return strings.Compare(a.String(), b.String()) })
 	stmt, err := tx.PrepareContext(ctx, query)
 	if err != nil {
 		return err
@@ -386,22 +388,22 @@ func execEach(ctx context.Context, tx *sql.Tx, query string, tuples []Tuple, arg
 }
 
 // Revision returns the latest revision.
-func (s *SQLStore) Revision(ctx context.Context) (Revision, error) {
+func (s *Store) Revision(ctx context.Context) (rebac.Revision, error) {
 	var rev int64
 	if err := s.db.QueryRowContext(ctx, s.headSQL).Scan(&rev); err != nil {
 		return 0, fmt.Errorf("rebac: reading revision: %w", err)
 	}
-	return Revision(rev), nil
+	return rebac.Revision(rev), nil
 }
 
 // Read yields the tuples matching f at revision rev. The query runs when
 // iteration starts. It reads the latest revision and the pruning horizon in
 // the same statement, so a concurrent Prune cannot go unnoticed.
-func (s *SQLStore) Read(ctx context.Context, rev Revision, f Filter) iter.Seq2[Tuple, error] {
-	return func(yield func(Tuple, error) bool) {
+func (s *Store) Read(ctx context.Context, rev rebac.Revision, f rebac.Filter) iter.Seq2[rebac.Tuple, error] {
+	return func(yield func(rebac.Tuple, error) bool) {
 		tuples, err := s.read(ctx, rev, f)
 		if err != nil {
-			yield(Tuple{}, err)
+			yield(rebac.Tuple{}, err)
 			return
 		}
 		for _, t := range tuples {
@@ -412,9 +414,9 @@ func (s *SQLStore) Read(ctx context.Context, rev Revision, f Filter) iter.Seq2[T
 	}
 }
 
-func (s *SQLStore) read(ctx context.Context, rev Revision, f Filter) ([]Tuple, error) {
+func (s *Store) read(ctx context.Context, rev rebac.Revision, f rebac.Filter) ([]rebac.Tuple, error) {
 	if rev >= sqlLive {
-		return nil, fmt.Errorf("%w: %d", ErrFutureRevision, rev)
+		return nil, fmt.Errorf("%w: %d", rebac.ErrFutureRevision, rev)
 	}
 	var conds []string
 	var args []any
@@ -440,18 +442,18 @@ func (s *SQLStore) read(ctx context.Context, rev Revision, f Filter) ([]Tuple, e
 	add("t.deleted_rev > ", int64(rev))
 	query := s.readPrefixSQL + strings.Join(conds, " AND ") + " WHERE r.id = 1"
 
-	var out []Tuple
+	var out []rebac.Tuple
 	err := s.query(ctx, rev, query, args, func(cols []sql.NullString, _ ...int64) error {
-		t := Tuple{
-			Object:   Obj(cols[0].String, cols[1].String),
+		t := rebac.Tuple{
+			Object:   rebac.Obj(cols[0].String, cols[1].String),
 			Relation: cols[2].String,
-			Subject:  Subject{Object: Obj(cols[3].String, cols[4].String), Relation: cols[5].String},
-			Caveat:   TupleCaveat{Name: cols[6].String, Context: cols[7].String},
+			Subject:  rebac.Subject{Object: rebac.Obj(cols[3].String, cols[4].String), Relation: cols[5].String},
+			Caveat:   rebac.TupleCaveat{Name: cols[6].String, Context: cols[7].String},
 		}
-		if err := t.validate(); err != nil {
+		if err := t.Validate(); err != nil {
 			return fmt.Errorf("rebac: invalid tuple in %s: %w", s.table, err)
 		}
-		if f.matches(t) {
+		if matches(f, t) {
 			out = append(out, t)
 		}
 		return nil
@@ -462,7 +464,7 @@ func (s *SQLStore) read(ctx context.Context, rev Revision, f Filter) ([]Tuple, e
 // query runs a statement whose rows start with the latest revision and the
 // pruning horizon, checks that rev is available, and calls row for every
 // row that has tuple columns, with the trailing int64 columns, if any.
-func (s *SQLStore) query(ctx context.Context, rev Revision, query string, args []any, row func(cols []sql.NullString, extra ...int64) error) error {
+func (s *Store) query(ctx context.Context, rev rebac.Revision, query string, args []any, row func(cols []sql.NullString, extra ...int64) error) error {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("rebac: querying tuples: %w", err)
@@ -488,12 +490,12 @@ func (s *SQLStore) query(ctx context.Context, rev Revision, query string, args [
 		}
 		if first {
 			first = false
-			head, horizon := Revision(*dest[0].(*int64)), Revision(*dest[1].(*int64))
+			head, horizon := rebac.Revision(*dest[0].(*int64)), rebac.Revision(*dest[1].(*int64))
 			switch {
 			case rev > head:
-				return fmt.Errorf("%w: %d is after %d", ErrFutureRevision, rev, head)
+				return fmt.Errorf("%w: %d is after %d", rebac.ErrFutureRevision, rev, head)
 			case rev < horizon:
-				return fmt.Errorf("%w: %d is before %d", ErrRevisionExpired, rev, horizon)
+				return fmt.Errorf("%w: %d is before %d", rebac.ErrRevisionExpired, rev, horizon)
 			}
 		}
 		if !cols[0].Valid {
@@ -518,11 +520,11 @@ func (s *SQLStore) query(ctx context.Context, rev Revision, query string, args [
 
 // Changes yields the changes made after revision after. It loads them all
 // before yielding the first.
-func (s *SQLStore) Changes(ctx context.Context, after Revision) iter.Seq2[Change, error] {
-	return func(yield func(Change, error) bool) {
+func (s *Store) Changes(ctx context.Context, after rebac.Revision) iter.Seq2[rebac.Change, error] {
+	return func(yield func(rebac.Change, error) bool) {
 		changes, err := s.changes(ctx, after)
 		if err != nil {
-			yield(Change{}, err)
+			yield(rebac.Change{}, err)
 			return
 		}
 		for _, c := range changes {
@@ -533,27 +535,27 @@ func (s *SQLStore) Changes(ctx context.Context, after Revision) iter.Seq2[Change
 	}
 }
 
-func (s *SQLStore) changes(ctx context.Context, after Revision) ([]Change, error) {
+func (s *Store) changes(ctx context.Context, after rebac.Revision) ([]rebac.Change, error) {
 	if after >= sqlLive {
-		return nil, fmt.Errorf("%w: %d", ErrFutureRevision, after)
+		return nil, fmt.Errorf("%w: %d", rebac.ErrFutureRevision, after)
 	}
-	var out []Change
+	var out []rebac.Change
 	args := []any{int64(after), int64(after), int64(sqlLive)}
 	err := s.query(ctx, after, s.changeSQL, args, func(cols []sql.NullString, revs ...int64) error {
-		t := Tuple{
-			Object:   Obj(cols[0].String, cols[1].String),
+		t := rebac.Tuple{
+			Object:   rebac.Obj(cols[0].String, cols[1].String),
 			Relation: cols[2].String,
-			Subject:  Subject{Object: Obj(cols[3].String, cols[4].String), Relation: cols[5].String},
-			Caveat:   TupleCaveat{Name: cols[6].String, Context: cols[7].String},
+			Subject:  rebac.Subject{Object: rebac.Obj(cols[3].String, cols[4].String), Relation: cols[5].String},
+			Caveat:   rebac.TupleCaveat{Name: cols[6].String, Context: cols[7].String},
 		}
-		if err := t.validate(); err != nil {
+		if err := t.Validate(); err != nil {
 			return fmt.Errorf("rebac: invalid tuple in %s: %w", s.table, err)
 		}
-		if created := Revision(revs[0]); created > after {
-			out = append(out, Change{created, ChangeWrite, t})
+		if created := rebac.Revision(revs[0]); created > after {
+			out = append(out, rebac.Change{Revision: created, Op: rebac.ChangeWrite, Tuple: t})
 		}
-		if deleted := revs[1]; deleted < sqlLive && Revision(deleted) > after {
-			out = append(out, Change{Revision(deleted), ChangeDelete, t})
+		if deleted := revs[1]; deleted < sqlLive && rebac.Revision(deleted) > after {
+			out = append(out, rebac.Change{Revision: rebac.Revision(deleted), Op: rebac.ChangeDelete, Tuple: t})
 		}
 		return nil
 	})
@@ -563,11 +565,11 @@ func (s *SQLStore) changes(ctx context.Context, after Revision) ([]Change, error
 
 // Prune deletes the rows of tuples deleted at or before revision before.
 // Afterwards, reading at an earlier revision or asking for changes after
-// one fails with ErrRevisionExpired. Queries in progress at such a revision
+// one fails with rebac.ErrRevisionExpired. Queries in progress at such a revision
 // fail too, so leave a margin for them.
-func (s *SQLStore) Prune(ctx context.Context, before Revision) error {
+func (s *Store) Prune(ctx context.Context, before rebac.Revision) error {
 	if before >= sqlLive {
-		return fmt.Errorf("%w: %d", ErrFutureRevision, before)
+		return fmt.Errorf("%w: %d", rebac.ErrFutureRevision, before)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -582,7 +584,7 @@ func (s *SQLStore) Prune(ctx context.Context, before Revision) error {
 		return fmt.Errorf("rebac: reading revision: %w", err)
 	}
 	if int64(before) > head {
-		return fmt.Errorf("%w: %d is after %d", ErrFutureRevision, before, head)
+		return fmt.Errorf("%w: %d is after %d", rebac.ErrFutureRevision, before, head)
 	}
 	if _, err := tx.ExecContext(ctx, s.pruneSQL, int64(before)); err != nil {
 		return fmt.Errorf("rebac: pruning: %w", err)
@@ -591,4 +593,49 @@ func (s *SQLStore) Prune(ctx context.Context, before Revision) error {
 		return fmt.Errorf("rebac: pruning: %w", err)
 	}
 	return nil
+}
+
+var _ rebac.TupleStore = (*Store)(nil)
+
+type tupleKey struct {
+	object   rebac.Object
+	relation string
+	subject  rebac.Subject
+}
+
+type netChange struct {
+	t       rebac.Tuple
+	present bool
+}
+
+func netChanges(writes, deletes []rebac.Tuple) map[tupleKey]netChange {
+	out := make(map[tupleKey]netChange, len(writes)+len(deletes))
+	for _, t := range deletes {
+		out[tupleKey{t.Object, t.Relation, t.Subject}] = netChange{t, false}
+	}
+	for _, t := range writes {
+		out[tupleKey{t.Object, t.Relation, t.Subject}] = netChange{t, true}
+	}
+	return out
+}
+
+func matches(f rebac.Filter, t rebac.Tuple) bool {
+	return (f.ObjectType == "" || f.ObjectType == t.Object.Type) &&
+		(f.ObjectID == "" || f.ObjectID == t.Object.ID) &&
+		(f.Relation == "" || f.Relation == t.Relation) &&
+		(f.Subject == nil || *f.Subject == t.Subject)
+}
+
+func compareChanges(a, b rebac.Change) int {
+	switch {
+	case a.Revision < b.Revision:
+		return -1
+	case a.Revision > b.Revision:
+		return 1
+	case a.Op != b.Op && a.Op == rebac.ChangeDelete:
+		return -1
+	case a.Op != b.Op:
+		return 1
+	}
+	return strings.Compare(a.Tuple.String(), b.Tuple.String())
 }

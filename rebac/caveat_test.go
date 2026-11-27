@@ -285,7 +285,7 @@ func TestCaveatContextLength(t *testing.T) {
 	e := caveatEngine(t)
 	ctx := context.Background()
 	context := func(ip string) string { return `{"ip":"` + ip + `"}` }
-	pad := strings.Repeat("<", maxContextLength-len(context("")))
+	pad := strings.Repeat("<", MaxCaveatContextLength-len(context("")))
 	for _, tc := range []struct {
 		context string
 		ok      bool
@@ -429,7 +429,7 @@ func FuzzCaveatContext(f *testing.F) {
 				continue
 			}
 			again, err := def.canonical(c)
-			if err != nil || again != c || len(c) > maxContextLength {
+			if err != nil || again != c || len(c) > MaxCaveatContextLength {
 				t.Fatalf("%s: canonical(%q) = %q, whose canonical form is %q, %v", name, context, c, again, err)
 			}
 		}

@@ -133,7 +133,7 @@ func (c *CaveatDef) decode(context string) (map[string]any, error) {
 
 // canonical returns context in canonical form: compact, with sorted keys
 // and no escaping beyond what JSON requires. Only that form is bounded by
-// maxContextLength, since escaping can make it longer than the input.
+// MaxCaveatContextLength, since escaping can make it longer than the input.
 func (c *CaveatDef) canonical(context string) (string, error) {
 	vals, err := c.decode(context)
 	if err != nil || len(vals) == 0 {
@@ -157,8 +157,8 @@ func (c *CaveatDef) canonical(context string) (string, error) {
 		return "", err
 	}
 	out := strings.TrimSuffix(b.String(), "\n")
-	if len(out) > maxContextLength {
-		return "", fmt.Errorf("canonical form is %d bytes, longer than %d", len(out), maxContextLength)
+	if len(out) > MaxCaveatContextLength {
+		return "", fmt.Errorf("canonical form is %d bytes, longer than %d", len(out), MaxCaveatContextLength)
 	}
 	return out, nil
 }
