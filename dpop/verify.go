@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/internal/observe"
 	"github.com/tohshi/authent/jwt"
 )
 
@@ -222,8 +223,17 @@ func (v *Verifier) Challenge(err error) string {
 // Authenticator authenticates requests to a resource server that carry a
 // DPoP-bound access token (RFC 9449 §7). It is safe for concurrent use.
 type Authenticator struct {
-	tokens TokenVerifier
-	proofs *Verifier
+	tokens   TokenVerifier
+	proofs   *Verifier
+	observer authent.Observer
+}
+
+// AuthenticatorOption configures an Authenticator.
+type AuthenticatorOption func(*Authenticator)
+
+// WithObserver sends an Event for every Authenticate call to o.
+func WithObserver(o authent.Observer) AuthenticatorOption {
+	return func(a *Authenticator) { a.observer = o }
 }
 
 // NewAuthenticator returns an Authenticator. tokens must accept tokens
@@ -232,11 +242,15 @@ type Authenticator struct {
 // jwt.ErrSenderConstrained. Do not give a *jwt.Verifier a
 // jwt.WithReplayCache: the token is recorded before the proof is checked,
 // so a stolen token sent with a bad proof would lock out its holder.
-func NewAuthenticator(tokens TokenVerifier, proofs *Verifier) (*Authenticator, error) {
+func NewAuthenticator(tokens TokenVerifier, proofs *Verifier, opts ...AuthenticatorOption) (*Authenticator, error) {
 	if tokens == nil || proofs == nil {
 		return nil, errors.New("dpop: nil verifier")
 	}
-	return &Authenticator{tokens: tokens, proofs: proofs}, nil
+	a := &Authenticator{tokens: tokens, proofs: proofs}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a, nil
 }
 
 // Authenticate verifies the access token in r, which must be bound to a
@@ -244,6 +258,13 @@ func NewAuthenticator(tokens TokenVerifier, proofs *Verifier) (*Authenticator, e
 // that key and carry the token's hash. Extract the token from the
 // Authorization header with AccessToken.
 func (a *Authenticator) Authenticate(ctx context.Context, r Request) (authent.Principal, error) {
+	start := observe.Start(a.observer)
+	p, err := a.authenticate(ctx, r)
+	observe.Done(ctx, a.observer, authent.KindAuthentication, authent.MethodDPoP, start, p.Subject, err)
+	return p, err
+}
+
+func (a *Authenticator) authenticate(ctx context.Context, r Request) (authent.Principal, error) {
 	if r.AccessToken == "" {
 		return authent.Principal{}, ErrNoToken
 	}
@@ -261,4 +282,15 @@ func (a *Authenticator) Authenticate(ctx context.Context, r Request) (authent.Pr
 		return authent.Principal{}, err
 	}
 	return jwt.PrincipalFromClaims(claims, authent.MethodDPoP)
+}
+
+func init() {
+	observe.Register(map[error]authent.Reason{
+		ErrInvalidProof:  authent.ReasonInvalidProof,
+		ErrReplayed:      authent.ReasonReplayed,
+		ErrUseNonce:      authent.ReasonNonceRequired,
+		ErrKeyBinding:    authent.ReasonKeyMismatch,
+		ErrNoToken:       authent.ReasonNoCredentials,
+		ErrInactiveToken: authent.ReasonInactive,
+	})
 }

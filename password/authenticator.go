@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/internal/observe"
 )
 
 var (
@@ -48,6 +49,7 @@ type Authenticator struct {
 	hasher    *Hasher
 	dummyHash string
 	now       func() time.Time
+	observer  authent.Observer
 }
 
 // AuthenticatorOption configures an Authenticator.
@@ -56,6 +58,13 @@ type AuthenticatorOption func(*Authenticator)
 // WithClock overrides the clock used for Principal.AuthTime.
 func WithClock(now func() time.Time) AuthenticatorOption {
 	return func(a *Authenticator) { a.now = now }
+}
+
+// WithObserver sends an Event for every Authenticate call to o. A login
+// for an unknown user has the reason authent.ReasonUnknownUser; the
+// username is never included, since users type passwords into it.
+func WithObserver(o authent.Observer) AuthenticatorOption {
+	return func(a *Authenticator) { a.observer = o }
 }
 
 // NewAuthenticator returns an Authenticator backed by store.
@@ -78,11 +87,25 @@ func NewAuthenticator(store CredentialStore, hasher *Hasher, opts ...Authenticat
 // Other errors, such as store failures, are returned as is and do not wrap
 // authent.ErrUnauthenticated.
 func (a *Authenticator) Authenticate(ctx context.Context, username, password string) (authent.Principal, error) {
+	start := observe.Start(a.observer)
+	p, err := a.authenticate(ctx, username, password)
+	observe.Done(ctx, a.observer, authent.KindAuthentication, authent.MethodPassword, start, p.Subject, err)
+	if err == errUnknownUser {
+		err = ErrInvalidCredentials
+	}
+	return p, err
+}
+
+// errUnknownUser is seen only by observers. Callers get
+// ErrInvalidCredentials instead, as for a wrong password.
+var errUnknownUser = fmt.Errorf("%w: unknown user", ErrInvalidCredentials)
+
+func (a *Authenticator) authenticate(ctx context.Context, username, password string) (authent.Principal, error) {
 	cred, err := a.store.LookupCredential(ctx, username)
 	switch {
 	case errors.Is(err, ErrUserNotFound):
 		_ = a.hasher.Verify(password, a.dummyHash)
-		return authent.Principal{}, ErrInvalidCredentials
+		return authent.Principal{}, errUnknownUser
 	case err != nil:
 		return authent.Principal{}, fmt.Errorf("password: looking up credential: %w", err)
 	}
@@ -118,4 +141,11 @@ func (a *Authenticator) rehashIfNeeded(ctx context.Context, subject string, stor
 		return fmt.Errorf("password: upgrading hash: %w", err)
 	}
 	return nil
+}
+
+func init() {
+	observe.Register(map[error]authent.Reason{
+		ErrInvalidCredentials: authent.ReasonInvalidCredentials,
+		errUnknownUser:        authent.ReasonUnknownUser,
+	})
 }

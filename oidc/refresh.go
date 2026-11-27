@@ -9,6 +9,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/internal/observe"
 	"github.com/tohshi/authent/jwt"
 )
 
@@ -35,6 +36,13 @@ var ErrRefreshRejected = fmt.Errorf("oidc: refresh rejected: %w", authent.ErrUna
 // errors and other statuses, such as 408, 429 or 5xx, do not wrap
 // authent.ErrUnauthenticated.
 func (c *Client) Refresh(ctx context.Context, prev *Result) (*Result, error) {
+	start := observe.Start(c.observer)
+	res, err := c.refresh(ctx, prev)
+	c.observeResult(ctx, start, res, err)
+	return res, err
+}
+
+func (c *Client) refresh(ctx context.Context, prev *Result) (*Result, error) {
 	if prev == nil || prev.Token == nil || prev.Token.RefreshToken == "" {
 		return nil, errors.New("oidc: refresh: no refresh token")
 	}

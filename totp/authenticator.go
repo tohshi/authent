@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/internal/observe"
 )
 
 var (
@@ -54,13 +55,19 @@ type Store interface {
 
 // Authenticator verifies TOTP codes and rejects reused ones.
 type Authenticator struct {
-	store Store
-	skew  uint
-	now   func() time.Time
+	store    Store
+	skew     uint
+	now      func() time.Time
+	observer authent.Observer
 }
 
 // AuthenticatorOption configures an Authenticator.
 type AuthenticatorOption func(*Authenticator)
+
+// WithObserver sends an Event for every Authenticate call to o.
+func WithObserver(o authent.Observer) AuthenticatorOption {
+	return func(a *Authenticator) { a.observer = o }
+}
 
 // WithSkew sets how many time steps before and after the current one are
 // accepted. The default is DefaultSkew and the maximum is MaxSkew.
@@ -91,6 +98,13 @@ func NewAuthenticator(store Store, opts ...AuthenticatorOption) (*Authenticator,
 // ErrNotEnrolled if the subject has no key. Other errors, such as store
 // failures, do not wrap authent.ErrUnauthenticated.
 func (a *Authenticator) Authenticate(ctx context.Context, subject, code string) (authent.Principal, error) {
+	start := observe.Start(a.observer)
+	p, err := a.authenticate(ctx, subject, code)
+	observe.Done(ctx, a.observer, authent.KindAuthentication, authent.MethodTOTP, start, p.Subject, err)
+	return p, err
+}
+
+func (a *Authenticator) authenticate(ctx context.Context, subject, code string) (authent.Principal, error) {
 	cred, err := a.store.LookupCredential(ctx, subject)
 	switch {
 	case errors.Is(err, ErrNotEnrolled):
@@ -134,4 +148,13 @@ func (a *Authenticator) Authenticate(ctx context.Context, subject, code string) 
 		Method:   authent.MethodTOTP,
 		AuthTime: now,
 	}, nil
+}
+
+func init() {
+	observe.Register(map[error]authent.Reason{
+		ErrInvalidCode:         authent.ReasonInvalidCredentials,
+		ErrReplay:              authent.ReasonReplayed,
+		ErrNotEnrolled:         authent.ReasonNotEnrolled,
+		ErrInvalidRecoveryCode: authent.ReasonInvalidCredentials,
+	})
 }

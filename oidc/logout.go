@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/internal/observe"
 	"github.com/tohshi/authent/jwt"
 )
 
@@ -131,6 +132,19 @@ func (c *Client) FrontChannelLogout(query url.Values) (*Logout, error) {
 // authent.ErrUnauthenticated. Errors from the key set or the replay cache
 // do not.
 func (c *Client) BackChannelLogout(ctx context.Context, logoutToken string) (*Logout, error) {
+	start := observe.Start(c.observer)
+	l, err := c.backChannelLogout(ctx, logoutToken)
+	if c.observer != nil {
+		var sub string
+		if l != nil {
+			sub = l.Subject
+		}
+		observe.Done(ctx, c.observer, authent.KindTokenVerification, authent.MethodOIDC, start, sub, err)
+	}
+	return l, err
+}
+
+func (c *Client) backChannelLogout(ctx context.Context, logoutToken string) (*Logout, error) {
 	claims, err := c.logoutVerifier.Verify(ctx, logoutToken)
 	if err != nil {
 		return nil, err

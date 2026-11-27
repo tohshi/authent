@@ -23,11 +23,21 @@ import (
 	"time"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/internal/observe"
 )
 
 // ErrInvalidSession is returned when a token is malformed, unknown or
 // expired. It wraps authent.ErrUnauthenticated.
 var ErrInvalidSession = fmt.Errorf("session: invalid session: %w", authent.ErrUnauthenticated)
+
+var errMalformedToken = fmt.Errorf("%w: malformed token", ErrInvalidSession)
+
+func init() {
+	observe.Register(map[error]authent.Reason{
+		ErrInvalidSession: authent.ReasonInvalidCredentials,
+		errMalformedToken: authent.ReasonMalformed,
+	})
+}
 
 // Factor is an authentication method the session's subject passed, and
 // when it last did.
@@ -158,10 +168,14 @@ type Manager struct {
 	absoluteTimeout time.Duration
 	touchInterval   time.Duration
 	now             func() time.Time
+	observer        authent.Observer
 }
 
 // Option configures a Manager.
 type Option func(*Manager)
+
+// WithObserver sends an Event for every Get call to o.
+func WithObserver(o authent.Observer) Option { return func(m *Manager) { m.observer = o } }
 
 // WithIdleTimeout sets how long a session survives without activity.
 // The default is 30 minutes.
@@ -289,9 +303,22 @@ func (m *Manager) factor(p authent.Principal) Factor {
 // Get returns the session for token. It returns ErrInvalidSession if the
 // token is malformed, unknown, or past its idle or absolute timeout.
 func (m *Manager) Get(ctx context.Context, token string) (*Session, error) {
+	start := observe.Start(m.observer)
+	s, err := m.get(ctx, token)
+	if m.observer != nil {
+		var sub string
+		if s != nil {
+			sub = s.Subject()
+		}
+		observe.Done(ctx, m.observer, authent.KindAuthentication, authent.MethodSession, start, sub, err)
+	}
+	return s, err
+}
+
+func (m *Manager) get(ctx context.Context, token string) (*Session, error) {
 	key, ok := storeKey(token)
 	if !ok {
-		return nil, ErrInvalidSession
+		return nil, errMalformedToken
 	}
 	s, err := m.load(ctx, key)
 	if err != nil {

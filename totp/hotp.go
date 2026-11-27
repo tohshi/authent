@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/internal/observe"
 )
 
 const (
@@ -54,10 +55,17 @@ type HOTPAuthenticator struct {
 	store     HOTPStore
 	lookAhead uint
 	resync    uint
+	observer  authent.Observer
 }
 
 // HOTPOption configures a HOTPAuthenticator.
 type HOTPOption func(*HOTPAuthenticator)
+
+// WithHOTPObserver sends an Event for every Authenticate and Resync call
+// to o.
+func WithHOTPObserver(o authent.Observer) HOTPOption {
+	return func(a *HOTPAuthenticator) { a.observer = o }
+}
 
 // WithLookAhead sets how many counter values, starting at the expected
 // one, are accepted. The default is DefaultLookAhead and the maximum is
@@ -93,7 +101,10 @@ func NewHOTPAuthenticator(store HOTPStore, opts ...HOTPOption) (*HOTPAuthenticat
 // ErrNotEnrolled if the subject has no key. Other errors, such as store
 // failures, do not wrap authent.ErrUnauthenticated.
 func (a *HOTPAuthenticator) Authenticate(ctx context.Context, subject, code string) (authent.Principal, error) {
-	return a.authenticate(ctx, subject, a.lookAhead, code)
+	start := observe.Start(a.observer)
+	p, err := a.authenticate(ctx, subject, a.lookAhead, code)
+	observe.Done(ctx, a.observer, authent.KindAuthentication, authent.MethodHOTP, start, p.Subject, err)
+	return p, err
 }
 
 // Resync resynchronizes a token whose counter ran ahead of the look-ahead
@@ -102,7 +113,10 @@ func (a *HOTPAuthenticator) Authenticate(ctx context.Context, subject, code stri
 // counter moves past them and the subject is authenticated. Errors are as
 // for Authenticate.
 func (a *HOTPAuthenticator) Resync(ctx context.Context, subject, code1, code2 string) (authent.Principal, error) {
-	return a.authenticate(ctx, subject, a.resync, code1, code2)
+	start := observe.Start(a.observer)
+	p, err := a.authenticate(ctx, subject, a.resync, code1, code2)
+	observe.Done(ctx, a.observer, authent.KindAuthentication, authent.MethodHOTP, start, p.Subject, err)
+	return p, err
 }
 
 func (a *HOTPAuthenticator) authenticate(ctx context.Context, subject string, window uint, codes ...string) (authent.Principal, error) {

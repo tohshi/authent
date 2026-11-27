@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/internal/observe"
 	"github.com/tohshi/authent/rebac"
 )
 
@@ -22,7 +23,13 @@ func RequirePermission(e *rebac.Engine, permission, subjectType string, object f
 	c := newConfig(nil, opts)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if err := allowed(r, e, permission, subjectType, object); err != nil {
+			start := observe.Start(c.observer)
+			err := allowed(r, e, permission, subjectType, object)
+			if c.observer != nil {
+				p, _ := authent.FromContext(r.Context())
+				c.observe(r, start, p, err)
+			}
+			if err != nil {
 				c.onError(w, r, err)
 				return
 			}

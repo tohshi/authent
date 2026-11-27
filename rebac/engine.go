@@ -7,6 +7,9 @@ import (
 	"iter"
 	"slices"
 	"time"
+
+	"github.com/tohshi/authent"
+	"github.com/tohshi/authent/internal/observe"
 )
 
 var (
@@ -31,6 +34,7 @@ type Engine struct {
 	concurrency    int
 	watchInterval  time.Duration
 	cache          *checkCache
+	observer       authent.Observer
 }
 
 // Option configures an Engine.
@@ -38,6 +42,11 @@ type Option func(*Engine)
 
 // WithMaxDepth limits the recursion depth of a check. The default is 50.
 func WithMaxDepth(n int) Option { return func(e *Engine) { e.maxDepth = n } }
+
+// WithObserver sends an Event of kind authent.KindAuthorization to o for
+// every check of Check and CheckBulk. A conditional check, one that fails
+// with ErrMissingContext, has the Decision authent.DecisionConditional.
+func WithObserver(o authent.Observer) Option { return func(e *Engine) { e.observer = o } }
 
 // WithMaxEvaluations limits the number of relation evaluations per check.
 // The count is shared by all branches of the check, including those
@@ -244,14 +253,41 @@ func (e *Engine) CheckBulk(ctx context.Context, items []CheckItem, opts ...Query
 }
 
 func (q *request) check(it CheckItem) CheckResult {
+	start := observe.Start(q.e.observer)
+	res, evals := q.decide(it)
+	if q.e.observer != nil {
+		ev := authent.Event{
+			Kind:        authent.KindAuthorization,
+			Outcome:     authent.OutcomeSuccess,
+			ObjectType:  it.Object.Type,
+			Relation:    it.Permission,
+			Evaluations: evals,
+			Duration:    time.Since(start),
+		}
+		switch {
+		case res.Err == nil && res.Allowed:
+			ev.Decision = authent.DecisionAllowed
+		case res.Err == nil:
+			ev.Decision = authent.DecisionDenied
+		case errors.Is(res.Err, ErrMissingContext):
+			ev.Decision = authent.DecisionConditional
+		default:
+			ev.Outcome, ev.Reason = authent.OutcomeError, observe.ReasonOf(res.Err)
+		}
+		observe.Emit(q.ctx, q.e.observer, ev)
+	}
+	return res
+}
+
+func (q *request) decide(it CheckItem) (res CheckResult, evals int) {
 	if err := validateObject(it.Object, false); err != nil {
-		return CheckResult{Err: err}
+		return CheckResult{Err: err}, 0
 	}
 	if err := validateSubject(it.Subject, false); err != nil {
-		return CheckResult{Err: err}
+		return CheckResult{Err: err}, 0
 	}
 	if _, ok := q.e.schema.relation(it.Object.Type, it.Permission); !ok {
-		return CheckResult{Err: fmt.Errorf("%w: %s#%s", ErrUnknownRelation, it.Object.Type, it.Permission)}
+		return CheckResult{Err: fmt.Errorf("%w: %s#%s", ErrUnknownRelation, it.Object.Type, it.Permission)}, 0
 	}
 	// A result that depends on the request's caveat context is not
 	// reusable by other requests.
@@ -261,27 +297,39 @@ func (q *request) check(it CheckItem) CheckResult {
 	}
 	rev, err := q.revision()
 	if err != nil {
-		return CheckResult{Err: err}
+		return CheckResult{Err: err}, 0
 	}
 	if cache != nil {
 		if allowed, ok := cache.get(it, rev); ok {
-			return CheckResult{Allowed: allowed}
+			return CheckResult{Allowed: allowed}, 0
 		}
 	}
 
 	r := &run{request: q, subject: it.Subject}
-	res := r.check(q.ctx, nil, it.Object, it.Permission)
+	f := r.check(q.ctx, nil, it.Object, it.Permission).f
+	evals = int(r.evals.Load())
 	if r.exceeded() {
-		return CheckResult{Err: r.errTooComplex()}
+		return CheckResult{Err: r.errTooComplex()}, evals
 	}
-	switch res.f.op {
+	switch f.op {
 	case opTrue, opFalse:
 		if cache != nil {
-			cache.put(it, rev, res.f.op == opTrue)
+			cache.put(it, rev, f.op == opTrue)
 		}
-		return CheckResult{Allowed: res.f.op == opTrue}
+		return CheckResult{Allowed: f.op == opTrue}, evals
 	case opUnknown:
-		return CheckResult{Err: res.f.why}
+		return CheckResult{Err: f.why}, evals
 	}
-	return CheckResult{}
+	return CheckResult{}, evals
+}
+
+func init() {
+	observe.Register(map[error]authent.Reason{
+		ErrUnknownRelation: authent.ReasonUnknownRelation,
+		ErrTooComplex:      authent.ReasonTooComplex,
+		ErrExclusionCycle:  authent.ReasonCycle,
+		ErrFutureRevision:  authent.ReasonFutureRevision,
+		ErrRevisionExpired: authent.ReasonRevisionExpired,
+		ErrInvalidTuple:    authent.ReasonInvalidInput,
+	})
 }
