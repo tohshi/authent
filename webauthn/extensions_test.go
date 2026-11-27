@@ -385,6 +385,14 @@ func TestExtensionOutputsNotRequested(t *testing.T) {
 	}
 }
 
+func TestChallengeWithExtensionListDoesNotDecode(t *testing.T) {
+	old := `{"ceremony":"webauthn.get","challenge":"AAAA","expiresAt":"2026-06-01T12:05:00Z","extensions":["prf"],"appid":"https://example.org"}`
+	var ch Challenge
+	if err := json.Unmarshal([]byte(old), &ch); err == nil {
+		t.Fatalf("decoded %+v", ch)
+	}
+}
+
 func ptr[T any](v T) *T { return &v }
 
 func FuzzClientExtensionOutputs(f *testing.F) {
