@@ -3,6 +3,7 @@
 *.out
 coverage.*
 *.prof
+__pycache__/
 
 # Editors and OS
 .idea/
