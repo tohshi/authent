@@ -6,7 +6,7 @@ replace github.com/tohshi/authent => ../
 
 require (
 	github.com/redis/go-redis/v9 v9.24.0
-	github.com/tohshi/authent v0.0.0-20261127045728-eded06a89c9f
+	github.com/tohshi/authent v0.0.1
 )
 
 require (
