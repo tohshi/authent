@@ -32,6 +32,8 @@ library, so changes are reviewed with correctness and safety first.
   from an independent implementation where they exist.
 - **Docs.** Update `README.md` and `FEATURES.md` when you change public
   behavior. All code, comments and docs are written in English.
+- **Release notes.** For a user-facing change, add a Changie fragment with a
+  short description of its effect. Internal-only changes do not need one.
 
 ## Development
 
@@ -115,6 +117,11 @@ git config commit.template .gitmessage
 - Pull requests are squash-merged, so the PR title and description become
   the commit message. Write them in the format above.
 - Make sure CI is green before requesting review.
+- For user-facing changes, install Changie with
+  `go install github.com/miniscruff/changie@v1.26.0` and run `changie new`.
+  Choose Added, Changed, Fixed, or Security. Commit the generated file in
+  `.changes/unreleased/` with the PR. Release versions are chosen separately
+  by the maintainer; the fragment does not need a version number.
 
 ## License
 

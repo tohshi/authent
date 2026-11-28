@@ -20,3 +20,5 @@ Security vulnerabilities must not be reported here. See SECURITY.md.
 - [ ] `gofmt -l .`, `go vet ./...` and `go test -race ./...` pass
 - [ ] No dependencies outside the standard library and `golang.org/x/*`
 - [ ] `README.md` / `FEATURES.md` updated if public behavior changed
+- [ ] User-facing changes have a Changie fragment (`changie new`), or this PR
+      only changes internal code, tests, or docs
